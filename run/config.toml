@@ -1,0 +1,11 @@
+network_dir = "network"
+network_listen_address = "0.0.0.0"
+network_libp2p_port = 1234
+network_target_peers = 3
+network_boot_nodes = []
+network_libp2p_nodes = []
+network_private = false
+
+rpc_listen_address = "127.0.0.1:5678"
+
+log_config_file = "log_config"
