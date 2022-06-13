@@ -9,8 +9,8 @@ mod processor;
 use crate::error;
 use futures::prelude::*;
 use network::{MessageId, NetworkGlobals, PeerId, PeerRequestId, PubsubMessage, Request, Response};
+use network::{RequestId, ServiceMessage};
 use processor::Processor;
-use shared_types::{RequestId, ServiceMessage};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -152,6 +152,9 @@ impl Router {
             Request::DataByHash(request) => {
                 self.processor.on_data_by_hash_request(peer_id, id, request)
             }
+            Request::GetChunks(request) => {
+                self.processor.on_get_chunks_request(peer_id, id, request);
+            }
         }
     }
 
@@ -166,6 +169,9 @@ impl Router {
             Response::DataByHash(data) => {
                 self.processor
                     .on_data_by_hash_response(peer_id, request_id, data);
+            }
+            Response::Chunks(data) => {
+                self.processor.on_chunks_response(peer_id, request_id, data);
             }
         }
     }

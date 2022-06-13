@@ -1,8 +1,6 @@
+#![allow(unused)]
+
 use ethereum_types::H256;
-use network::{
-    rpc::{GoodbyeReason, RPCResponseErrorCode},
-    PeerAction, PeerId, PeerRequestId, PubsubMessage, ReportSource, Request, Response,
-};
 use ssz::Encode;
 use ssz_derive::{Decode as DeriveDecode, Encode as DeriveEncode};
 use tiny_keccak::{Hasher, Keccak};
@@ -13,52 +11,19 @@ pub enum RequestId {
     Router,
 }
 
-/// Types of messages that the network service can receive.
-#[derive(Debug)]
-pub enum ServiceMessage {
-    /// Send an RPC request to the libp2p service.
-    SendRequest {
-        peer_id: PeerId,
-        request: Request,
-        request_id: RequestId,
-    },
-    /// Send a successful Response to the libp2p service.
-    SendResponse {
-        peer_id: PeerId,
-        response: Response,
-        id: PeerRequestId,
-    },
-    /// Send an error response to an RPC request.
-    SendErrorResponse {
-        peer_id: PeerId,
-        error: RPCResponseErrorCode,
-        reason: String,
-        id: PeerRequestId,
-    },
-    /// Publish a list of messages to the gossipsub protocol.
-    Publish { messages: Vec<PubsubMessage> },
-    /// Reports a peer to the peer manager for performing an action.
-    ReportPeer {
-        peer_id: PeerId,
-        action: PeerAction,
-        source: ReportSource,
-        msg: &'static str,
-    },
-    /// Disconnect an ban a peer, providing a reason.
-    GoodbyePeer {
-        peer_id: PeerId,
-        reason: GoodbyeReason,
-        source: ReportSource,
-    },
-}
-
 /// Placeholder types for transactions and chunks.
 pub type TransactionHash = H256;
+
 pub type DataRoot = H256;
+
 // Each chunk is 32 bytes.
 pub const CHUNK_SIZE: usize = 32;
+
 pub struct Chunk(pub [u8; CHUNK_SIZE]);
+
+#[derive(Clone, PartialEq, DeriveEncode, DeriveDecode)]
 pub struct ChunkProof {}
+
 #[derive(DeriveDecode, DeriveEncode)]
 pub struct Transaction {
     #[ssz(skip_serializing, skip_deserializing)]
@@ -84,24 +49,33 @@ impl Transaction {
     }
 }
 
-#[allow(unused)]
 pub struct ChunkWithProof {
     chunk: Chunk,
     proof: ChunkProof,
 }
-#[allow(unused)]
+
+#[derive(Clone, PartialEq, DeriveEncode, DeriveDecode)]
 pub struct ChunkArrayWithProof {
-    chunks: ChunkArray,
-    start_proof: ChunkProof,
-    end_proof: ChunkProof,
+    pub chunks: ChunkArray,
+    pub start_proof: ChunkProof,
+    pub end_proof: ChunkProof,
 }
-#[allow(unused)]
+
+impl std::fmt::Debug for ChunkArrayWithProof {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // TODO(thegaram): replace this with something more meaningful
+        f.write_str("ChunkArrayWithProof")
+    }
+}
+
+#[derive(Clone, PartialEq, DeriveEncode, DeriveDecode)]
 pub struct ChunkArray {
     // The length is exactly `(end_index - start_index) * CHUNK_SIZE`
     pub data: Vec<u8>,
     pub start_index: u32,
     pub end_index: u32,
 }
+
 impl ChunkArray {
     pub fn chunk_at(&self, index: u32) -> Option<Chunk> {
         if index >= self.end_index || index < self.start_index {
