@@ -5,10 +5,11 @@ use crate::log_store::{
 use crate::IonianKeyValueDB;
 use anyhow::{anyhow, bail};
 use kvdb_rocksdb::{Database, DatabaseConfig};
-use merkle_tree::Sha3Algorithm;
-use merkletree::merkle::{next_pow2, MerkleTree};
-use merkletree::proof::Proof;
-use merkletree::store::VecStore;
+use merkle_light::hash::{Algorithm, Hashable};
+use merkle_light::merkle::MerkleTree;
+use merkle_light::proof::Proof;
+use merkle_tree::RawLeafSha3Algorithm;
+use rayon::prelude::*;
 use shared_types::{
     Chunk, ChunkArray, ChunkArrayWithProof, ChunkProof, ChunkWithProof, DataRoot, Transaction,
     TransactionHash, CHUNK_SIZE,
@@ -17,7 +18,6 @@ use ssz::{Decode, DecodeError, Encode};
 use std::cmp;
 use std::path::Path;
 use std::sync::Arc;
-use typenum::U0;
 
 const COL_TX: u32 = 0;
 const COL_TX_HASH_INDEX: u32 = 1;
@@ -28,7 +28,10 @@ const COL_NUM: u32 = 4;
 const CHUNK_KEY_SIZE: usize = 8 + 4;
 const CHUNK_BATCH_SIZE: usize = 1024;
 
-pub type DataMerkleTree = MerkleTree<[u8; 32], Sha3Algorithm, VecStore<[u8; 32]>>;
+/// This represents the subtree of a chunk or the whole data merkle tree.
+pub type SubMerkleTree = MerkleTree<[u8; 32], RawLeafSha3Algorithm>;
+/// This can only be used to represent the top tree where the leaves are chunk subtree roots.
+pub type TopMerkleTree = MerkleTree<[u8; 32], RawLeafSha3Algorithm>;
 type DataProof = Proof<[u8; 32]>;
 
 macro_rules! try_option {
@@ -49,25 +52,25 @@ macro_rules! try_option {
 /// Here we only encode the top tree leaf data because we cannot build `VecStore` from raw bytes.
 /// If we want to save the whole tree, we'll need to save it as files using disk-related store,
 /// or fork the dependency to expose the VecStore initialization method.
-fn encode_merkle_tree(merkle_tree: &DataMerkleTree, actual_leafs: usize) -> Vec<u8> {
+fn encode_merkle_tree<A: Algorithm<[u8; 32]>>(merkle_tree: &MerkleTree<[u8; 32], A>) -> Vec<u8> {
+    let data = merkle_tree.as_slice();
     let mut data_bytes = Vec::new();
-    data_bytes.extend_from_slice(&(actual_leafs as u32).to_be_bytes());
-    // for h in &**merkle_tree.data().unwrap() {
-    for h in merkle_tree.read_range(0, actual_leafs).expect("checked") {
-        data_bytes.extend_from_slice(h.as_slice());
+    data_bytes.extend_from_slice(&(merkle_tree.leafs() as u32).to_be_bytes());
+    for leaf in &data[0..merkle_tree.leafs()] {
+        data_bytes.extend_from_slice(leaf.as_slice());
     }
     data_bytes
 }
 
-fn decode_merkle_tree(bytes: &[u8]) -> Result<DataMerkleTree> {
+fn decode_merkle_tree(bytes: &[u8]) -> Result<TopMerkleTree> {
     if bytes.len() < 4 {
         bail!(anyhow!(
             "Merkle tree encoding too short: len={}",
             bytes.len()
         ));
     }
-    let actual_leafs = u32::from_be_bytes(bytes[0..4].try_into().unwrap()) as usize;
-    let expected_len = 4 + 32 * actual_leafs;
+    let leaf_count = u32::from_be_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    let expected_len = 4 + 32 * leaf_count;
     if bytes.len() != expected_len {
         bail!(anyhow!(
             "Merkle tree encoding incorrect length: len={} expected={}",
@@ -75,30 +78,36 @@ fn decode_merkle_tree(bytes: &[u8]) -> Result<DataMerkleTree> {
             expected_len
         ));
     }
-    // DataMerkleTree::from_data_store(VecStore::<_>(tree), leafs)
-    //     .map_err(|e| Error::Custom(e.to_string()))
-    merkle_tree(&bytes[4..], 32, None)
+    let mut data: Vec<[u8; 32]> = vec![Default::default(); leaf_count];
+    for (i, leaf) in data.iter_mut().enumerate() {
+        let offset = 4 + i * 32;
+        leaf.copy_from_slice(&bytes[offset..offset + 32]);
+    }
+    Ok(TopMerkleTree::new(data))
 }
 
-/// This should be called with all input checked.
-/// FIXME: `merkletree` requires data to be exactly power of 2, so just fill empty data so far.
-pub fn merkle_tree(
-    leaf_data: &[u8],
-    element_size: usize,
-    depth: Option<usize>,
-) -> Result<DataMerkleTree> {
-    if leaf_data.len() % element_size != 0 {
+/// This should be called with input checked.
+pub fn sub_merkle_tree(leaf_data: &[u8]) -> Result<SubMerkleTree> {
+    if leaf_data.len() % CHUNK_SIZE != 0 {
         bail!(anyhow!("merkle_tree: unmatch data size"));
     }
-    let actual_leafs = leaf_data.len() / element_size;
-    // TODO: At least 2 leaves for now.
-    let leafs = match depth {
-        None => cmp::max(next_pow2(actual_leafs), 2),
-        Some(d) => 1usize << d,
-    };
-    let mut data: Vec<u8> = vec![0u8; leafs * element_size];
-    data[0..leaf_data.len()].copy_from_slice(leaf_data);
-    DataMerkleTree::from_byte_slice(&data)
+    let leaf_count = leaf_data.len() / CHUNK_SIZE;
+    let mut data: Vec<Chunk> = vec![Chunk([0; CHUNK_SIZE]); leaf_count];
+    for (i, chunk) in data.iter_mut().enumerate() {
+        let offset = i * CHUNK_SIZE;
+        chunk
+            .0
+            .copy_from_slice(&leaf_data[offset..offset + CHUNK_SIZE]);
+    }
+    Ok(SubMerkleTree::new(
+        data.into_par_iter()
+            .map(|e| {
+                let mut a = RawLeafSha3Algorithm::default();
+                e.hash(&mut a);
+                a.hash()
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
 
 #[allow(unused)]
@@ -134,7 +143,7 @@ impl SimpleLogStore {
         })
     }
 
-    fn get_top_tree(&self, tx_seq: u64) -> Result<Option<DataMerkleTree>> {
+    fn get_top_tree(&self, tx_seq: u64) -> Result<Option<TopMerkleTree>> {
         let tree_bytes = try_option!(self.kvdb.get(COL_TX_MERKLE, &tx_seq.to_be_bytes())?);
         Ok(Some(decode_merkle_tree(tree_bytes.as_slice())?))
     }
@@ -143,7 +152,7 @@ impl SimpleLogStore {
         &self,
         tx_seq: u64,
         batch_start_index: usize,
-    ) -> Result<Option<DataMerkleTree>> {
+    ) -> Result<Option<(ChunkArray, SubMerkleTree)>> {
         if batch_start_index % self.chunk_batch_size != 0 {
             bail!(Error::InvalidBatchBoundary);
         }
@@ -153,14 +162,15 @@ impl SimpleLogStore {
             batch_start_index,
             batch_end_index,
         )?);
-        Ok(Some(merkle_tree(&chunk_array.data, CHUNK_SIZE, Some(10))?))
+        let sub_tree = sub_merkle_tree(&chunk_array.data)?;
+        Ok(Some((chunk_array, sub_tree)))
     }
 
     fn get_subtree_proof(&self, tx_seq: u64, index: usize) -> Result<Option<DataProof>> {
         let batch_start_index = index / self.chunk_batch_size * self.chunk_batch_size;
-        let sub_tree = try_option!(self.get_sub_tree(tx_seq, batch_start_index)?);
+        let (_, sub_tree) = try_option!(self.get_sub_tree(tx_seq, batch_start_index)?);
         let offset = index % self.chunk_batch_size;
-        let sub_proof = sub_tree.gen_proof(offset)?;
+        let sub_proof = sub_tree.gen_proof(offset);
         Ok(Some(sub_proof))
     }
 }
@@ -315,9 +325,12 @@ impl LogStoreWrite for SimpleLogStore {
             )));
         }
         let tx = maybe_tx.unwrap();
+        if tx.size <= self.chunk_batch_size as u64 * CHUNK_SIZE as u64 {
+            // Only one batch, so there is no need for a top tree.
+            return Ok(());
+        }
         let chunk_index_end = (tx.size / CHUNK_SIZE as u64) as usize;
-        let mut chunk_batch_roots =
-            Vec::with_capacity((chunk_index_end / self.chunk_batch_size + 1) * 32);
+        let mut chunk_batch_roots = Vec::with_capacity(chunk_index_end / self.chunk_batch_size + 1);
         for (batch_start_index, batch_end_index) in
             batch_iter(0, chunk_index_end, self.chunk_batch_size)
         {
@@ -340,11 +353,11 @@ impl LogStoreWrite for SimpleLogStore {
                     chunks.data.len()
                 ));
             }
-            let merkle_tree = merkle_tree(&chunks.data, CHUNK_SIZE, Some(10))?;
+            let merkle_tree = sub_merkle_tree(&chunks.data)?;
             let merkle_root = merkle_tree.root();
-            chunk_batch_roots.extend_from_slice(&merkle_root);
+            chunk_batch_roots.push(merkle_root);
         }
-        let merkle_tree = merkle_tree(&chunk_batch_roots, 32, None)?;
+        let merkle_tree = TopMerkleTree::new(chunk_batch_roots);
         if merkle_tree.root() != tx.data_merkle_root.0 {
             // TODO: Delete all chunks?
             bail!(Error::Custom(format!(
@@ -356,7 +369,7 @@ impl LogStoreWrite for SimpleLogStore {
         self.kvdb.put(
             COL_TX_MERKLE,
             &tx_seq.to_be_bytes(),
-            &encode_merkle_tree(&merkle_tree, chunk_batch_roots.len() / 32),
+            &encode_merkle_tree(&merkle_tree),
         )?;
         // TODO: Mark the tx as completed.
         Ok(())
@@ -387,28 +400,25 @@ impl LogStoreRead for SimpleLogStore {
         tx_seq: u64,
         index: usize,
     ) -> Result<Option<ChunkWithProof>> {
-        let top_tree = try_option!(self.get_top_tree(tx_seq)?);
+        // TODO: It's possible to skip loading the tx in most cases. Optimize later.
         let batch_index = index / self.chunk_batch_size;
-        let top_proof = top_tree.gen_proof(batch_index)?;
-        let sub_tree = try_option!(self.get_sub_tree(tx_seq, batch_index * self.chunk_batch_size)?);
         let offset = index % self.chunk_batch_size;
-        let sub_proof = sub_tree.gen_proof(offset)?;
-        if top_proof.item() != sub_proof.root() {
-            bail!(Error::Custom(format!(
-                "top tree and sub tree mismatch: top_leaf={:?}, sub_root={:?}",
-                top_proof.item(),
-                sub_proof.root()
-            )));
-        }
-        let mut lemma = sub_proof.lemma().clone();
-        let mut path = sub_proof.path().clone();
-        assert!(lemma.pop().is_some());
-        lemma.extend_from_slice(&top_proof.lemma()[1..]);
-        path.extend_from_slice(top_proof.path());
-        let proof = Proof::new::<U0, U0>(None, lemma, path)?;
+        let (chunk_array, sub_tree) =
+            try_option!(self.get_sub_tree(tx_seq, batch_index * self.chunk_batch_size)?);
+        let sub_proof = sub_tree.gen_proof(offset);
+
+        let tx = try_option!(self.get_tx_by_seq_number(tx_seq)?);
+        let proof = if tx.size <= self.chunk_batch_size as u64 * CHUNK_SIZE as u64 {
+            // The total tx size is less than a batch, so there is no top tree.
+            ChunkProof::from_merkle_proof(&sub_proof)
+        } else {
+            let top_tree = try_option!(self.get_top_tree(tx_seq)?);
+            let top_proof = top_tree.gen_proof(batch_index);
+            chunk_proof(&top_proof, &sub_proof)?
+        };
         Ok(Some(ChunkWithProof {
-            chunk: Chunk(sub_tree.read_at(offset)?),
-            proof: ChunkProof::from_merkle_proof(&proof),
+            chunk: try_option!(chunk_array.chunk_at(index)),
+            proof,
         }))
     }
 
@@ -421,39 +431,59 @@ impl LogStoreRead for SimpleLogStore {
         if index_end <= index_start {
             bail!(Error::InvalidBatchBoundary);
         }
-        let top_tree = try_option!(self.get_top_tree(tx_seq)?);
-        let left_batch_index = index_start / self.chunk_batch_size;
-        let right_batch_index = (index_end - 1) / self.chunk_batch_size;
-        let (left_proof, right_proof) = if left_batch_index == right_batch_index {
-            let top_proof = top_tree.gen_proof(left_batch_index)?;
-            let sub_tree =
-                try_option!(self.get_sub_tree(tx_seq, left_batch_index * self.chunk_batch_size)?);
-            let left_offset = index_start % self.chunk_batch_size;
-            let left_sub_proof = sub_tree.gen_proof(left_offset)?;
-            let right_offset = (index_end - 1) % self.chunk_batch_size;
-            let right_sub_proof = sub_tree.gen_proof(right_offset)?;
-            (
-                chunk_proof(&top_proof, &left_sub_proof)?,
-                chunk_proof(&top_proof, &right_sub_proof)?,
-            )
+        let tx = try_option!(self.get_tx_by_seq_number(tx_seq)?);
+        if index_end as u64 * CHUNK_SIZE as u64 > tx.size {
+            bail!(Error::InvalidBatchBoundary);
+        }
+        if tx.size <= self.chunk_batch_size as u64 * CHUNK_SIZE as u64 {
+            // The total tx size is less than a batch, so there is no top tree.
+            let (chunk_array, sub_tree) = try_option!(self.get_sub_tree(tx_seq, 0)?);
+            let start_proof = ChunkProof::from_merkle_proof(&sub_tree.gen_proof(index_start));
+            let end_proof = ChunkProof::from_merkle_proof(&sub_tree.gen_proof(index_end - 1));
+            Ok(Some(ChunkArrayWithProof {
+                chunks: try_option!(chunk_array.sub_array(index_start, index_end)),
+                start_proof,
+                end_proof,
+            }))
         } else {
-            let left_top_proof = top_tree.gen_proof(left_batch_index)?;
-            let right_top_proof = top_tree.gen_proof(right_batch_index)?;
-            let left_sub_proof = try_option!(self.get_subtree_proof(tx_seq, index_start)?);
-            let right_sub_proof = try_option!(self.get_subtree_proof(tx_seq, index_end - 1)?);
-            (
-                chunk_proof(&left_top_proof, &left_sub_proof)?,
-                chunk_proof(&right_top_proof, &right_sub_proof)?,
-            )
-        };
-        // TODO: The chunks may have been loaded from the proof generation process above.
-        let chunks =
-            try_option!(self.get_chunks_by_tx_and_index_range(tx_seq, index_start, index_end)?);
-        Ok(Some(ChunkArrayWithProof {
-            chunks,
-            start_proof: left_proof,
-            end_proof: right_proof,
-        }))
+            let top_tree = try_option!(self.get_top_tree(tx_seq)?);
+            let left_batch_index = index_start / self.chunk_batch_size;
+            let right_batch_index = (index_end - 1) / self.chunk_batch_size;
+            let (start_proof, end_proof) = if left_batch_index == right_batch_index {
+                let top_proof = top_tree.gen_proof(left_batch_index);
+                let (_, sub_tree) = try_option!(
+                    self.get_sub_tree(tx_seq, left_batch_index * self.chunk_batch_size)?
+                );
+                let left_offset = index_start % self.chunk_batch_size;
+                let left_sub_proof = sub_tree.gen_proof(left_offset);
+                let right_offset = (index_end - 1) % self.chunk_batch_size;
+                let right_sub_proof = sub_tree.gen_proof(right_offset);
+                (
+                    chunk_proof(&top_proof, &left_sub_proof)?,
+                    chunk_proof(&top_proof, &right_sub_proof)?,
+                )
+            } else {
+                let left_top_proof = top_tree.gen_proof(left_batch_index);
+                let right_top_proof = top_tree.gen_proof(right_batch_index);
+                let left_sub_proof = try_option!(self.get_subtree_proof(tx_seq, index_start)?);
+                let right_sub_proof = try_option!(self.get_subtree_proof(tx_seq, index_end - 1)?);
+                (
+                    chunk_proof(&left_top_proof, &left_sub_proof)?,
+                    chunk_proof(&right_top_proof, &right_sub_proof)?,
+                )
+            };
+            // TODO: The chunks may have been loaded from the proof generation process above.
+            let chunks = try_option!(self.get_chunks_by_tx_and_index_range(
+                tx_seq,
+                index_start,
+                index_end
+            )?);
+            Ok(Some(ChunkArrayWithProof {
+                chunks,
+                start_proof,
+                end_proof,
+            }))
+        }
     }
 }
 
@@ -472,12 +502,17 @@ fn chunk_proof(top_proof: &DataProof, sub_proof: &DataProof) -> Result<ChunkProo
             sub_proof.root()
         )));
     }
-    let mut lemma = sub_proof.lemma().clone();
-    let mut path = sub_proof.path().clone();
-    assert!(lemma.pop().is_some());
+    let mut lemma = sub_proof.lemma().to_vec();
+    let mut path = sub_proof.path().to_vec();
+    if lemma.len() == 1 {
+        // Proof for a single-node tree.
+        assert!(path.is_empty());
+    } else {
+        assert!(lemma.pop().is_some());
+    }
     lemma.extend_from_slice(&top_proof.lemma()[1..]);
     path.extend_from_slice(top_proof.path());
-    let proof = DataProof::new::<U0, U0>(None, lemma, path)?;
+    let proof = DataProof::new(lemma, path);
     Ok(ChunkProof::from_merkle_proof(&proof))
 }
 
