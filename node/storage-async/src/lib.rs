@@ -2,7 +2,7 @@
 extern crate tracing;
 
 use anyhow::bail;
-use shared_types::ChunkArray;
+use shared_types::{Chunk, ChunkArray};
 use std::sync::Arc;
 use storage::{error, error::Result, log_store::Store as LogStore};
 use task_executor::TaskExecutor;
@@ -51,6 +51,7 @@ impl Store {
         Store { store, executor }
     }
 
+    delegate!(get_chunk_by_tx_and_index(tx_seq: u64, index: usize) -> Result<Option<Chunk>>);
     delegate!(get_chunks_by_tx_and_index_range(tx_seq: u64, index_start: usize, index_end: usize) -> Result<Option<ChunkArray>>);
     delegate!(put_chunks(tx_seq: u64, chunks: ChunkArray) -> Result<()>);
 }
