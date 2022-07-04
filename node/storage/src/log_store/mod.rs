@@ -32,6 +32,8 @@ pub trait LogStoreRead: LogStoreChunkRead {
         index_start: usize,
         index_end: usize,
     ) -> Result<Option<ChunkArrayWithProof>>;
+
+    fn check_tx_completed(&self, tx_seq: u64) -> Result<bool>;
 }
 
 pub trait LogStoreChunkRead {
@@ -46,6 +48,8 @@ pub trait LogStoreChunkRead {
         index_start: usize,
         index_end: usize,
     ) -> Result<Option<ChunkArray>>;
+
+    fn get_chunk_index_list(&self, tx_seq: u64) -> Result<Vec<usize>>;
 }
 
 pub trait LogStoreWrite: LogStoreChunkWrite {
@@ -63,6 +67,9 @@ pub trait LogStoreWrite: LogStoreChunkWrite {
 pub trait LogStoreChunkWrite {
     /// Store data chunks of a data entry.
     fn put_chunks(&self, tx_seq: u64, chunks: ChunkArray) -> Result<()>;
+
+    /// Delete all chunks of a tx.
+    fn remove_all_chunks(&self, tx_seq: u64) -> Result<()>;
 }
 
 pub trait LogChunkStore: LogStoreChunkRead + LogStoreChunkWrite + Send + Sync + 'static {}

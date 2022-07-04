@@ -23,7 +23,8 @@ const COL_TX: u32 = 0;
 const COL_TX_HASH_INDEX: u32 = 1;
 const COL_TX_MERKLE: u32 = 2;
 const COL_CHUNK: u32 = 3;
-const COL_NUM: u32 = 4;
+const COL_TX_COMPLETED: u32 = 4;
+const COL_NUM: u32 = 5;
 // A chunk key is the concatenation of tx_seq(u64) and start_index(u32)
 const CHUNK_KEY_SIZE: usize = 8 + 4;
 const CHUNK_BATCH_SIZE: usize = 1024;
@@ -203,6 +204,12 @@ impl LogStoreChunkWrite for BatchChunkStore {
         self.kvdb.write(tx)?;
         Ok(())
     }
+
+    fn remove_all_chunks(&self, tx_seq: u64) -> Result<()> {
+        self.kvdb
+            .delete_with_prefix(COL_CHUNK, &tx_seq.to_be_bytes())
+            .map_err(Into::into)
+    }
 }
 
 impl LogStoreChunkRead for BatchChunkStore {
@@ -222,6 +229,7 @@ impl LogStoreChunkRead for BatchChunkStore {
         if index_end <= index_start {
             bail!(Error::InvalidBatchBoundary);
         }
+        // TODO: Use range iteration of rocksdb.
         let mut data = Vec::with_capacity((index_end - index_start) * CHUNK_SIZE);
         for (index, end_index) in batch_iter(index_start, index_end, self.batch_size) {
             let batch_start_index = index / self.batch_size * self.batch_size;
@@ -251,6 +259,15 @@ impl LogStoreChunkRead for BatchChunkStore {
             data,
             start_index: index_start as u32,
         }))
+    }
+
+    fn get_chunk_index_list(&self, tx_seq: u64) -> Result<Vec<usize>> {
+        // TODO: Bench and compare with using rocksdb prefix_extractor.
+        // TODO: Only iterate the key without reading the value.
+        self.kvdb
+            .iter_with_prefix(COL_CHUNK, &tx_seq.to_be_bytes())
+            .map(|(k, _)| chunk_index(k.as_ref()))
+            .collect()
     }
 }
 
@@ -300,11 +317,25 @@ impl LogStoreChunkRead for SimpleLogStore {
         self.chunk_store
             .get_chunks_by_tx_and_index_range(tx_seq, index_start, index_end)
     }
+
+    fn get_chunk_index_list(&self, tx_seq: u64) -> Result<Vec<usize>> {
+        // TODO: If the tx is completed, just read the top tree might be faster.
+        self.chunk_store.get_chunk_index_list(tx_seq)
+    }
 }
 
 impl LogStoreChunkWrite for SimpleLogStore {
     fn put_chunks(&self, tx_seq: u64, chunks: ChunkArray) -> Result<()> {
         self.chunk_store.put_chunks(tx_seq, chunks)
+    }
+
+    fn remove_all_chunks(&self, tx_seq: u64) -> Result<()> {
+        self.chunk_store.remove_all_chunks(tx_seq)?;
+        let mut tx = self.kvdb.transaction();
+        let key = tx_seq.to_be_bytes();
+        tx.delete(COL_TX_COMPLETED, &key);
+        tx.delete(COL_TX_MERKLE, &key);
+        self.kvdb.write(tx).map_err(Into::into)
     }
 }
 
@@ -366,11 +397,14 @@ impl LogStoreWrite for SimpleLogStore {
                 tx.data_merkle_root,
             )));
         }
+        // TODO: Bench and compare with storing the top_proof with the batch.
         self.kvdb.put(
             COL_TX_MERKLE,
             &tx_seq.to_be_bytes(),
             &encode_merkle_tree(&merkle_tree),
         )?;
+        self.kvdb
+            .put(COL_TX_COMPLETED, &tx_seq.to_be_bytes(), &[0])?;
         // TODO: Mark the tx as completed.
         Ok(())
     }
@@ -485,6 +519,12 @@ impl LogStoreRead for SimpleLogStore {
             }))
         }
     }
+
+    fn check_tx_completed(&self, tx_seq: u64) -> Result<bool> {
+        self.kvdb
+            .has_key(COL_TX_COMPLETED, &tx_seq.to_be_bytes())
+            .map_err(Into::into)
+    }
 }
 
 fn chunk_key(tx_seq: u64, index: usize) -> [u8; CHUNK_KEY_SIZE] {
@@ -492,6 +532,14 @@ fn chunk_key(tx_seq: u64, index: usize) -> [u8; CHUNK_KEY_SIZE] {
     key[0..8].copy_from_slice(&tx_seq.to_be_bytes());
     key[8..12].copy_from_slice(&(index as u32).to_be_bytes());
     key
+}
+
+fn chunk_index(chunk_key: &[u8]) -> Result<usize> {
+    if chunk_key.len() != CHUNK_KEY_SIZE {
+        bail!("invalid chunk key size, len={}", chunk_key.len());
+    }
+    let index = u32::from_be_bytes(chunk_key[8..12].try_into()?);
+    Ok(index as usize)
 }
 
 fn chunk_proof(top_proof: &DataProof, sub_proof: &DataProof) -> Result<ChunkProof> {
