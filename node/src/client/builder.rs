@@ -48,6 +48,7 @@ struct MinerComponents {
 pub struct ClientBuilder {
     runtime_context: Option<RuntimeContext>,
     store: Option<Arc<dyn Store>>,
+    async_store: Option<storage_async::Store>,
     network: Option<NetworkComponents>,
     sync: Option<SyncComponents>,
     miner: Option<MinerComponents>,
@@ -61,6 +62,7 @@ impl ClientBuilder {
         Self {
             runtime_context: None,
             store: None,
+            async_store: None,
             network: None,
             sync: None,
             miner: None,
@@ -77,10 +79,17 @@ impl ClientBuilder {
 
     /// Initializes in-memory storage.
     pub fn with_memory_store(mut self) -> Result<Self, String> {
-        let store = SimpleLogStore::memorydb()
-            .map_err(|e| format!("Unable to start in-memory store: {:?}", e))?;
+        let store = Arc::new(
+            SimpleLogStore::memorydb()
+                .map_err(|e| format!("Unable to start in-memory store: {:?}", e))?,
+        );
 
-        self.store = Some(Arc::new(store));
+        self.store = Some(store.clone());
+
+        if let Some(ctx) = self.runtime_context.as_ref() {
+            self.async_store = Some(storage_async::Store::new(store, ctx.executor.clone()));
+        }
+
         Ok(self)
     }
 
@@ -162,16 +171,16 @@ impl ClientBuilder {
         }
 
         let executor = require!("rpc", self, runtime_context).clone().executor;
-        let log_store = require!("rpc", self, store).clone();
+        let async_store = require!("rpc", self, async_store).clone();
 
-        let (chunk_pool, chunk_pool_handler) = chunk_pool::unbounded(log_store.clone());
+        let (chunk_pool, chunk_pool_handler) = chunk_pool::unbounded(async_store.clone());
 
         let ctx = rpc::Context {
             config,
             network_globals: self.network.as_ref().map(|network| network.globals.clone()),
             network_send: self.network.as_ref().map(|network| network.send.clone()),
             sync_send: self.sync.as_ref().map(|sync| sync.send.clone()),
-            log_store,
+            log_store: async_store,
             chunk_pool,
             shutdown_sender: executor.shutdown_sender(),
         };
