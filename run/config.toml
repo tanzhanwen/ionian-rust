@@ -11,3 +11,4 @@ rpc_enabled = true
 rpc_listen_address = "127.0.0.1:5678"
 
 log_config_file = "log_config"
+
