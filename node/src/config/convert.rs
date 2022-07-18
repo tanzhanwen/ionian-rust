@@ -61,6 +61,7 @@ impl IonianConfig {
         Ok(RPCConfig {
             enabled: self.rpc_enabled,
             listen_address,
+            chunks_per_segment: self.rpc_chunks_per_segment,
         })
     }
 
@@ -73,5 +74,14 @@ impl IonianConfig {
             self.blockchain_rpc_endpoint.clone(),
             contract_address,
         ))
+    }
+
+    pub fn chunk_pool_config(&self) -> chunk_pool::Config {
+        chunk_pool::Config {
+            max_cached_chunks_per_file: self.chunk_pool_max_cached_chunks_per_file,
+            max_cached_chunks_all: self.chunk_pool_max_cached_chunks_all,
+            max_writings: self.chunk_pool_max_writings,
+            expiration_time_secs: self.chunk_pool_expiration_time_secs,
+        }
     }
 }
