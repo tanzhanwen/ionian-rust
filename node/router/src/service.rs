@@ -243,6 +243,10 @@ impl RouterService {
                     };
                 }
             }
+            NetworkMessage::AnnounceLocalFile { tx_seq } => {
+                // TODO(ionian-dev): add implementation
+                debug!("Notify peers that new file available, {}", tx_seq);
+            }
         }
     }
 
