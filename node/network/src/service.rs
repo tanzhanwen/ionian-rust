@@ -59,7 +59,7 @@ impl<AppReqId: ReqId> Service<AppReqId> {
     pub async fn new(
         executor: task_executor::TaskExecutor,
         ctx: Context<'_>,
-    ) -> error::Result<(Arc<NetworkGlobals>, Self)> {
+    ) -> error::Result<(Arc<NetworkGlobals>, Keypair, Self)> {
         trace!("Libp2p Service starting");
 
         let config = ctx.config;
@@ -108,7 +108,8 @@ impl<AppReqId: ReqId> Service<AppReqId> {
                 .map_err(|e| format!("Failed to build transport: {:?}", e))?;
 
             // Lighthouse network behaviour
-            let behaviour = Behaviour::new(&local_keypair, ctx, network_globals.clone()).await?;
+            let behaviour =
+                Behaviour::new(&local_keypair.clone(), ctx, network_globals.clone()).await?;
 
             // use the executor for libp2p
             struct Executor(task_executor::TaskExecutor);
@@ -246,7 +247,7 @@ impl<AppReqId: ReqId> Service<AppReqId> {
             local_peer_id,
         };
 
-        Ok((network_globals, service))
+        Ok((network_globals, local_keypair, service))
     }
 
     /// Sends a request to a peer, with a given Id.

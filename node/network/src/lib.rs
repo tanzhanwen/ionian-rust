@@ -76,6 +76,7 @@ pub use discovery::{CombinedKeyExt, EnrExt};
 pub use discv5;
 pub use libp2p;
 pub use libp2p::bandwidth::BandwidthSinks;
+pub use libp2p::core::identity::{error::SigningError, Keypair, PublicKey};
 pub use libp2p::gossipsub::{IdentTopic, MessageAcceptance, MessageId, Topic, TopicHash};
 pub use libp2p::{core::ConnectedPoint, PeerId, Swarm};
 pub use libp2p::{multiaddr, Multiaddr};

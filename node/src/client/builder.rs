@@ -1,9 +1,11 @@
 use super::{Client, RuntimeContext};
 use chunk_pool::Config as ChunkPoolConfig;
+use gossip_cache::GossipCache;
 use log_entry_sync::{LogSyncConfig, LogSyncManager};
 use miner::{MinerMessage, MinerService};
 use network::{
-    self, NetworkConfig, NetworkGlobals, NetworkMessage, RequestId, Service as LibP2PService,
+    self, Keypair, NetworkConfig, NetworkGlobals, NetworkMessage, RequestId,
+    Service as LibP2PService,
 };
 use router::RouterService;
 use rpc::RPCConfig;
@@ -25,6 +27,7 @@ macro_rules! require {
 struct NetworkComponents {
     send: mpsc::UnboundedSender<NetworkMessage>,
     globals: Arc<NetworkGlobals>,
+    keypair: Keypair,
 
     // note: these will be owned by the router service
     owned: Option<(
@@ -51,11 +54,10 @@ pub struct ClientBuilder {
     runtime_context: Option<RuntimeContext>,
     store: Option<Arc<dyn Store>>,
     async_store: Option<storage_async::Store>,
+    gossip_cache: Option<Arc<GossipCache>>,
     network: Option<NetworkComponents>,
     sync: Option<SyncComponents>,
     miner: Option<MinerComponents>,
-
-    test: Option<u32>,
 }
 
 impl ClientBuilder {
@@ -65,11 +67,10 @@ impl ClientBuilder {
             runtime_context: None,
             store: None,
             async_store: None,
+            gossip_cache: None,
             network: None,
             sync: None,
             miner: None,
-
-            test: None,
         }
     }
 
@@ -111,6 +112,12 @@ impl ClientBuilder {
         Ok(self)
     }
 
+    pub fn with_gossip_cache(mut self) -> Self {
+        let gossip_cache = Default::default();
+        self.gossip_cache = Some(Arc::new(gossip_cache));
+        self
+    }
+
     /// Starts the networking stack.
     pub async fn with_network(mut self, config: &NetworkConfig) -> Result<Self, String> {
         let executor = require!("network", self, runtime_context).clone().executor;
@@ -119,7 +126,7 @@ impl ClientBuilder {
         let service_context = network::Context { config };
 
         // launch libp2p service
-        let (globals, libp2p) = LibP2PService::new(executor, service_context)
+        let (globals, keypair, libp2p) = LibP2PService::new(executor, service_context)
             .await
             .map_err(|e| format!("Failed to start network service: {:?}", e))?;
 
@@ -129,6 +136,7 @@ impl ClientBuilder {
         self.network = Some(NetworkComponents {
             send,
             globals,
+            keypair,
             owned: Some((libp2p, recv)),
         });
 
@@ -138,10 +146,11 @@ impl ClientBuilder {
     pub fn with_sync(mut self) -> Result<Self, String> {
         let executor = require!("sync", self, runtime_context).clone().executor;
         let store = require!("sync", self, store).clone();
+        let gossip_cache = require!("sync", self, gossip_cache).clone();
         let network_send = require!("sync", self, network).send.clone();
         let network_globals = require!("sync", self, network).globals.clone();
 
-        let send = SyncService::spawn(executor, network_send, network_globals, store);
+        let send = SyncService::spawn(executor, network_send, network_globals, store, gossip_cache);
         self.sync = Some(SyncComponents { send });
 
         Ok(self)
@@ -162,10 +171,12 @@ impl ClientBuilder {
         let executor = require!("router", self, runtime_context).clone().executor;
         let sync_send = require!("router", self, sync).send.clone(); // note: we can make this optional in the future
         let miner_send = require!("router", self, miner).send.clone(); // note: we can make this optional in the future
+        let store = require!("router", self, store).clone();
+        let gossip_cache = require!("router", self, gossip_cache).clone();
 
         let network = self.network.as_mut().ok_or("router requires a network")?;
 
-        let (libp2p, netowork_recv) = network
+        let (libp2p, network_recv) = network
             .owned
             .take() // router takes ownership of libp2p and network_recv
             .ok_or("router requires a network")?;
@@ -174,10 +185,13 @@ impl ClientBuilder {
             executor,
             libp2p,
             network.globals.clone(),
-            netowork_recv,
+            network_recv,
             network.send.clone(),
             sync_send,
             miner_send,
+            store,
+            gossip_cache,
+            network.keypair.clone(),
         );
 
         Ok(self)
@@ -220,8 +234,8 @@ impl ClientBuilder {
     }
 
     pub fn with_log_sync(self, config: LogSyncConfig) -> Result<Self, String> {
-        let executor = require!("sync", self, runtime_context).clone().executor;
-        let store = require!("sync", self, store).clone();
+        let executor = require!("log_sync", self, runtime_context).clone().executor;
+        let store = require!("log_sync", self, store).clone();
         LogSyncManager::spawn(config, executor, store).map_err(|e| e.to_string())?;
         Ok(self)
     }

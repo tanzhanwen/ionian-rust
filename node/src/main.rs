@@ -19,6 +19,7 @@ async fn start_node(context: RuntimeContext, config: IonianConfig) -> Result<Cli
     ClientBuilder::new()
         .with_runtime_context(context)
         .with_rocksdb_store(&storage_config)?
+        .with_gossip_cache()
         .with_network(&network_config)
         .await?
         .with_sync()?

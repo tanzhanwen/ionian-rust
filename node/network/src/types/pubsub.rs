@@ -1,17 +1,20 @@
 //! Handles the encoding and decoding of pubsub messages.
 
 use crate::types::{GossipEncoding, GossipKind, GossipTopic};
-use crate::TopicHash;
+use crate::{Keypair, PublicKey, SigningError, TopicHash};
 use libp2p::{
     gossipsub::{DataTransform, GossipsubMessage, RawGossipsubMessage},
-    Multiaddr,
+    Multiaddr, PeerId,
 };
 use snap::raw::{decompress_len, Decoder, Encoder};
 use ssz::{Decode, Encode};
 use ssz_derive::{Decode, Encode};
-use std::io::{Error, ErrorKind};
+use std::{
+    io::{Error, ErrorKind},
+    ops::Deref,
+};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WrappedMultiaddr(Multiaddr);
 
 impl From<Multiaddr> for WrappedMultiaddr {
@@ -56,24 +59,114 @@ impl ssz::Decode for WrappedMultiaddr {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WrappedPeerId(PeerId);
+
+impl Deref for WrappedPeerId {
+    type Target = PeerId;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<PeerId> for WrappedPeerId {
+    fn from(addr: PeerId) -> Self {
+        WrappedPeerId(addr)
+    }
+}
+
+impl From<WrappedPeerId> for PeerId {
+    fn from(addr: WrappedPeerId) -> Self {
+        addr.0
+    }
+}
+
+impl ssz::Encode for WrappedPeerId {
+    fn is_ssz_fixed_len() -> bool {
+        // TODO(ionian-dev): we can probably encode PeerId as fixed-length
+        false
+    }
+
+    fn ssz_bytes_len(&self) -> usize {
+        self.0.to_bytes().len()
+    }
+
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
+        self.0.to_bytes().ssz_append(buf)
+    }
+}
+
+impl ssz::Decode for WrappedPeerId {
+    fn is_ssz_fixed_len() -> bool {
+        false
+    }
+
+    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, ssz::DecodeError> {
+        // TODO(ionian-dev): limit length
+        match PeerId::from_bytes(bytes) {
+            Ok(addr) => Ok(WrappedPeerId(addr)),
+            Err(_) => Err(ssz::DecodeError::BytesInvalid(
+                "Cannot parse peer id".into(),
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
 pub struct FindFile {
     pub tx_seq: u64,
     pub timestamp: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]
 pub struct AnnounceFile {
     pub tx_seq: u64,
+    pub peer_id: WrappedPeerId,
     pub at: WrappedMultiaddr,
     pub timestamp: u32,
+}
+
+impl AnnounceFile {
+    pub fn into_signed(self, keypair: &Keypair) -> Result<SignedAnnounceFile, SigningError> {
+        let raw = self.as_ssz_bytes();
+        let signature = keypair.sign(&raw)?;
+
+        Ok(SignedAnnounceFile {
+            inner: self,
+            signature,
+            resend_timestamp: 0,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]
+pub struct SignedAnnounceFile {
+    pub inner: AnnounceFile,
+    pub signature: Vec<u8>,
+    pub resend_timestamp: u32,
+}
+
+impl SignedAnnounceFile {
+    pub fn verify_signature(&self, public_key: &PublicKey) -> bool {
+        let raw = self.inner.as_ssz_bytes();
+        public_key.verify(&raw, &self.signature)
+    }
+}
+
+impl Deref for SignedAnnounceFile {
+    type Target = AnnounceFile;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PubsubMessage {
     ExampleMessage(u64),
     FindFile(FindFile),
-    AnnounceFile(AnnounceFile),
+    AnnounceFile(SignedAnnounceFile),
 }
 
 // Implements the `DataTransform` trait of gossipsub to employ snappy compression
@@ -174,7 +267,7 @@ impl PubsubMessage {
                         FindFile::from_ssz_bytes(data).map_err(|e| format!("{:?}", e))?,
                     )),
                     GossipKind::AnnounceFile => Ok(PubsubMessage::AnnounceFile(
-                        AnnounceFile::from_ssz_bytes(data).map_err(|e| format!("{:?}", e))?,
+                        SignedAnnounceFile::from_ssz_bytes(data).map_err(|e| format!("{:?}", e))?,
                     )),
                 }
             }

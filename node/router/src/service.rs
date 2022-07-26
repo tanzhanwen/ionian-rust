@@ -1,17 +1,37 @@
 use futures::{channel::mpsc::Sender, prelude::*};
+use gossip_cache::GossipCache;
 use miner::MinerMessage;
 use network::{
-    multiaddr::Protocol,
     rpc::StatusMessage,
-    types::{AnnounceFile, FindFile},
-    BehaviourEvent, Libp2pEvent, MessageAcceptance, MessageId, Multiaddr, NetworkGlobals,
-    NetworkMessage, PeerId, PeerRequestId, PubsubMessage, Request, RequestId, Response,
+    types::{AnnounceFile, FindFile, SignedAnnounceFile},
+    BehaviourEvent, Keypair, Libp2pEvent, MessageAcceptance, MessageId, NetworkGlobals,
+    NetworkMessage, PeerId, PeerRequestId, PublicKey, PubsubMessage, Request, RequestId, Response,
     Service as LibP2PService, Swarm,
 };
 use std::{ops::Neg, sync::Arc};
+use storage::log_store::Store as LogStore;
+use storage_async::Store;
 use sync::{SyncMessage, SyncSender};
 use task_executor::ShutdownReason;
 use tokio::sync::mpsc;
+
+pub fn peer_id_to_public_key(peer_id: &PeerId) -> Result<PublicKey, String> {
+    // A libp2p peer id byte representation should be 2 length bytes + 4 protobuf bytes + compressed pk bytes
+    // if generated from a PublicKey with Identity multihash.
+    let pk_bytes = &peer_id.to_bytes()[2..];
+
+    PublicKey::from_protobuf_encoding(pk_bytes).map_err(|e| {
+        format!(
+            " Cannot parse libp2p public key public key from peer id: {}",
+            e
+        )
+    })
+}
+
+fn timestamp_now() -> u32 {
+    let timestamp = chrono::Utc::now().timestamp();
+    u32::try_from(timestamp).expect("The year is between 1970 and 2106")
+}
 
 fn duration_since(timestamp: u32) -> chrono::Duration {
     let timestamp = i64::try_from(timestamp).expect("Should fit");
@@ -46,9 +66,19 @@ pub struct RouterService {
     /// A channel to the miner service.
     #[allow(dead_code)]
     miner_send: mpsc::UnboundedSender<MinerMessage>,
+
+    /// Log and transaction storage.
+    store: Store,
+
+    /// Cache for storing and serving gossip messages.
+    gossip_cache: Arc<GossipCache>,
+
+    /// Node keypair for signing messages.
+    local_keypair: Keypair,
 }
 
 impl RouterService {
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         executor: task_executor::TaskExecutor,
         libp2p: LibP2PService<RequestId>,
@@ -57,7 +87,12 @@ impl RouterService {
         network_send: mpsc::UnboundedSender<NetworkMessage>,
         sync_send: SyncSender,
         miner_send: mpsc::UnboundedSender<MinerMessage>,
+        store: Arc<dyn LogStore>,
+        gossip_cache: Arc<GossipCache>,
+        local_keypair: Keypair,
     ) {
+        let store = Store::new(store, executor.clone());
+
         // create the network service and spawn the task
         let router = RouterService {
             libp2p,
@@ -66,6 +101,9 @@ impl RouterService {
             network_send,
             sync_send,
             miner_send,
+            store,
+            gossip_cache,
+            local_keypair,
         };
 
         // spawn service
@@ -98,6 +136,12 @@ impl RouterService {
     fn send_to_network(&mut self, message: NetworkMessage) {
         self.network_send.send(message).unwrap_or_else(|e| {
             warn!( error = %e, "Could not send message to the network service");
+        });
+    }
+
+    fn publish(&mut self, msg: PubsubMessage) {
+        self.send_to_network(NetworkMessage::Publish {
+            messages: vec![msg],
         });
     }
 
@@ -149,7 +193,8 @@ impl RouterService {
                     message,
                     ..
                 } => {
-                    self.on_pubsub_message(propagation_source, source, id, message);
+                    self.on_pubsub_message(propagation_source, source, id, message)
+                        .await;
                 }
             },
             Libp2pEvent::NewListenAddr(multiaddr) => {
@@ -348,7 +393,7 @@ impl RouterService {
         debug!(%peer_id, ?status, "Received Status response");
     }
 
-    fn on_pubsub_message(
+    async fn on_pubsub_message(
         &mut self,
         propagation_source: PeerId,
         source: PeerId,
@@ -357,19 +402,19 @@ impl RouterService {
     ) {
         match message {
             PubsubMessage::ExampleMessage(_) => {}
-            PubsubMessage::FindFile(msg) => self.on_find_file(propagation_source, id, msg),
+            PubsubMessage::FindFile(msg) => self.on_find_file(propagation_source, id, msg).await,
             PubsubMessage::AnnounceFile(msg) => {
                 self.on_announce_file(propagation_source, source, id, msg)
             }
         }
     }
 
-    fn on_find_file(&mut self, propagation_source: PeerId, id: MessageId, msg: FindFile) {
+    async fn on_find_file(&mut self, propagation_source: PeerId, id: MessageId, msg: FindFile) {
         info!(%propagation_source, %id, ?msg, "Received FindFile gossip");
 
         let FindFile { tx_seq, timestamp } = msg;
 
-        // propagate gossip to peers
+        // verify timestamp
         let d = duration_since(timestamp);
 
         if d < TOLERABLE_DRIFT.neg() || d > *FIND_FILE_TIMEOUT {
@@ -387,13 +432,79 @@ impl RouterService {
             return;
         }
 
+        // check if we have it
+        if matches!(self.store.check_tx_completed(tx_seq).await, Ok(true)) {
+            debug!(%tx_seq, "Found file locally, responding to FindFile query");
+
+            // announce file
+            let peer_id = *self.network_globals.peer_id.read();
+
+            // TODO(ionian-dev): consider choosing a random listen address
+            let addr = match self.network_globals.listen_multiaddrs.read().first() {
+                Some(addr) => addr.clone(),
+                None => {
+                    error!("No listen address available");
+                    return;
+                }
+            };
+
+            let timestamp = timestamp_now();
+
+            let msg = AnnounceFile {
+                tx_seq,
+                peer_id: peer_id.into(),
+                at: addr.into(),
+                timestamp,
+            };
+
+            let mut signed = match msg.into_signed(&self.local_keypair) {
+                Ok(signed) => signed,
+                Err(e) => {
+                    error!(%tx_seq, "Failed to sign AnnounceFile message: {:?}", e);
+                    return;
+                }
+            };
+
+            signed.resend_timestamp = timestamp;
+
+            self.publish(PubsubMessage::AnnounceFile(signed));
+
+            self.libp2p
+                .swarm
+                .behaviour_mut()
+                .report_message_validation_result(
+                    &propagation_source,
+                    id,
+                    MessageAcceptance::Ignore,
+                );
+
+            return;
+        }
+
+        // try from cache
+        if let Some(mut msg) = self.gossip_cache.get_one(tx_seq) {
+            debug!(%tx_seq, "Found file in cache, responding to FindFile query");
+
+            msg.resend_timestamp = timestamp_now();
+            self.publish(PubsubMessage::AnnounceFile(msg));
+
+            self.libp2p
+                .swarm
+                .behaviour_mut()
+                .report_message_validation_result(
+                    &propagation_source,
+                    id,
+                    MessageAcceptance::Ignore,
+                );
+
+            return;
+        }
+
+        // propagate FindFile query to other nodes
         self.libp2p
             .swarm
             .behaviour_mut()
             .report_message_validation_result(&propagation_source, id, MessageAcceptance::Accept);
-
-        // notify sync layer
-        self.send_to_sync(SyncMessage::FindFileGossip { tx_seq });
     }
 
     fn on_announce_file(
@@ -401,21 +512,45 @@ impl RouterService {
         propagation_source: PeerId,
         source: PeerId,
         id: MessageId,
-        msg: AnnounceFile,
+        msg: SignedAnnounceFile,
     ) {
         info!(%propagation_source, %source, %id, ?msg, "Received AnnounceFile gossip");
 
-        let AnnounceFile {
-            tx_seq,
-            at,
-            timestamp,
-        } = msg;
+        // verify message signature
+        let pk = match peer_id_to_public_key(&msg.peer_id) {
+            Ok(pk) => pk,
+            Err(e) => {
+                error!(
+                    "Failed to convert peer id {:?} to public key: {:?}",
+                    msg.peer_id, e
+                );
+                return;
+            }
+        };
+
+        if !msg.verify_signature(&pk) {
+            warn!(
+                "Received message with invalid signature from peer {:?}",
+                propagation_source
+            );
+
+            self.libp2p
+                .swarm
+                .behaviour_mut()
+                .report_message_validation_result(
+                    &propagation_source,
+                    id,
+                    MessageAcceptance::Reject,
+                );
+
+            return;
+        }
 
         // propagate gossip to peers
-        let d = duration_since(timestamp);
+        let d = duration_since(msg.resend_timestamp);
 
         if d < TOLERABLE_DRIFT.neg() || d > *ANNOUNCE_FILE_TIMEOUT {
-            debug!(%timestamp, "Invalid timestamp, ignoring AnnounceFile message");
+            debug!(%msg.resend_timestamp, "Invalid resend timestamp, ignoring AnnounceFile message");
 
             self.libp2p
                 .swarm
@@ -434,21 +569,15 @@ impl RouterService {
             .behaviour_mut()
             .report_message_validation_result(&propagation_source, id, MessageAcceptance::Accept);
 
-        // add source peer id to address
-        // Note: Peer id (source) comes from the gossip message signature, so it
-        // is guaranteed to belong to the publisher, while the published address
-        // might belong to another node. By including peer id in the multiaddr,
-        // we will verify it when connecting to this peer.
-        let peer_id = source;
-        let mut addr: Multiaddr = at.into();
-        addr.push(Protocol::P2p(peer_id.into()));
-
         // notify sync layer
         self.send_to_sync(SyncMessage::AnnounceFileGossip {
-            tx_seq,
-            peer_id,
-            addr,
+            tx_seq: msg.tx_seq,
+            peer_id: msg.peer_id.clone().into(),
+            addr: msg.at.clone().into(),
         });
+
+        // insert message to cache
+        self.gossip_cache.insert(msg);
     }
 }
 
