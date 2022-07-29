@@ -10,8 +10,8 @@ use merkle_light::merkle::MerkleTree;
 use merkle_tree::RawLeafSha3Algorithm;
 use rayon::prelude::*;
 use shared_types::{
-    Chunk, ChunkArray, ChunkArrayWithProof, ChunkWithProof, DataProof, DataRoot, Proof,
-    Transaction, CHUNK_SIZE,
+    bytes_to_chunks, Chunk, ChunkArray, ChunkArrayWithProof, ChunkWithProof, DataProof, DataRoot,
+    Proof, Transaction, CHUNK_SIZE,
 };
 use ssz::{Decode, Encode};
 use std::cmp;
@@ -458,10 +458,7 @@ impl LogStoreWrite for SimpleLogStore {
                 .put(COL_TX_COMPLETED, &tx_seq.to_be_bytes(), &[0])?;
             return Ok(());
         }
-        let mut chunk_index_end = (tx.size / CHUNK_SIZE as u64) as usize;
-        if tx.size % CHUNK_SIZE as u64 > 0 {
-            chunk_index_end += 1;
-        }
+        let chunk_index_end = bytes_to_chunks(tx.size as usize);
         let mut chunk_batch_roots = Vec::with_capacity(chunk_index_end / self.chunk_batch_size + 1);
         debug!(
             "Begin to finalize tx, seq={}, end_index={}",
@@ -572,8 +569,8 @@ impl LogStoreRead for SimpleLogStore {
             bail!(Error::InvalidBatchBoundary);
         }
         let tx = try_option!(self.get_tx_by_seq_number(tx_seq)?);
-        if index_end as u64 * CHUNK_SIZE as u64 > tx.size {
-            // TODO(ionian-dev): convert tx.size to account for padding
+        let total_chunks = bytes_to_chunks(tx.size as usize);
+        if index_end > total_chunks {
             bail!(Error::InvalidBatchBoundary);
         }
         if tx.size <= self.chunk_batch_size as u64 * CHUNK_SIZE as u64 {

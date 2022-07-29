@@ -24,13 +24,8 @@ pub fn unbounded(
 ) -> (Arc<MemoryChunkPool>, ChunkPoolHandler) {
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
 
-    let mem_pool = Arc::new(mem_pool::MemoryChunkPool::new(
-        config,
-        log_store.clone(),
-        sender,
-    ));
-    let handler =
-        handler::ChunkPoolHandler::new(receiver, mem_pool.clone(), log_store, network_send);
+    let mem_pool = Arc::new(MemoryChunkPool::new(config, log_store.clone(), sender));
+    let handler = ChunkPoolHandler::new(receiver, mem_pool.clone(), log_store, network_send);
 
     (mem_pool, handler)
 }

@@ -173,9 +173,18 @@ impl Inner {
         }
 
         // Otherwise, just cache segment in memory
+        let num_chunks = segment.len() / CHUNK_SIZE;
+
+        // Limits the maximum number of chunks of single file.
+        // Note, it suppose that all chunks uploaded in sequence.
+        if file.next_index + num_chunks > self.config.max_cached_chunks_per_file {
+            bail!(anyhow!(
+                "exceeds the maximum cached chunks of single file: {}",
+                self.config.max_cached_chunks_per_file
+            ));
+        }
 
         // Limits the cached chunks in the memory pool.
-        let num_chunks = segment.len() / CHUNK_SIZE;
         if self.total_chunks + num_chunks > self.config.max_cached_chunks_all {
             bail!(anyhow!(
                 "exceeds the maximum cached chunks of whole pool: {}",
@@ -268,7 +277,6 @@ impl Inner {
 /// Caches data chunks in memory before the entire file uploaded to storage node
 /// and data root verified on blockchain.
 pub struct MemoryChunkPool {
-    config: Config,
     inner: Mutex<Inner>,
     log_store: Store,
     sender: UnboundedSender<DataRoot>,
@@ -277,14 +285,13 @@ pub struct MemoryChunkPool {
 impl MemoryChunkPool {
     pub(crate) fn new(config: Config, log_store: Store, sender: UnboundedSender<DataRoot>) -> Self {
         MemoryChunkPool {
-            config: config.clone(),
             inner: Mutex::new(Inner::new(config)),
             log_store,
             sender,
         }
     }
 
-    fn validate_segment_size(&self, segment: &Vec<u8>, chunk_start_index: usize) -> Result<usize> {
+    fn validate_segment_size(&self, segment: &Vec<u8>) -> Result<usize> {
         if segment.is_empty() {
             bail!(anyhow!("data is empty"));
         }
@@ -294,15 +301,6 @@ impl MemoryChunkPool {
         }
 
         let num_chunks = segment.len() / CHUNK_SIZE;
-
-        // Limits the maximum number of chunks of single file.
-        // Note, it suppose that all chunks uploaded in sequence.
-        if chunk_start_index + num_chunks > self.config.max_cached_chunks_per_file {
-            bail!(anyhow!(
-                "exceeds the maximum cached chunks of single file: {}",
-                self.config.max_cached_chunks_per_file
-            ));
-        }
 
         Ok(num_chunks)
     }
@@ -339,7 +337,7 @@ impl MemoryChunkPool {
         segment: Vec<u8>,
         start_index: usize,
     ) -> Result<()> {
-        let num_chunks = self.validate_segment_size(&segment, start_index)?;
+        let num_chunks = self.validate_segment_size(&segment)?;
 
         // Try to update file with transaction for the first 2 segments,
         // in case that log entry already retrieved from blockchain.

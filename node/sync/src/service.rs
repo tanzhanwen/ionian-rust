@@ -138,7 +138,7 @@ impl SyncService {
     }
 
     async fn on_sync_msg(&mut self, msg: SyncMessage) {
-        warn!("Sync received message {:?}", msg);
+        debug!("Sync received message {:?}", msg);
 
         match msg {
             SyncMessage::PeerConnected { peer_id } => {
@@ -211,7 +211,7 @@ impl SyncService {
     }
 
     fn on_peer_disconnected(&mut self, peer_id: PeerId) {
-        info!("Peer {peer_id:?} disconnected");
+        info!(%peer_id, "Peer disconnected");
 
         for controller in self.controllers.values_mut() {
             controller.on_peer_disconnected(peer_id);
@@ -225,7 +225,7 @@ impl SyncService {
         request_id: PeerRequestId,
         request: GetChunksRequest,
     ) {
-        info!("Received GetChunks request: {:?}", request);
+        info!(%peer_id, ?request_id, ?request, "Received GetChunks request");
 
         // TODO(ionian-dev): can we do this validation in the network layer?
         if request.index_start >= request.index_end {
@@ -286,7 +286,7 @@ impl SyncService {
         request_id: RequestId,
         response: ChunkArrayWithProof,
     ) {
-        info!(%peer_id, ?request_id, "Received Chunks response: {:?} bytes", response.chunks.data.len());
+        info!(%peer_id, ?request_id, %response.chunks, "Received chunks response");
 
         let tx_seq = match request_id {
             RequestId::SerialSync { tx_seq } => tx_seq,
@@ -378,7 +378,7 @@ impl SyncService {
     }
 
     fn on_announce_file_gossip(&mut self, tx_seq: u64, peer_id: PeerId, addr: Multiaddr) {
-        info!(%tx_seq, %addr, "Received AnnounceFile gossip");
+        info!(%tx_seq, %peer_id, %addr, "Received AnnounceFile gossip");
 
         if let Some(controller) = self.controllers.get_mut(&tx_seq) {
             controller.on_peer_found(peer_id, addr);
