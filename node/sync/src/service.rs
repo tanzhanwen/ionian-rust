@@ -167,7 +167,7 @@ impl SyncService {
             }
 
             SyncMessage::StartSyncFile { tx_seq } => {
-                self.on_start_sync_file(tx_seq).await;
+                self.on_start_sync_file(tx_seq, None).await;
             }
 
             SyncMessage::RpcError {
@@ -182,7 +182,7 @@ impl SyncService {
                 peer_id,
                 addr,
             } => {
-                self.on_announce_file_gossip(tx_seq, peer_id, addr);
+                self.on_announce_file_gossip(tx_seq, peer_id, addr).await;
             }
         }
     }
@@ -225,7 +225,7 @@ impl SyncService {
         request_id: PeerRequestId,
         request: GetChunksRequest,
     ) {
-        info!(%peer_id, ?request_id, ?request, "Received GetChunks request");
+        info!(?request, %peer_id, ?request_id, "Received GetChunks request");
 
         // TODO(ionian-dev): can we do this validation in the network layer?
         if request.index_start >= request.index_end {
@@ -286,7 +286,7 @@ impl SyncService {
         request_id: RequestId,
         response: ChunkArrayWithProof,
     ) {
-        info!(%peer_id, ?request_id, %response.chunks, "Received chunks response");
+        info!(%response.chunks, %peer_id, ?request_id, "Received chunks response");
 
         let tx_seq = match request_id {
             RequestId::SerialSync { tx_seq } => tx_seq,
@@ -321,8 +321,8 @@ impl SyncService {
         }
     }
 
-    async fn on_start_sync_file(&mut self, tx_seq: u64) {
-        info!("Starting sync file for tx_seq={tx_seq}");
+    async fn on_start_sync_file(&mut self, tx_seq: u64, maybe_peer: Option<(PeerId, Multiaddr)>) {
+        info!(%tx_seq, "Start to sync file");
 
         let controller = match self.controllers.entry(tx_seq) {
             Entry::Occupied(entry) => entry.into_mut(),
@@ -374,16 +374,30 @@ impl SyncService {
             controller.reset();
         }
 
+        if let Some((peer_id, addr)) = maybe_peer {
+            controller.on_peer_found(peer_id, addr);
+        }
+
         controller.transition();
     }
 
-    fn on_announce_file_gossip(&mut self, tx_seq: u64, peer_id: PeerId, addr: Multiaddr) {
+    async fn on_announce_file_gossip(&mut self, tx_seq: u64, peer_id: PeerId, addr: Multiaddr) {
         info!(%tx_seq, %peer_id, %addr, "Received AnnounceFile gossip");
 
+        // File already in sync
         if let Some(controller) = self.controllers.get_mut(&tx_seq) {
             controller.on_peer_found(peer_id, addr);
             controller.transition();
+            return;
         }
+
+        // File already exists and ignore the AnnounceFile message
+        if self.store.check_tx_completed(tx_seq).await.unwrap_or(false) {
+            return;
+        }
+
+        // Now, always sync files among all nodes
+        self.on_start_sync_file(tx_seq, Some((peer_id, addr))).await;
     }
 
     fn on_heartbeat(&mut self) {

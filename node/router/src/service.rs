@@ -289,8 +289,9 @@ impl RouterService {
                 }
             }
             NetworkMessage::AnnounceLocalFile { tx_seq } => {
-                // TODO(ionian-dev): add implementation
-                debug!("Notify peers that new file available, {}", tx_seq);
+                if let Some(msg) = self.construct_announce_file_message(tx_seq) {
+                    self.publish(msg);
+                }
             }
         }
     }
@@ -400,85 +401,76 @@ impl RouterService {
         id: MessageId,
         message: PubsubMessage,
     ) {
-        match message {
-            PubsubMessage::ExampleMessage(_) => {}
-            PubsubMessage::FindFile(msg) => self.on_find_file(propagation_source, id, msg).await,
-            PubsubMessage::AnnounceFile(msg) => {
-                self.on_announce_file(propagation_source, source, id, msg)
-            }
-        }
+        info!(?message, %propagation_source, %source, %id, "Received pubsub message");
+
+        let result = match message {
+            PubsubMessage::ExampleMessage(_) => MessageAcceptance::Ignore,
+            PubsubMessage::FindFile(msg) => self.on_find_file(msg).await,
+            PubsubMessage::AnnounceFile(msg) => self.on_announce_file(propagation_source, msg),
+        };
+
+        self.libp2p
+            .swarm
+            .behaviour_mut()
+            .report_message_validation_result(&propagation_source, id, result);
     }
 
-    async fn on_find_file(&mut self, propagation_source: PeerId, id: MessageId, msg: FindFile) {
-        info!(%propagation_source, %id, ?msg, "Received FindFile gossip");
+    fn construct_announce_file_message(&self, tx_seq: u64) -> Option<PubsubMessage> {
+        let peer_id = *self.network_globals.peer_id.read();
 
+        // TODO(ionian-dev): consider choosing a random listen address
+        let addr = match self.network_globals.listen_multiaddrs.read().first() {
+            Some(addr) => addr.clone(),
+            None => {
+                error!("No listen address available");
+                return None;
+            }
+        };
+
+        let timestamp = timestamp_now();
+
+        let msg = AnnounceFile {
+            tx_seq,
+            peer_id: peer_id.into(),
+            at: addr.into(),
+            timestamp,
+        };
+
+        let mut signed = match msg.into_signed(&self.local_keypair) {
+            Ok(signed) => signed,
+            Err(e) => {
+                error!(%tx_seq, %e, "Failed to sign AnnounceFile message");
+                return None;
+            }
+        };
+
+        signed.resend_timestamp = timestamp;
+
+        Some(PubsubMessage::AnnounceFile(signed))
+    }
+
+    async fn on_find_file(&mut self, msg: FindFile) -> MessageAcceptance {
         let FindFile { tx_seq, timestamp } = msg;
 
         // verify timestamp
         let d = duration_since(timestamp);
-
         if d < TOLERABLE_DRIFT.neg() || d > *FIND_FILE_TIMEOUT {
             debug!(%timestamp, "Invalid timestamp, ignoring FindFile message");
-
-            self.libp2p
-                .swarm
-                .behaviour_mut()
-                .report_message_validation_result(
-                    &propagation_source,
-                    id,
-                    MessageAcceptance::Ignore,
-                );
-
-            return;
+            return MessageAcceptance::Ignore;
         }
 
         // check if we have it
         if matches!(self.store.check_tx_completed(tx_seq).await, Ok(true)) {
             debug!(%tx_seq, "Found file locally, responding to FindFile query");
 
-            // announce file
-            let peer_id = *self.network_globals.peer_id.read();
-
-            // TODO(ionian-dev): consider choosing a random listen address
-            let addr = match self.network_globals.listen_multiaddrs.read().first() {
-                Some(addr) => addr.clone(),
-                None => {
-                    error!("No listen address available");
-                    return;
+            return match self.construct_announce_file_message(tx_seq) {
+                Some(msg) => {
+                    self.publish(msg);
+                    MessageAcceptance::Ignore
                 }
+                // propagate FindFile query to other nodes
+                None => MessageAcceptance::Accept,
             };
-
-            let timestamp = timestamp_now();
-
-            let msg = AnnounceFile {
-                tx_seq,
-                peer_id: peer_id.into(),
-                at: addr.into(),
-                timestamp,
-            };
-
-            let mut signed = match msg.into_signed(&self.local_keypair) {
-                Ok(signed) => signed,
-                Err(e) => {
-                    error!(%tx_seq, "Failed to sign AnnounceFile message: {:?}", e);
-                    return;
-                }
-            };
-
-            signed.resend_timestamp = timestamp;
-
-            self.publish(PubsubMessage::AnnounceFile(signed));
-
-            self.libp2p
-                .swarm
-                .behaviour_mut()
-                .report_message_validation_result(
-                    &propagation_source,
-                    id,
-                    MessageAcceptance::Ignore,
-                );
-
-            return;
         }
 
         // try from cache
@@ -488,34 +480,18 @@ impl RouterService {
             msg.resend_timestamp = timestamp_now();
             self.publish(PubsubMessage::AnnounceFile(msg));
 
-            self.libp2p
-                .swarm
-                .behaviour_mut()
-                .report_message_validation_result(
-                    &propagation_source,
-                    id,
-                    MessageAcceptance::Ignore,
-                );
-
-            return;
+            return MessageAcceptance::Ignore;
         }
 
         // propagate FindFile query to other nodes
-        self.libp2p
-            .swarm
-            .behaviour_mut()
-            .report_message_validation_result(&propagation_source, id, MessageAcceptance::Accept);
+        MessageAcceptance::Accept
     }
 
     fn on_announce_file(
         &mut self,
         propagation_source: PeerId,
-        source: PeerId,
-        id: MessageId,
         msg: SignedAnnounceFile,
-    ) {
-        info!(%propagation_source, %source, %id, ?msg, "Received AnnounceFile gossip");
-
+    ) -> MessageAcceptance {
         // verify message signature
         let pk = match peer_id_to_public_key(&msg.peer_id) {
             Ok(pk) => pk,
@@ -524,7 +500,7 @@ impl RouterService {
                     "Failed to convert peer id {:?} to public key: {:?}",
                     msg.peer_id, e
                 );
-                return;
+                return MessageAcceptance::Reject;
             }
         };
 
@@ -533,41 +509,15 @@ impl RouterService {
                 "Received message with invalid signature from peer {:?}",
                 propagation_source
             );
-
-            self.libp2p
-                .swarm
-                .behaviour_mut()
-                .report_message_validation_result(
-                    &propagation_source,
-                    id,
-                    MessageAcceptance::Reject,
-                );
-
-            return;
+            return MessageAcceptance::Reject;
         }
 
         // propagate gossip to peers
         let d = duration_since(msg.resend_timestamp);
-
         if d < TOLERABLE_DRIFT.neg() || d > *ANNOUNCE_FILE_TIMEOUT {
             debug!(%msg.resend_timestamp, "Invalid resend timestamp, ignoring AnnounceFile message");
-
-            self.libp2p
-                .swarm
-                .behaviour_mut()
-                .report_message_validation_result(
-                    &propagation_source,
-                    id,
-                    MessageAcceptance::Ignore,
-                );
-
-            return;
+            return MessageAcceptance::Ignore;
         }
-
-        self.libp2p
-            .swarm
-            .behaviour_mut()
-            .report_message_validation_result(&propagation_source, id, MessageAcceptance::Accept);
 
         // notify sync layer
         self.send_to_sync(SyncMessage::AnnounceFileGossip {
@@ -578,6 +528,8 @@ impl RouterService {
 
         // insert message to cache
         self.gossip_cache.insert(msg);
+
+        MessageAcceptance::Accept
     }
 }
 
