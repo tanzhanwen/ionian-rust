@@ -6,6 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 pub enum Error<N, Req, Res> {
     SendError(mpsc::error::SendError<Message<N, Req, Res>>),
     RecvError(oneshot::error::RecvError),
+    TimeoutError,
 }
 
 impl<N: Debug, Req: Debug, Res: Debug> Display for Error<N, Req, Res> {

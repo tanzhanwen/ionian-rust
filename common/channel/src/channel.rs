@@ -1,5 +1,9 @@
 use crate::error::Error;
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::timeout;
+
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub type ResponseSender<Res> = oneshot::Sender<Res>;
 
@@ -39,7 +43,6 @@ impl<N, Req, Res> Sender<N, Req, Res> {
             .map_err(|e| Error::SendError(e))
     }
 
-    // TODO(ionian-dev): consider adding a default timeout logic here
     pub async fn request(&self, request: Req) -> Result<Res, Error<N, Req, Res>> {
         let (sender, receiver) = oneshot::channel();
 
@@ -47,7 +50,10 @@ impl<N, Req, Res> Sender<N, Req, Res> {
             .send(Message::Request(request, sender))
             .map_err(|e| Error::SendError(e))?;
 
-        receiver.await.map_err(|e| Error::RecvError(e))
+        timeout(DEFAULT_REQUEST_TIMEOUT, receiver)
+            .await
+            .map_err(|_| Error::TimeoutError)?
+            .map_err(|e| Error::RecvError(e))
     }
 }
 
