@@ -353,3 +353,8 @@ impl std::fmt::Display for ChunkArray {
         )
     }
 }
+
+pub fn timestamp_now() -> u32 {
+    let timestamp = chrono::Utc::now().timestamp();
+    u32::try_from(timestamp).expect("The year is between 1970 and 2106")
+}

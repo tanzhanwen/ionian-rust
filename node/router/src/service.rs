@@ -1,5 +1,5 @@
+use file_location_cache::FileLocationCache;
 use futures::{channel::mpsc::Sender, prelude::*};
-use gossip_cache::GossipCache;
 use miner::MinerMessage;
 use network::{
     rpc::StatusMessage,
@@ -8,6 +8,7 @@ use network::{
     NetworkMessage, PeerId, PeerRequestId, PublicKey, PubsubMessage, Request, RequestId, Response,
     Service as LibP2PService, Swarm,
 };
+use shared_types::timestamp_now;
 use std::{ops::Neg, sync::Arc};
 use storage::log_store::Store as LogStore;
 use storage_async::Store;
@@ -26,11 +27,6 @@ pub fn peer_id_to_public_key(peer_id: &PeerId) -> Result<PublicKey, String> {
             e
         )
     })
-}
-
-fn timestamp_now() -> u32 {
-    let timestamp = chrono::Utc::now().timestamp();
-    u32::try_from(timestamp).expect("The year is between 1970 and 2106")
 }
 
 fn duration_since(timestamp: u32) -> chrono::Duration {
@@ -71,7 +67,7 @@ pub struct RouterService {
     store: Store,
 
     /// Cache for storing and serving gossip messages.
-    gossip_cache: Arc<GossipCache>,
+    file_location_cache: Arc<FileLocationCache>,
 
     /// Node keypair for signing messages.
     local_keypair: Keypair,
@@ -88,7 +84,7 @@ impl RouterService {
         sync_send: SyncSender,
         miner_send: mpsc::UnboundedSender<MinerMessage>,
         store: Arc<dyn LogStore>,
-        gossip_cache: Arc<GossipCache>,
+        file_location_cache: Arc<FileLocationCache>,
         local_keypair: Keypair,
     ) {
         let store = Store::new(store, executor.clone());
@@ -102,7 +98,7 @@ impl RouterService {
             sync_send,
             miner_send,
             store,
-            gossip_cache,
+            file_location_cache,
             local_keypair,
         };
 
@@ -474,7 +470,7 @@ impl RouterService {
         }
 
         // try from cache
-        if let Some(mut msg) = self.gossip_cache.get_one(tx_seq) {
+        if let Some(mut msg) = self.file_location_cache.get_one(tx_seq) {
             debug!(%tx_seq, "Found file in cache, responding to FindFile query");
 
             msg.resend_timestamp = timestamp_now();
@@ -527,7 +523,7 @@ impl RouterService {
         });
 
         // insert message to cache
-        self.gossip_cache.insert(msg);
+        self.file_location_cache.insert(msg);
 
         MessageAcceptance::Accept
     }

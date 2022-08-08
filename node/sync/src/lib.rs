@@ -6,5 +6,5 @@ mod controllers;
 mod service;
 
 pub(crate) use context::SyncNetworkContext;
-pub(crate) use gossip_cache::GossipCache;
+pub(crate) use file_location_cache::FileLocationCache;
 pub use service::{SyncMessage, SyncRequest, SyncResponse, SyncSender, SyncService};

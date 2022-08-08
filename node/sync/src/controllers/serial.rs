@@ -1,21 +1,16 @@
-use crate::{GossipCache, SyncNetworkContext};
+use crate::{FileLocationCache, SyncNetworkContext};
 use network::{
     multiaddr::Protocol, rpc::GetChunksRequest, types::FindFile, Multiaddr, NetworkMessage,
     PeerAction, PeerId, PubsubMessage, ReportSource, SyncId as RequestId,
 };
 use rand::seq::IteratorRandom;
-use shared_types::{ChunkArray, ChunkArrayWithProof, DataRoot, CHUNK_SIZE};
+use shared_types::{timestamp_now, ChunkArray, ChunkArrayWithProof, DataRoot, CHUNK_SIZE};
 use std::{
     collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
 use storage_async::Store;
-
-fn timestamp_now() -> u32 {
-    let timestamp = chrono::Utc::now().timestamp();
-    u32::try_from(timestamp).expect("The year is between 1970 and 2106")
-}
 
 const CHUNK_BATCH_SIZE: usize = 2 * 1024;
 
@@ -198,7 +193,7 @@ pub struct SerialSyncController {
     store: Store,
 
     /// Cache for storing and serving gossip messages.
-    gossip_cache: Arc<GossipCache>,
+    file_location_cache: Arc<FileLocationCache>,
 }
 
 impl SerialSyncController {
@@ -208,7 +203,7 @@ impl SerialSyncController {
         num_chunks: usize,
         ctx: Arc<SyncNetworkContext>,
         store: Store,
-        gossip_cache: Arc<GossipCache>,
+        file_location_cache: Arc<FileLocationCache>,
     ) -> Self {
         SerialSyncController {
             tx_seq,
@@ -219,7 +214,7 @@ impl SerialSyncController {
             peers: Default::default(),
             ctx,
             store,
-            gossip_cache,
+            file_location_cache,
         }
     }
 
@@ -229,7 +224,7 @@ impl SerialSyncController {
         num_chunks: usize,
         ctx: Arc<SyncNetworkContext>,
         store: Store,
-        gossip_cache: Arc<GossipCache>,
+        file_location_cache: Arc<FileLocationCache>,
     ) -> Self {
         SerialSyncController {
             tx_seq,
@@ -240,7 +235,7 @@ impl SerialSyncController {
             peers: Default::default(),
             ctx,
             store,
-            gossip_cache,
+            file_location_cache,
         }
     }
 
@@ -270,7 +265,7 @@ impl SerialSyncController {
         // try from cache
         let mut found_new_peer = false;
 
-        for announcement in self.gossip_cache.get_all(self.tx_seq) {
+        for announcement in self.file_location_cache.get_all(self.tx_seq) {
             // make sure peer_id is part of the address
             let peer_id: PeerId = announcement.peer_id.clone().into();
             let mut addr: Multiaddr = announcement.at.clone().into();

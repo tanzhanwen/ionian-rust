@@ -1,6 +1,6 @@
 use super::{Client, RuntimeContext};
 use chunk_pool::Config as ChunkPoolConfig;
-use gossip_cache::GossipCache;
+use file_location_cache::FileLocationCache;
 use log_entry_sync::{LogSyncConfig, LogSyncManager};
 use miner::{MinerMessage, MinerService};
 use network::{
@@ -54,7 +54,7 @@ pub struct ClientBuilder {
     runtime_context: Option<RuntimeContext>,
     store: Option<Arc<dyn Store>>,
     async_store: Option<storage_async::Store>,
-    gossip_cache: Option<Arc<GossipCache>>,
+    file_location_cache: Option<Arc<FileLocationCache>>,
     network: Option<NetworkComponents>,
     sync: Option<SyncComponents>,
     miner: Option<MinerComponents>,
@@ -67,7 +67,7 @@ impl ClientBuilder {
             runtime_context: None,
             store: None,
             async_store: None,
-            gossip_cache: None,
+            file_location_cache: None,
             network: None,
             sync: None,
             miner: None,
@@ -112,9 +112,9 @@ impl ClientBuilder {
         Ok(self)
     }
 
-    pub fn with_gossip_cache(mut self) -> Self {
-        let gossip_cache = Default::default();
-        self.gossip_cache = Some(Arc::new(gossip_cache));
+    pub fn with_file_location_cache(mut self) -> Self {
+        let file_location_cache = Default::default();
+        self.file_location_cache = Some(Arc::new(file_location_cache));
         self
     }
 
@@ -146,11 +146,17 @@ impl ClientBuilder {
     pub fn with_sync(mut self) -> Result<Self, String> {
         let executor = require!("sync", self, runtime_context).clone().executor;
         let store = require!("sync", self, store).clone();
-        let gossip_cache = require!("sync", self, gossip_cache).clone();
+        let file_location_cache = require!("sync", self, file_location_cache).clone();
         let network_send = require!("sync", self, network).send.clone();
         let network_globals = require!("sync", self, network).globals.clone();
 
-        let send = SyncService::spawn(executor, network_send, network_globals, store, gossip_cache);
+        let send = SyncService::spawn(
+            executor,
+            network_send,
+            network_globals,
+            store,
+            file_location_cache,
+        );
         self.sync = Some(SyncComponents { send });
 
         Ok(self)
@@ -172,7 +178,7 @@ impl ClientBuilder {
         let sync_send = require!("router", self, sync).send.clone(); // note: we can make this optional in the future
         let miner_send = require!("router", self, miner).send.clone(); // note: we can make this optional in the future
         let store = require!("router", self, store).clone();
-        let gossip_cache = require!("router", self, gossip_cache).clone();
+        let file_location_cache = require!("router", self, file_location_cache).clone();
 
         let network = self.network.as_mut().ok_or("router requires a network")?;
 
@@ -190,7 +196,7 @@ impl ClientBuilder {
             sync_send,
             miner_send,
             store,
-            gossip_cache,
+            file_location_cache,
             network.keypair.clone(),
         );
 

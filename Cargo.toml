@@ -12,7 +12,7 @@ members = [
 
     "node",
     "node/chunk_pool",
-    "node/gossip_cache",
+    "node/file_location_cache",
     "node/log_entry_sync",
     "node/miner",
     "node/network",

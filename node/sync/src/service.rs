@@ -1,5 +1,5 @@
 use crate::{controllers::SerialSyncController, SyncNetworkContext};
-use gossip_cache::GossipCache;
+use file_location_cache::FileLocationCache;
 use network::{
     rpc::GetChunksRequest, rpc::RPCResponseErrorCode, Multiaddr, NetworkGlobals, NetworkMessage,
     PeerId, PeerRequestId, SyncId as RequestId,
@@ -80,7 +80,7 @@ pub struct SyncService {
     store: Store,
 
     /// Cache for storing and serving gossip messages.
-    gossip_cache: Arc<GossipCache>,
+    file_location_cache: Arc<FileLocationCache>,
 
     /// A collection of file sync controllers.
     controllers: HashMap<u64, SerialSyncController>,
@@ -95,7 +95,7 @@ impl SyncService {
         network_send: mpsc::UnboundedSender<NetworkMessage>,
         network_globals: Arc<NetworkGlobals>,
         store: Arc<dyn LogStore>,
-        gossip_cache: Arc<GossipCache>,
+        file_location_cache: Arc<FileLocationCache>,
     ) -> SyncSender {
         let (sync_send, sync_recv) = channel::Channel::unbounded();
 
@@ -109,7 +109,7 @@ impl SyncService {
             ctx: Arc::new(SyncNetworkContext::new(network_send)),
             network_globals,
             store,
-            gossip_cache,
+            file_location_cache,
             controllers: Default::default(),
             heartbeat,
         };
@@ -352,7 +352,7 @@ impl SyncService {
                         num_chunks,
                         self.ctx.clone(),
                         self.store.clone(),
-                        self.gossip_cache.clone(),
+                        self.file_location_cache.clone(),
                     )
                 } else {
                     SerialSyncController::new(
@@ -361,7 +361,7 @@ impl SyncService {
                         num_chunks,
                         self.ctx.clone(),
                         self.store.clone(),
-                        self.gossip_cache.clone(),
+                        self.file_location_cache.clone(),
                     )
                 };
 

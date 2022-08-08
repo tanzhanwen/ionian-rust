@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 merkle_tree = { path = "../../common/merkle_tree"}
-
 anyhow = { version = "1.0.57", features = ["backtrace"] }
 ethereum-types = "0.12"
 eth2_ssz = "0.4.0"
@@ -16,3 +15,4 @@ tiny-keccak = "2.0.2"
 tracing = "0.1.35"
 typenum = "1.15.0"
 serde = { version = "1.0.137", features = ["derive"] }
+chrono = "0.4.19"
