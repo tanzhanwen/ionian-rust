@@ -1,8 +1,8 @@
 use crate::{controllers::SerialSyncController, SyncNetworkContext};
 use file_location_cache::FileLocationCache;
 use network::{
-    rpc::GetChunksRequest, rpc::RPCResponseErrorCode, Multiaddr, NetworkGlobals, NetworkMessage,
-    PeerId, PeerRequestId, SyncId as RequestId,
+    rpc::GetChunksRequest, rpc::RPCResponseErrorCode, Multiaddr, NetworkMessage, PeerId,
+    PeerRequestId, SyncId as RequestId,
 };
 use shared_types::{bytes_to_chunks, ChunkArrayWithProof};
 use std::{
@@ -72,10 +72,6 @@ pub struct SyncService {
     /// A network context to contact the network service.
     ctx: Arc<SyncNetworkContext>,
 
-    /// A reference to the network globals and peer-db.
-    #[allow(dead_code)]
-    network_globals: Arc<NetworkGlobals>,
-
     /// Log and transaction storage.
     store: Store,
 
@@ -93,7 +89,6 @@ impl SyncService {
     pub fn spawn(
         executor: task_executor::TaskExecutor,
         network_send: mpsc::UnboundedSender<NetworkMessage>,
-        network_globals: Arc<NetworkGlobals>,
         store: Arc<dyn LogStore>,
         file_location_cache: Arc<FileLocationCache>,
     ) -> SyncSender {
@@ -107,7 +102,6 @@ impl SyncService {
         let mut sync = SyncService {
             msg_recv: sync_recv,
             ctx: Arc::new(SyncNetworkContext::new(network_send)),
-            network_globals,
             store,
             file_location_cache,
             controllers: Default::default(),
@@ -331,7 +325,7 @@ impl SyncService {
                     Ok(Some(tx)) => tx,
                     res => {
                         // TODO(ionian-dev): this is a silent failure, should we notify the caller?
-                        warn!(%tx_seq, "Unable to start sync file, transaction not found: {res:?}");
+                        warn!(%tx_seq, "Unable to start sync file, transaction not found: {:?}", res);
                         return;
                     }
                 };
@@ -345,25 +339,19 @@ impl SyncService {
                 };
 
                 // TODO(ionian-dev): this is a silent failure, should we notify the caller?
-                let c = if self.store.check_tx_completed(tx_seq).await.unwrap_or(false) {
-                    SerialSyncController::new_completed(
-                        tx_seq,
-                        tx.data_merkle_root,
-                        num_chunks,
-                        self.ctx.clone(),
-                        self.store.clone(),
-                        self.file_location_cache.clone(),
-                    )
-                } else {
-                    SerialSyncController::new(
-                        tx_seq,
-                        tx.data_merkle_root,
-                        num_chunks,
-                        self.ctx.clone(),
-                        self.store.clone(),
-                        self.file_location_cache.clone(),
-                    )
-                };
+                if self.store.check_tx_completed(tx_seq).await.unwrap_or(false) {
+                    debug!(%tx_seq, "File already exists");
+                    return;
+                }
+
+                let c = SerialSyncController::new(
+                    tx_seq,
+                    tx.data_merkle_root,
+                    num_chunks,
+                    self.ctx.clone(),
+                    self.store.clone(),
+                    self.file_location_cache.clone(),
+                );
 
                 entry.insert(c)
             }
@@ -401,10 +389,18 @@ impl SyncService {
     }
 
     fn on_heartbeat(&mut self) {
-        for controller in self.controllers.values_mut() {
+        let mut completed = vec![];
+
+        for (&tx_seq, controller) in self.controllers.iter_mut() {
             controller.transition();
+
+            if controller.is_completed() {
+                completed.push(tx_seq);
+            }
         }
 
-        // TODO(ionian-dev): gc old controllers
+        for tx_seq in completed {
+            self.controllers.remove(&tx_seq);
+        }
     }
 }

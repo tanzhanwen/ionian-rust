@@ -12,10 +12,7 @@ use std::{
 };
 use storage_async::Store;
 
-const CHUNK_BATCH_SIZE: usize = 2 * 1024;
-
-// TODO(ionian-dev): set an appropriate request size
-const MAX_CHUNKS_TO_REQUEST: usize = CHUNK_BATCH_SIZE;
+const MAX_CHUNKS_TO_REQUEST: usize = 2 * 1024;
 
 const PEER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5);
@@ -110,6 +107,8 @@ impl SyncPeers {
     }
 
     fn transition(&mut self) {
+        let mut bad_peers = vec![];
+
         for (peer_id, info) in self.peers.iter_mut() {
             match info.state {
                 PeerState::Connecting => {
@@ -120,6 +119,7 @@ impl SyncPeers {
                     if info.since.elapsed() >= PEER_CONNECT_TIMEOUT {
                         warn!(%peer_id, "Peer connection timeout");
                         info.state = PeerState::Failed;
+                        bad_peers.push(*peer_id);
                     }
                 }
 
@@ -127,14 +127,19 @@ impl SyncPeers {
                     if info.since.elapsed() >= PEER_DISCONNECT_TIMEOUT {
                         warn!(%peer_id, "Peer disconnect timeout");
                         info.state = PeerState::Failed;
+                        bad_peers.push(*peer_id);
                     }
                 }
+
+                PeerState::Failed => bad_peers.push(*peer_id),
 
                 _ => {}
             }
         }
 
-        // TODO(ionian-dev): gc peers?
+        for peer_id in bad_peers {
+            self.peers.remove(&peer_id);
+        }
     }
 }
 
@@ -218,31 +223,14 @@ impl SerialSyncController {
         }
     }
 
-    pub(crate) fn new_completed(
-        tx_seq: u64,
-        data_root: DataRoot,
-        num_chunks: usize,
-        ctx: Arc<SyncNetworkContext>,
-        store: Store,
-        file_location_cache: Arc<FileLocationCache>,
-    ) -> Self {
-        SerialSyncController {
-            tx_seq,
-            data_root,
-            num_chunks,
-            next_chunk: 0,
-            state: SyncState::Completed,
-            peers: Default::default(),
-            ctx,
-            store,
-            file_location_cache,
-        }
-    }
-
     fn publish(&mut self, msg: PubsubMessage) {
         self.ctx.send(NetworkMessage::Publish {
             messages: vec![msg],
         });
+    }
+
+    pub fn is_completed(&self) -> bool {
+        matches!(self.state, SyncState::Completed)
     }
 
     pub fn is_failed(&self) -> bool {
@@ -256,7 +244,6 @@ impl SerialSyncController {
     pub fn reset(&mut self) {
         self.next_chunk = 0;
         self.state = SyncState::Idle;
-        // TODO(ionian-dev): reset peers?
     }
 
     fn try_find_peers(&mut self) {
@@ -427,7 +414,6 @@ impl SerialSyncController {
         };
 
         // validate Merkle proofs
-        // TODO(ionian-dev): consider doing this in a worker task
         let validation_result = response.validate(&self.data_root, self.num_chunks);
 
         if !matches!(validation_result, Ok(true)) {
@@ -441,7 +427,7 @@ impl SerialSyncController {
 
         // unexpected DB error while storing chunks
         if let Err(e) = result {
-            let err = format!("Unexpected DB error while storing chunks: {e:?}");
+            let err = format!("Unexpected DB error while storing chunks: {:?}", e);
             error!("{}", err);
             self.state = SyncState::Failed { reason: err };
             return;
@@ -451,9 +437,8 @@ impl SerialSyncController {
 
         // check if this is the last chunk
         if self.next_chunk == self.num_chunks {
-            // FIXME(ionian-dev): disconnect peer
             if let Err(e) = self.store.finalize_tx(self.tx_seq).await {
-                let err = format!("Unexpected error during finalize_tx: {e:?}");
+                let err = format!("Unexpected error during finalize_tx: {:?}", e);
                 error!("{}", err);
                 self.state = SyncState::Failed { reason: err };
                 return;

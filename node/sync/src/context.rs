@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use network::NetworkMessage;
 use tokio::sync::mpsc;
 

@@ -196,7 +196,7 @@ impl ChunkWithProof {
     }
 }
 
-#[derive(Clone, PartialEq, DeriveEncode, DeriveDecode)]
+#[derive(Debug, Clone, PartialEq, DeriveEncode, DeriveDecode)]
 pub struct ChunkArrayWithProof {
     pub chunks: ChunkArray,
     // TODO: The top levels of the two proofs can be merged.
@@ -286,13 +286,6 @@ impl ChunkArrayWithProof {
     }
 }
 
-impl std::fmt::Debug for ChunkArrayWithProof {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // TODO(ionian-dev): replace this with something more meaningful
-        f.write_str("ChunkArrayWithProof")
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, DeriveEncode, DeriveDecode)]
 pub struct ChunkArray {
     // The length is exactly a multiple of `CHUNK_SIZE`
@@ -347,8 +340,8 @@ impl std::fmt::Display for ChunkArray {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "ChunkArray {{ data_len = {}, start_index = {} }}",
-            self.data.len(),
+            "ChunkArray {{ chunks = {}, start_index = {} }}",
+            self.data.len() / CHUNK_SIZE,
             self.start_index
         )
     }
