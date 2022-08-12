@@ -113,7 +113,7 @@ impl ssz::Decode for WrappedPeerId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct FindFile {
     pub tx_seq: u64,
     pub timestamp: u32,
@@ -162,7 +162,7 @@ impl Deref for SignedAnnounceFile {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PubsubMessage {
     ExampleMessage(u64),
     FindFile(FindFile),

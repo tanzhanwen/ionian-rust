@@ -28,7 +28,7 @@ pub struct OutboundRequestContainer {
     pub max_rpc_size: usize,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutboundRequest {
     Status(StatusMessage),
     Goodbye(GoodbyeReason),

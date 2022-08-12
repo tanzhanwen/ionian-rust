@@ -42,7 +42,7 @@ impl<H: Hasher> Hashable<H> for Chunk {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, DeriveEncode, DeriveDecode, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, DeriveEncode, DeriveDecode, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Proof {
     pub lemma: Vec<H256>,
@@ -196,7 +196,7 @@ impl ChunkWithProof {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, DeriveEncode, DeriveDecode)]
+#[derive(Debug, Clone, PartialEq, Eq, DeriveEncode, DeriveDecode)]
 pub struct ChunkArrayWithProof {
     pub chunks: ChunkArray,
     // TODO: The top levels of the two proofs can be merged.

@@ -63,7 +63,7 @@ pub struct Receiver<N, Req, Res> {
 
 impl<N, Req, Res> Receiver<N, Req, Res> {
     pub async fn recv(&mut self) -> Option<Message<N, Req, Res>> {
-        return self.chan.recv().await;
+        self.chan.recv().await
     }
 }
 
@@ -80,7 +80,7 @@ mod tests {
         GetNumber,
     }
 
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, PartialEq, Eq)]
     enum Response {
         GetNumber(u32),
     }

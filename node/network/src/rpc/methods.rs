@@ -28,7 +28,7 @@ pub const MAX_DATA_LEN: u64 = 256;
 // Maximum length of GetChunksResponse chunk data.
 pub const MAX_CHUNKS_LENGTH: usize = 10 * 1024 * 1024; // 10M
 
-#[derive(Encode, Decode, Clone, Debug, PartialEq)]
+#[derive(Encode, Decode, Clone, Debug, PartialEq, Eq)]
 pub struct IonianData {
     pub hash: Hash256,
 }
@@ -69,13 +69,13 @@ impl ToString for ErrorType {
 /* Requests */
 
 /// The STATUS request/response handshake message.
-#[derive(Encode, Decode, Clone, Debug, PartialEq)]
+#[derive(Encode, Decode, Clone, Debug, PartialEq, Eq)]
 pub struct StatusMessage {
     pub data: u64,
 }
 
 /// The PING request/response message.
-#[derive(Encode, Decode, Clone, Debug, PartialEq)]
+#[derive(Encode, Decode, Clone, Debug, PartialEq, Eq)]
 pub struct Ping {
     /// The metadata sequence number.
     pub data: u64,
@@ -86,7 +86,7 @@ pub struct Ping {
 /// Note: any unknown `u64::into(n)` will resolve to `Goodbye::Unknown` for any unknown `n`,
 /// however `GoodbyeReason::Unknown.into()` will go into `0_u64`. Therefore de-serializing then
 /// re-serializing may not return the same bytes.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GoodbyeReason {
     /// This node has shutdown.
     ClientShutdown = 1,
@@ -172,14 +172,14 @@ impl ssz::Decode for GoodbyeReason {
 }
 
 /// Request a number of beacon block bodies from a peer.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DataByHashRequest {
     /// The list of beacon block bodies being requested.
     pub hashes: VariableList<Hash256, MaxRequestBlocks>,
 }
 
 /// Request a chunk array from a peer.
-#[derive(Encode, Decode, Clone, Debug, PartialEq)]
+#[derive(Encode, Decode, Clone, Debug, PartialEq, Eq)]
 pub struct GetChunksRequest {
     pub tx_seq: u64,
     pub index_start: u32,
@@ -189,7 +189,7 @@ pub struct GetChunksRequest {
 /* RPC Handling and Grouping */
 // Collection of enums and structs used by the Codecs to encode/decode RPC messages
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RPCResponse {
     /// A HELLO message.
     Status(StatusMessage),
@@ -225,7 +225,7 @@ pub enum RPCCodedResponse {
 }
 
 /// The code assigned to an erroneous `RPCResponse`.
-#[derive(Debug, Clone, Copy, PartialEq, IntoStaticStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum RPCResponseErrorCode {
     RateLimited,

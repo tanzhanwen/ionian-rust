@@ -163,7 +163,7 @@ impl UpgradeInfo for RPCProtocol {
 }
 
 /// Represents the ssz length bounds for RPC messages.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct RpcLimits {
     pub min: usize,
     pub max: usize,
@@ -321,7 +321,7 @@ where
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InboundRequest {
     Status(StatusMessage),
     Goodbye(GoodbyeReason),

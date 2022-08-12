@@ -9,7 +9,7 @@ use std::sync::Weak;
 use tokio::runtime::Runtime;
 
 /// Provides a reason when node is shut down.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug)]
 pub enum ShutdownReason {
     /// The node shut down successfully.
     Success(&'static str),
