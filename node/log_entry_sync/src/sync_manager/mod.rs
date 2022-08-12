@@ -93,7 +93,19 @@ impl LogSyncManager {
 
     async fn sync(&mut self, sender: UnboundedSender<Transaction>) -> Result<()> {
         loop {
-            self.fetch_to_end(sender.clone(), self.next_tx_seq).await?;
+            debug!("start sync from tx_seq={}", self.next_tx_seq);
+            // `next_tx_seq` is only updated after successfully fetching data, so retrying
+            // here ensures we will fetch all data.
+            // TODO(zz): Handle errors when we call `put_tx` in another thread.
+            match self.fetch_to_end(sender.clone(), self.next_tx_seq).await {
+                Ok(()) => {}
+                Err(e) => {
+                    error!(
+                        "log sync error: next_tx_seq={}, e={:?}",
+                        self.next_tx_seq, e
+                    );
+                }
+            }
             tokio::time::sleep(self.config.sync_period).await;
         }
     }

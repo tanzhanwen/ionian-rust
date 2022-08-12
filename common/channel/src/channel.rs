@@ -68,7 +68,6 @@ impl<N, Req, Res> Receiver<N, Req, Res> {
 }
 
 #[cfg(test)]
-
 mod tests {
     use super::*;
 
