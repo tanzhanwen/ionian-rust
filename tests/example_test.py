@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
 
-import tempfile
-
-from config.node_config import CONFLUX_GENESIS_ACCOUNT
 from test_framework.test_framework import TestFramework
 from utility.utils import create_proof_and_segment, generate_data_root, wait_until
 
