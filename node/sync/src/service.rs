@@ -1,4 +1,5 @@
-use crate::{controllers::SerialSyncController, SyncNetworkContext};
+use crate::context::SyncNetworkContext;
+use crate::controllers::{SerialSyncController, SyncState};
 use file_location_cache::FileLocationCache;
 use network::{
     rpc::GetChunksRequest, rpc::RPCResponseErrorCode, Multiaddr, NetworkMessage, PeerId,
@@ -22,32 +23,26 @@ pub enum SyncMessage {
     PeerConnected {
         peer_id: PeerId,
     },
-
     PeerDisconnected {
         peer_id: PeerId,
     },
-
     StartSyncFile {
         tx_seq: u64,
     },
-
     RequestChunks {
         peer_id: PeerId,
         request_id: PeerRequestId,
         request: GetChunksRequest,
     },
-
     ChunksResponse {
         peer_id: PeerId,
         request_id: RequestId,
         response: ChunkArrayWithProof,
     },
-
     RpcError {
         peer_id: PeerId,
         request_id: RequestId,
     },
-
     AnnounceFileGossip {
         tx_seq: u64,
         peer_id: PeerId,
@@ -185,7 +180,7 @@ impl SyncService {
         match req {
             SyncRequest::SyncStatus { tx_seq } => {
                 let status = match self.controllers.get_mut(&tx_seq) {
-                    Some(controller) => controller.get_status(),
+                    Some(controller) => format!("{:?}", controller.get_status()),
                     None => "unknown".to_string(),
                 };
 
@@ -358,7 +353,7 @@ impl SyncService {
         };
 
         // trigger retry after failure
-        if controller.is_failed() {
+        if let SyncState::Failed { .. } = controller.get_status() {
             controller.reset();
         }
 
@@ -394,7 +389,7 @@ impl SyncService {
         for (&tx_seq, controller) in self.controllers.iter_mut() {
             controller.transition();
 
-            if controller.is_completed() {
+            if let SyncState::Completed = controller.get_status() {
                 completed.push(tx_seq);
             }
         }

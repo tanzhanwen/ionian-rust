@@ -1,4 +1,4 @@
 mod peers;
 mod serial;
 
-pub(crate) use serial::SerialSyncController;
+pub use serial::{SerialSyncController, SyncState};

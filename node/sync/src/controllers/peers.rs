@@ -7,13 +7,12 @@ const PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const PEER_DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PeerState {
+pub enum PeerState {
     Found,
     Connecting,
     Connected,
     Disconnecting,
     Disconnected,
-    Failed,
 }
 
 struct PeerInfo {
@@ -35,7 +34,7 @@ impl PeerInfo {
 }
 
 #[derive(Default)]
-pub(crate) struct SyncPeers {
+pub struct SyncPeers {
     peers: HashMap<PeerId, PeerInfo>,
 }
 
@@ -57,21 +56,31 @@ impl SyncPeers {
         true
     }
 
-    pub fn update_state(&mut self, peer_id: PeerId, from: PeerState, to: PeerState) {
-        match self.peers.get_mut(&peer_id) {
-            Some(info) if info.state == from => info.update_state(to),
-            Some(PeerInfo { state, .. }) => {
-                warn!(%peer_id, expected=?from, got=?state, "Received update_state in unexpected peer state");
-                *state = PeerState::Failed;
-            }
-            None => {
-                warn!(%peer_id, "Received update_state for nonexistent peer");
-            }
+    pub fn update_state(
+        &mut self,
+        peer_id: &PeerId,
+        from: PeerState,
+        to: PeerState,
+    ) -> Option<bool> {
+        let info = self.peers.get_mut(peer_id)?;
+
+        if info.state == from {
+            info.update_state(to);
+            Some(true)
+        } else {
+            Some(false)
         }
     }
 
-    pub fn peer_state(&self, peer_id: PeerId) -> Option<PeerState> {
-        self.peers.get(&peer_id).map(|info| info.state)
+    pub fn update_state_force(&mut self, peer_id: &PeerId, state: PeerState) -> Option<PeerState> {
+        let info = self.peers.get_mut(peer_id)?;
+        let old_state = info.state;
+        info.state = state;
+        Some(old_state)
+    }
+
+    pub fn peer_state(&self, peer_id: &PeerId) -> Option<PeerState> {
+        self.peers.get(peer_id).map(|info| info.state)
     }
 
     pub fn random_peer(&self, state: PeerState) -> Option<(PeerId, Multiaddr)> {
@@ -94,29 +103,27 @@ impl SyncPeers {
 
         for (peer_id, info) in self.peers.iter_mut() {
             match info.state {
+                PeerState::Found | PeerState::Connected => {}
+
                 PeerState::Connecting => {
                     // handle timeout
                     // Note: timeouts and other connection issues generate SwarmEvents,
                     // however, these are currently not propagated to the higher layers.
                     // TODO(ionian-dev): consider handling connection failure events.
                     if info.since.elapsed() >= PEER_CONNECT_TIMEOUT {
-                        warn!(%peer_id, "Peer connection timeout");
-                        info.state = PeerState::Failed;
+                        info!(%peer_id, %info.addr, "Peer connection timeout");
                         bad_peers.push(*peer_id);
                     }
                 }
 
                 PeerState::Disconnecting => {
                     if info.since.elapsed() >= PEER_DISCONNECT_TIMEOUT {
-                        warn!(%peer_id, "Peer disconnect timeout");
-                        info.state = PeerState::Failed;
+                        info!(%peer_id, %info.addr, "Peer disconnect timeout");
                         bad_peers.push(*peer_id);
                     }
                 }
 
-                PeerState::Failed => bad_peers.push(*peer_id),
-
-                _ => {}
+                PeerState::Disconnected => bad_peers.push(*peer_id),
             }
         }
 

@@ -1,7 +1,7 @@
-use network::NetworkMessage;
+use network::{NetworkMessage, PubsubMessage};
 use tokio::sync::mpsc;
 
-pub(crate) struct SyncNetworkContext {
+pub struct SyncNetworkContext {
     network_send: mpsc::UnboundedSender<NetworkMessage>,
 }
 
@@ -15,5 +15,12 @@ impl SyncNetworkContext {
         self.network_send.send(msg).unwrap_or_else(|_| {
             warn!("Could not send message to the network service");
         })
+    }
+
+    /// Publishes a single message.
+    pub fn publish(&self, msg: PubsubMessage) {
+        self.send(NetworkMessage::Publish {
+            messages: vec![msg],
+        });
     }
 }
