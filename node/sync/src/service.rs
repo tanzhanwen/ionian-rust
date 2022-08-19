@@ -21,6 +21,9 @@ pub type SyncSender = channel::Sender<SyncMessage, SyncRequest, SyncResponse>;
 
 #[derive(Debug)]
 pub enum SyncMessage {
+    DailFailed {
+        peer_id: PeerId,
+    },
     PeerConnected {
         peer_id: PeerId,
     },
@@ -130,6 +133,9 @@ impl SyncService {
         debug!("Sync received message {:?}", msg);
 
         match msg {
+            SyncMessage::DailFailed { peer_id } => {
+                self.on_dail_failed(peer_id);
+            }
             SyncMessage::PeerConnected { peer_id } => {
                 self.on_peer_connected(peer_id);
             }
@@ -195,6 +201,15 @@ impl SyncService {
 
                 let _ = sender.send(SyncResponse::SyncFile { err });
             }
+        }
+    }
+
+    fn on_dail_failed(&mut self, peer_id: PeerId) {
+        info!(%peer_id, "Dail to peer failed");
+
+        for controller in self.controllers.values_mut() {
+            controller.on_dail_failed(peer_id);
+            controller.transition();
         }
     }
 

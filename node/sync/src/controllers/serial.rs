@@ -237,6 +237,15 @@ impl SerialSyncController {
         }
     }
 
+    pub fn on_dail_failed(&mut self, peer_id: PeerId) {
+        if let Some(true) =
+            self.peers
+                .update_state(&peer_id, PeerState::Connecting, PeerState::Disconnected)
+        {
+            self.state = SyncState::Idle;
+        }
+    }
+
     pub fn on_peer_connected(&mut self, peer_id: PeerId) {
         match self
             .peers

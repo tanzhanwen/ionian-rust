@@ -278,8 +278,8 @@ impl RouterService {
                     match Swarm::dial(&mut self.libp2p.swarm, address.clone()) {
                         Ok(()) => debug!(%address, "Dialing libp2p peer"),
                         Err(err) => {
-                            // TODO(ionian-dev): consider sending a dial failed message
-                            debug!(%address, error = ?err, "Could not connect to peer")
+                            info!(%address, error = ?err, "Failed to dial peer");
+                            self.send_to_sync(SyncMessage::DailFailed { peer_id });
                         }
                     };
                 }
