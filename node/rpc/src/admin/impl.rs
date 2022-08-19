@@ -3,7 +3,7 @@ use crate::types::RpcResult;
 use crate::{error, Context};
 use futures::prelude::*;
 use jsonrpsee::core::async_trait;
-use sync::{SyncMessage, SyncRequest, SyncResponse, SyncSender};
+use sync::{SyncRequest, SyncResponse, SyncSender};
 use task_executor::ShutdownReason;
 
 pub struct RpcServerImpl {
@@ -28,9 +28,22 @@ impl RpcServer for RpcServerImpl {
     async fn start_sync_file(&self, tx_seq: u64) -> RpcResult<()> {
         info!("admin_startSyncFile({tx_seq})");
 
-        self.sync_send()?
-            .notify(SyncMessage::StartSyncFile { tx_seq })
-            .map_err(|e| error::internal_error(format!("Failed to send sync command: {:?}", e)))
+        let response = self
+            .sync_send()?
+            .request(SyncRequest::SyncFile { tx_seq })
+            .await
+            .map_err(|e| error::internal_error(format!("Failed to send sync command: {:?}", e)))?;
+
+        match response {
+            SyncResponse::SyncFile { err } => {
+                if err.is_empty() {
+                    Ok(())
+                } else {
+                    Err(error::internal_error(err))
+                }
+            }
+            _ => Err(error::internal_error("unexpected response type")),
+        }
     }
 
     #[tracing::instrument(skip(self), err)]
@@ -45,6 +58,7 @@ impl RpcServer for RpcServerImpl {
 
         match response {
             SyncResponse::SyncStatus { status } => Ok(status),
+            _ => Err(error::internal_error("unexpected response type")),
         }
     }
 }

@@ -6022,6 +6022,7 @@ dependencies = [
 name = "sync"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "channel",
  "file_location_cache",
  "network",

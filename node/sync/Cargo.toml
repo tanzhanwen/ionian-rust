@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = { version = "1.0.58", features = ["backtrace"] }
 channel = { path = "../../common/channel" }
 file_location_cache = { path = "../file_location_cache" }
 network = { path = "../network" }

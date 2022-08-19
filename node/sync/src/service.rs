@@ -1,5 +1,6 @@
 use crate::context::SyncNetworkContext;
 use crate::controllers::{SerialSyncController, SyncState};
+use anyhow::{bail, Result};
 use file_location_cache::FileLocationCache;
 use network::{
     rpc::GetChunksRequest, rpc::RPCResponseErrorCode, Multiaddr, NetworkMessage, PeerId,
@@ -26,9 +27,6 @@ pub enum SyncMessage {
     PeerDisconnected {
         peer_id: PeerId,
     },
-    StartSyncFile {
-        tx_seq: u64,
-    },
     RequestChunks {
         peer_id: PeerId,
         request_id: PeerRequestId,
@@ -53,11 +51,13 @@ pub enum SyncMessage {
 #[derive(Debug)]
 pub enum SyncRequest {
     SyncStatus { tx_seq: u64 },
+    SyncFile { tx_seq: u64 },
 }
 
 #[derive(Debug)]
 pub enum SyncResponse {
     SyncStatus { status: String },
+    SyncFile { err: String },
 }
 
 pub struct SyncService {
@@ -116,7 +116,7 @@ impl SyncService {
                 Some(msg) = self.msg_recv.recv() => {
                     match msg {
                         channel::Message::Notification(msg) => self.on_sync_msg(msg).await,
-                        channel::Message::Request(req, sender) => self.on_sync_request(req, sender),
+                        channel::Message::Request(req, sender) => self.on_sync_request(req, sender).await,
                     }
                 }
 
@@ -155,10 +155,6 @@ impl SyncService {
                 self.on_chunks_response(peer_id, request_id, response).await;
             }
 
-            SyncMessage::StartSyncFile { tx_seq } => {
-                self.on_start_sync_file(tx_seq, None).await;
-            }
-
             SyncMessage::RpcError {
                 peer_id,
                 request_id,
@@ -176,7 +172,11 @@ impl SyncService {
         }
     }
 
-    fn on_sync_request(&mut self, req: SyncRequest, sender: channel::ResponseSender<SyncResponse>) {
+    async fn on_sync_request(
+        &mut self,
+        req: SyncRequest,
+        sender: channel::ResponseSender<SyncResponse>,
+    ) {
         match req {
             SyncRequest::SyncStatus { tx_seq } => {
                 let status = match self.controllers.get_mut(&tx_seq) {
@@ -185,6 +185,15 @@ impl SyncService {
                 };
 
                 let _ = sender.send(SyncResponse::SyncStatus { status });
+            }
+
+            SyncRequest::SyncFile { tx_seq } => {
+                let err = match self.on_start_sync_file(tx_seq, None).await {
+                    Ok(()) => "".into(),
+                    Err(err) => err.to_string(),
+                };
+
+                let _ = sender.send(SyncResponse::SyncFile { err });
             }
         }
     }
@@ -310,45 +319,42 @@ impl SyncService {
         }
     }
 
-    async fn on_start_sync_file(&mut self, tx_seq: u64, maybe_peer: Option<(PeerId, Multiaddr)>) {
+    async fn on_start_sync_file(
+        &mut self,
+        tx_seq: u64,
+        maybe_peer: Option<(PeerId, Multiaddr)>,
+    ) -> Result<()> {
         info!(%tx_seq, "Start to sync file");
 
         let controller = match self.controllers.entry(tx_seq) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
-                let tx = match self.store.get_tx_by_seq_number(tx_seq).await {
-                    Ok(Some(tx)) => tx,
-                    res => {
-                        // TODO(ionian-dev): this is a silent failure, should we notify the caller?
-                        warn!(%tx_seq, "Unable to start sync file, transaction not found: {:?}", res);
-                        return;
-                    }
+                let tx = match self.store.get_tx_by_seq_number(tx_seq).await? {
+                    Some(tx) => tx,
+                    None => bail!("transaction not found"),
                 };
 
                 let num_chunks = match usize::try_from(tx.size) {
                     Ok(size) => bytes_to_chunks(size),
                     Err(_) => {
                         error!(%tx_seq, "Unexpected transaction size: {}", tx.size);
-                        return;
+                        bail!("Unexpected transaction size");
                     }
                 };
 
-                // TODO(ionian-dev): this is a silent failure, should we notify the caller?
-                if self.store.check_tx_completed(tx_seq).await.unwrap_or(false) {
-                    debug!(%tx_seq, "File already exists");
-                    return;
+                // file already exists
+                if self.store.check_tx_completed(tx_seq).await? {
+                    bail!("File already exists");
                 }
 
-                let c = SerialSyncController::new(
+                entry.insert(SerialSyncController::new(
                     tx_seq,
                     tx.data_merkle_root,
                     num_chunks,
                     self.ctx.clone(),
                     self.store.clone(),
                     self.file_location_cache.clone(),
-                );
-
-                entry.insert(c)
+                ))
             }
         };
 
@@ -362,6 +368,8 @@ impl SyncService {
         }
 
         controller.transition();
+
+        Ok(())
     }
 
     async fn on_announce_file_gossip(&mut self, tx_seq: u64, peer_id: PeerId, addr: Multiaddr) {
@@ -375,12 +383,19 @@ impl SyncService {
         }
 
         // File already exists and ignore the AnnounceFile message
-        if self.store.check_tx_completed(tx_seq).await.unwrap_or(false) {
-            return;
+        match self.store.check_tx_completed(tx_seq).await {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(err) => {
+                error!(%tx_seq, %err, "Failed to check if file finalized");
+                return;
+            }
         }
 
         // Now, always sync files among all nodes
-        self.on_start_sync_file(tx_seq, Some((peer_id, addr))).await;
+        if let Err(err) = self.on_start_sync_file(tx_seq, Some((peer_id, addr))).await {
+            error!(%tx_seq, %err, "Failed to sync file");
+        }
     }
 
     fn on_heartbeat(&mut self) {
