@@ -3,14 +3,15 @@ use crate::controllers::{SerialSyncController, SyncState};
 use anyhow::{bail, Result};
 use file_location_cache::FileLocationCache;
 use network::{
-    rpc::GetChunksRequest, rpc::RPCResponseErrorCode, Multiaddr, NetworkMessage, PeerId,
-    PeerRequestId, SyncId as RequestId,
+    rpc::GetChunksRequest, rpc::RPCResponseErrorCode, Multiaddr, NetworkMessage, PeerAction,
+    PeerId, PeerRequestId, SyncId as RequestId,
 };
 use shared_types::{bytes_to_chunks, ChunkArrayWithProof};
 use std::{
     collections::{hash_map::Entry, HashMap},
     sync::Arc,
 };
+use storage::error::Result as StorageResult;
 use storage::log_store::Store as LogStore;
 use storage_async::Store;
 use tokio::sync::mpsc;
@@ -240,18 +241,63 @@ impl SyncService {
     ) {
         info!(?request, %peer_id, ?request_id, "Received GetChunks request");
 
-        // TODO(ionian-dev): can we do this validation in the network layer?
-        if request.index_start >= request.index_end {
+        if let Err(err) = self
+            .handle_chunks_request_with_db_err(peer_id, request_id, request)
+            .await
+        {
+            error!(%err, "Failed to handle chunks request due to db error");
             self.ctx.send(NetworkMessage::SendErrorResponse {
                 peer_id,
                 id: request_id,
-                error: RPCResponseErrorCode::InvalidRequest,
-                reason: "Invalid chunk indices".to_string(),
+                error: RPCResponseErrorCode::ServerError,
+                reason: "DB error".into(),
             });
         }
+    }
 
-        // TODO(ionian-dev): consider only serving chunks for files
-        // that we fully store.
+    async fn handle_chunks_request_with_db_err(
+        &mut self,
+        peer_id: PeerId,
+        request_id: PeerRequestId,
+        request: GetChunksRequest,
+    ) -> StorageResult<()> {
+        // ban peer for invalid chunk index range
+        if request.index_start >= request.index_end {
+            self.ctx.ban_peer(peer_id, "Invalid chunk indices");
+            return Ok(());
+        }
+
+        // ban peer if invalid tx requested
+        // TODO(qhz): add cache to get tx, which will not be removed
+        let tx = match self.store.get_tx_by_seq_number(request.tx_seq).await? {
+            Some(tx) => tx,
+            None => {
+                self.ctx.ban_peer(peer_id, "Tx not found");
+                return Ok(());
+            }
+        };
+
+        // ban peer if chunk index out of bound
+        let num_chunks = bytes_to_chunks(tx.size as usize);
+        if request.index_end as usize > num_chunks {
+            self.ctx.ban_peer(peer_id, "Chunk index out of bound");
+            return Ok(());
+        }
+
+        // file may be removed, but remote peer still find one from the file location cache
+        let finalized = self.store.check_tx_completed(request.tx_seq).await?;
+        if !finalized {
+            info!(%request.tx_seq, "Failed to handle chunks request due to tx not finalized");
+            self.ctx
+                .report_peer(peer_id, PeerAction::MidToleranceError, "Tx not finalized");
+            self.ctx.send(NetworkMessage::SendErrorResponse {
+                peer_id,
+                error: RPCResponseErrorCode::InvalidRequest,
+                reason: "Tx not finalized".into(),
+                id: request_id,
+            });
+            return Ok(());
+        }
 
         let result = self
             .store
@@ -260,37 +306,29 @@ impl SyncService {
                 request.index_start as usize,
                 request.index_end as usize,
             )
-            .await;
+            .await?;
 
         match result {
-            Ok(Some(chunks)) => {
+            Some(chunks) => {
                 self.ctx.send(NetworkMessage::SendResponse {
                     peer_id,
                     id: request_id,
                     response: network::Response::Chunks(chunks),
                 });
             }
-            Ok(None) => {
-                // FIXME(ionian-dev): will this happen if the index is out-of-range,
-                // and/or if the data is only partially available on this node?
+            None => {
+                // file may be removed during downloading
+                warn!(%request.tx_seq, "Failed to handle chunks request due to chunks not found");
                 self.ctx.send(NetworkMessage::SendErrorResponse {
                     peer_id,
-                    id: request_id,
                     error: RPCResponseErrorCode::InvalidRequest,
-                    reason: "Chunk does not exist".to_string(),
-                });
-            }
-            Err(e) => {
-                self.ctx.send(NetworkMessage::SendErrorResponse {
-                    peer_id,
+                    reason: "Chunks not found".into(),
                     id: request_id,
-                    error: RPCResponseErrorCode::ServerError,
-                    // FIXME(ionian-dev): it's probably best not to expose
-                    // this to peers, but for now it's useful for debugging.
-                    reason: format!("db error: {:?}", e),
                 });
             }
         }
+
+        Ok(())
     }
 
     async fn on_chunks_response(

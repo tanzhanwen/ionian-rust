@@ -1,4 +1,4 @@
-use network::{NetworkMessage, PubsubMessage};
+use network::{NetworkMessage, PeerAction, PeerId, PubsubMessage, ReportSource};
 use tokio::sync::mpsc;
 
 pub struct SyncNetworkContext {
@@ -22,5 +22,18 @@ impl SyncNetworkContext {
         self.send(NetworkMessage::Publish {
             messages: vec![msg],
         });
+    }
+
+    pub fn report_peer(&self, peer_id: PeerId, action: PeerAction, msg: &'static str) {
+        self.send(NetworkMessage::ReportPeer {
+            peer_id,
+            action,
+            source: ReportSource::SyncService,
+            msg,
+        })
+    }
+
+    pub fn ban_peer(&self, peer_id: PeerId, msg: &'static str) {
+        self.report_peer(peer_id, PeerAction::Fatal, msg);
     }
 }
