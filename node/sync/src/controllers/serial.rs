@@ -23,7 +23,7 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5);
 // - limit number of peers
 // - limit number of retries
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum SyncState {
     Idle,
     FindingPeers {
@@ -465,8 +465,1045 @@ impl SerialSyncController {
                     }
                 }
 
-                SyncState::Completed | SyncState::Failed { .. } => {}
+                SyncState::Completed => {
+                    return;
+                }
+
+                SyncState::Failed { .. } => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cmp;
+
+    use libp2p::identity;
+    use network::{types::AnnounceFile, Request};
+    use rand::random;
+    use shared_types::{ChunkArray, Transaction};
+    use storage::log_store::{
+        sub_merkle_tree, LogStoreChunkWrite, LogStoreRead, LogStoreWrite, SimpleLogStore,
+    };
+    use task_executor::{test_utils::TestRuntime, TaskExecutor};
+    use tokio::sync::mpsc::{self, UnboundedReceiver};
+
+    use super::*;
+
+    #[test]
+    fn test_status() {
+        let runtime = TestRuntime::default();
+        let task_executor = runtime.task_executor.clone();
+        let (mut controller, _) = create_default_controller(task_executor, None);
+
+        assert_eq!(*controller.get_status(), SyncState::Idle);
+        controller.state = SyncState::Completed;
+        assert_eq!(*controller.get_status(), SyncState::Completed);
+
+        controller.reset();
+        assert_eq!(*controller.get_status(), SyncState::Idle);
+    }
+
+    #[tokio::test]
+    async fn test_find_peers() {
+        let runtime = TestRuntime::default();
+        let task_executor = runtime.task_executor.clone();
+        let (mut controller, mut network_recv) = create_default_controller(task_executor, None);
+
+        assert_eq!(controller.peers.count(&[PeerState::Found]), 0);
+
+        controller.try_find_peers();
+        assert!(matches!(
+            *controller.get_status(),
+            SyncState::FindingPeers { .. }
+        ));
+        assert_eq!(controller.peers.count(&[PeerState::Found]), 1);
+        assert_eq!(network_recv.try_recv().is_err(), true);
+
+        controller.try_find_peers();
+        assert_eq!(controller.peers.count(&[PeerState::Found]), 1);
+
+        if let Some(msg) = network_recv.recv().await {
+            match msg {
+                NetworkMessage::Publish { messages } => {
+                    assert_eq!(messages.len(), 1);
+
+                    match &messages[0] {
+                        PubsubMessage::FindFile(data) => {
+                            assert_eq!(data.tx_seq, 0);
+                        }
+                        _ => {
+                            panic!("Not expected message: PubsubMessage::FindFile");
+                        }
+                    }
+                }
+                _ => {
+                    panic!("Not expected message: NetworkMessage::Publish");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_find_peers_not_in_file_cache() {
+        let runtime = TestRuntime::default();
+        let task_executor = runtime.task_executor.clone();
+        let (mut controller, mut network_recv) = create_default_controller(task_executor, None);
+
+        controller.tx_seq = 1;
+        controller.try_find_peers();
+
+        assert_eq!(controller.peers.count(&[PeerState::Found]), 0);
+
+        if let Some(msg) = network_recv.recv().await {
+            match msg {
+                NetworkMessage::Publish { messages } => {
+                    assert_eq!(messages.len(), 1);
+
+                    match &messages[0] {
+                        PubsubMessage::FindFile(data) => {
+                            assert_eq!(data.tx_seq, 1);
+                        }
+                        _ => {
+                            panic!("Not expected message: PubsubMessage::FindFile");
+                        }
+                    }
+                }
+                _ => {
+                    panic!("Not expected message: NetworkMessage::Publish");
+                }
+            }
+        }
+
+        assert!(matches!(
+            *controller.get_status(),
+            SyncState::FindingPeers { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_connect_peers() {
+        let runtime = TestRuntime::default();
+        let task_executor = runtime.task_executor.clone();
+        let (mut controller, mut network_recv) = create_default_controller(task_executor, None);
+
+        controller.state = SyncState::FoundPeers;
+        controller.try_connect();
+        assert_eq!(controller.state, SyncState::Idle);
+        assert_eq!(network_recv.try_recv().is_err(), true);
+
+        let new_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let addr: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
+
+        controller.peers.add_new_peer(new_peer_id, addr.clone());
+        controller.try_connect();
+
+        if let Some(msg) = network_recv.recv().await {
+            match msg {
+                NetworkMessage::DialPeer { address, peer_id } => {
+                    assert_eq!(address, addr);
+                    assert_eq!(peer_id, new_peer_id);
+                }
+                _ => {
+                    panic!("Not expected message: NetworkMessage::DialPeer");
+                }
+            }
+        }
+
+        assert_eq!(controller.state, SyncState::ConnectingPeers);
+    }
+
+    #[tokio::test]
+    async fn test_request_chunks() {
+        let runtime = TestRuntime::default();
+        let task_executor = runtime.task_executor.clone();
+        let (mut controller, mut network_recv) = create_default_controller(task_executor, None);
+
+        controller.state = SyncState::AwaitingDownload;
+        controller.try_request_next();
+        assert_eq!(controller.state, SyncState::Idle);
+        assert_eq!(network_recv.try_recv().is_err(), true);
+
+        let new_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let addr: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
+
+        controller.peers.add_new_peer(new_peer_id, addr.clone());
+        controller
+            .peers
+            .update_state_force(&new_peer_id, PeerState::Connected);
+
+        controller.try_request_next();
+        if let Some(msg) = network_recv.recv().await {
+            match msg {
+                NetworkMessage::SendRequest {
+                    peer_id,
+                    request_id,
+                    request,
+                } => {
+                    assert_eq!(peer_id, new_peer_id);
+                    assert_eq!(
+                        request,
+                        Request::GetChunks(GetChunksRequest {
+                            tx_seq: 0,
+                            index_start: 0,
+                            index_end: 123,
+                        })
+                    );
+
+                    match request_id {
+                        network::RequestId::Sync(sync_id) => match sync_id {
+                            network::SyncId::SerialSync { tx_seq } => {
+                                assert_eq!(tx_seq, 0);
+                            }
+                        },
+                        _ => {
+                            panic!("Not expected message: network::RequestId::Sync");
+                        }
+                    }
+                }
+                _ => {
+                    panic!("Not expected message: NetworkMessage::SendRequest");
+                }
+            }
+        }
+
+        assert!(matches!(
+            *controller.get_status(),
+            SyncState::Downloading { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_ban_peer() {
+        let runtime = TestRuntime::default();
+        let task_executor = runtime.task_executor.clone();
+        let (mut controller, mut network_recv) = create_default_controller(task_executor, None);
+
+        let new_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+        controller.ban_peer(new_peer_id, "unit test");
+
+        if let Some(msg) = network_recv.recv().await {
+            match msg {
+                NetworkMessage::ReportPeer {
+                    peer_id,
+                    action,
+                    source,
+                    msg,
+                } => {
+                    assert_eq!(peer_id, new_peer_id);
+                    match action {
+                        PeerAction::Fatal => {}
+                        _ => {
+                            panic!("PeerAction expect Fatal");
+                        }
+                    }
+
+                    match source {
+                        ReportSource::SyncService => {}
+                        _ => {
+                            panic!("ReportSource expect SyncService");
+                        }
+                    }
+
+                    assert_eq!(msg, "unit test");
+                }
+                _ => {
+                    panic!("Not received expected message: NetworkMessage::ReportPeer");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_report_peer() {
+        let runtime = TestRuntime::default();
+        let task_executor = runtime.task_executor.clone();
+        let (controller, mut network_recv) = create_default_controller(task_executor, None);
+
+        let new_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+        controller.report_peer(new_peer_id, PeerAction::MidToleranceError, "unit test");
+
+        if let Some(msg) = network_recv.recv().await {
+            match msg {
+                NetworkMessage::ReportPeer {
+                    peer_id,
+                    action,
+                    source,
+                    msg,
+                } => {
+                    assert_eq!(peer_id, new_peer_id);
+                    match action {
+                        PeerAction::MidToleranceError => {}
+                        _ => {
+                            panic!("PeerAction expect MidToleranceError");
+                        }
+                    }
+
+                    match source {
+                        ReportSource::SyncService => {}
+                        _ => {
+                            panic!("ReportSource expect SyncService");
+                        }
+                    }
+
+                    assert_eq!(msg, "unit test");
+                }
+                _ => {
+                    panic!("Not expected message: NetworkMessage::ReportPeer");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_peeer_connected() {
+        let new_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let runtime = TestRuntime::default();
+        let task_executor = runtime.task_executor.clone();
+        let (mut controller, _) = create_default_controller(task_executor, Some(new_peer_id));
+
+        let addr: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
+        controller.peers.add_new_peer(new_peer_id, addr.clone());
+
+        controller.on_peer_connected(new_peer_id);
+        assert_eq!(
+            controller.peers.peer_state(&new_peer_id),
+            Some(PeerState::Found)
+        );
+
+        controller
+            .peers
+            .update_state_force(&new_peer_id, PeerState::Connecting);
+        controller.on_peer_connected(new_peer_id);
+        assert_eq!(
+            controller.peers.peer_state(&new_peer_id),
+            Some(PeerState::Connected)
+        );
+    }
+
+    #[test]
+    fn test_peeer_disconnected() {
+        let new_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let runtime = TestRuntime::default();
+        let task_executor = runtime.task_executor.clone();
+        let (mut controller, _) = create_default_controller(task_executor, Some(new_peer_id));
+
+        let addr: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
+        controller.peers.add_new_peer(new_peer_id, addr.clone());
+
+        controller
+            .peers
+            .update_state_force(&new_peer_id, PeerState::Disconnecting);
+        controller.on_peer_disconnected(new_peer_id);
+        assert_eq!(
+            controller.peers.peer_state(&new_peer_id),
+            Some(PeerState::Disconnected)
+        );
+
+        controller
+            .peers
+            .update_state_force(&new_peer_id, PeerState::Found);
+        controller.on_peer_disconnected(new_peer_id);
+        assert_eq!(
+            controller.peers.peer_state(&new_peer_id),
+            Some(PeerState::Disconnected)
+        );
+
+        let new_peer_id_1 = identity::Keypair::generate_ed25519().public().to_peer_id();
+        controller.on_peer_disconnected(new_peer_id_1);
+        assert_eq!(controller.peers.peer_state(&new_peer_id_1), None);
+    }
+
+    #[tokio::test]
+    async fn test_response_mismatch_state_mismatch() {
+        let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let runtime = TestRuntime::default();
+        let task_executor = runtime.task_executor.clone();
+        let (controller, mut network_recv) =
+            create_default_controller(task_executor, Some(init_peer_id));
+
+        assert_eq!(controller.handle_on_response_mismatch(init_peer_id), true);
+
+        if let Some(msg) = network_recv.recv().await {
+            match msg {
+                NetworkMessage::ReportPeer {
+                    peer_id,
+                    action,
+                    source,
+                    msg,
+                } => {
+                    assert_eq!(peer_id, init_peer_id);
+                    match action {
+                        PeerAction::LowToleranceError => {}
+                        _ => {
+                            panic!("PeerAction expect MidToleranceError");
+                        }
+                    }
+
+                    match source {
+                        ReportSource::SyncService => {}
+                        _ => {
+                            panic!("ReportSource expect SyncService");
+                        }
+                    }
+
+                    assert_eq!(msg, "Sync state mismatch");
+                }
+                _ => {
+                    panic!("Not expected message: NetworkMessage::ReportPeer");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_response_mismatch_peer_id_mismatch() {
+        let peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let runtime = TestRuntime::default();
+        let task_executor = runtime.task_executor.clone();
+        let (mut controller, mut network_recv) =
+            create_default_controller(task_executor, Some(peer_id));
+
+        let peer_id_1 = identity::Keypair::generate_ed25519().public().to_peer_id();
+
+        controller.state = SyncState::Downloading {
+            peer_id,
+            from_chunk: 0,
+            to_chunk: 1,
+            since: Instant::now(),
+        };
+        assert_eq!(controller.handle_on_response_mismatch(peer_id_1), true);
+        if let Some(msg) = network_recv.recv().await {
+            match msg {
+                NetworkMessage::ReportPeer {
+                    peer_id,
+                    action,
+                    source,
+                    msg,
+                } => {
+                    assert_eq!(peer_id, peer_id_1);
+                    match action {
+                        PeerAction::LowToleranceError => {}
+                        _ => {
+                            panic!("PeerAction expect MidToleranceError");
+                        }
+                    }
+
+                    match source {
+                        ReportSource::SyncService => {}
+                        _ => {
+                            panic!("ReportSource expect SyncService");
+                        }
+                    }
+
+                    assert_eq!(msg, "Peer id mismatch");
+                }
+                _ => {
+                    panic!("Not expected message: NetworkMessage::ReportPeer");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "Invalid chunk boundaries")]
+    #[ignore = "only panic in debug mode"]
+    async fn test_response_panic() {
+        let peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+
+        let tx_seq = 0;
+        let chunk_count = 123;
+        let (store, peer_store, tx) = create_2_store(tx_seq, chunk_count);
+
+        let runtime = TestRuntime::default();
+        let task_executor = runtime.task_executor.clone();
+        let (mut controller, _) = create_controller(
+            task_executor,
+            Some(peer_id),
+            store,
+            tx.data_merkle_root,
+            tx_seq,
+            chunk_count,
+        );
+
+        let chunks = peer_store
+            .get_chunks_with_proof_by_tx_and_index_range(tx_seq, 0, chunk_count)
+            .unwrap()
+            .unwrap();
+
+        controller.state = SyncState::Downloading {
+            peer_id,
+            from_chunk: 0,
+            to_chunk: 0,
+            since: Instant::now(),
+        };
+        controller.on_response(peer_id, chunks).await;
+    }
+
+    #[tokio::test]
+    async fn test_response_chunk_len_invalid() {
+        let peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+
+        let tx_seq = 0;
+        let chunk_count = 123;
+        let (store, peer_store, tx) = create_2_store(tx_seq, chunk_count);
+
+        let runtime = TestRuntime::default();
+        let task_executor = runtime.task_executor.clone();
+        let (mut controller, mut network_recv) = create_controller(
+            task_executor,
+            Some(peer_id),
+            store,
+            tx.data_merkle_root,
+            tx_seq,
+            chunk_count,
+        );
+
+        let mut chunks = peer_store
+            .get_chunks_with_proof_by_tx_and_index_range(tx_seq, 0, chunk_count)
+            .unwrap()
+            .unwrap();
+
+        controller.state = SyncState::Downloading {
+            peer_id,
+            from_chunk: 0,
+            to_chunk: chunk_count,
+            since: Instant::now(),
+        };
+
+        chunks.chunks.data = Vec::new();
+        controller.on_response(peer_id, chunks).await;
+        assert_eq!(*controller.get_status(), SyncState::Idle);
+        if let Some(msg) = network_recv.recv().await {
+            match msg {
+                NetworkMessage::ReportPeer {
+                    peer_id,
+                    action,
+                    source,
+                    msg,
+                } => {
+                    assert_eq!(peer_id, peer_id);
+                    match action {
+                        PeerAction::Fatal => {}
+                        _ => {
+                            panic!("PeerAction expect Fatal");
+                        }
+                    }
+
+                    match source {
+                        ReportSource::SyncService => {}
+                        _ => {
+                            panic!("ReportSource expect SyncService");
+                        }
+                    }
+
+                    assert_eq!(msg, "Invalid chunk response data length");
+                }
+                _ => {
+                    panic!("Not expected message: NetworkMessage::ReportPeer");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_response_chunk_index_invalid() {
+        let peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+
+        let tx_seq = 0;
+        let chunk_count = 123;
+        let (store, peer_store, tx) = create_2_store(tx_seq, chunk_count);
+
+        let runtime = TestRuntime::default();
+        let task_executor = runtime.task_executor.clone();
+        let (mut controller, mut network_recv) = create_controller(
+            task_executor,
+            Some(peer_id),
+            store,
+            tx.data_merkle_root,
+            tx_seq,
+            chunk_count,
+        );
+
+        let chunks = peer_store
+            .get_chunks_with_proof_by_tx_and_index_range(tx_seq, 0, chunk_count)
+            .unwrap()
+            .unwrap();
+
+        controller.state = SyncState::Downloading {
+            peer_id,
+            from_chunk: 1,
+            to_chunk: chunk_count,
+            since: Instant::now(),
+        };
+
+        controller.on_response(peer_id, chunks).await;
+        assert_eq!(*controller.get_status(), SyncState::Idle);
+        if let Some(msg) = network_recv.recv().await {
+            match msg {
+                NetworkMessage::ReportPeer {
+                    peer_id,
+                    action,
+                    source,
+                    msg,
+                } => {
+                    assert_eq!(peer_id, peer_id);
+                    match action {
+                        PeerAction::Fatal => {}
+                        _ => {
+                            panic!("PeerAction expect Fatal");
+                        }
+                    }
+
+                    match source {
+                        ReportSource::SyncService => {}
+                        _ => {
+                            panic!("ReportSource expect SyncService");
+                        }
+                    }
+
+                    assert_eq!(msg, "Invalid chunk response range");
+                }
+                _ => {
+                    panic!("Not expected message: NetworkMessage::ReportPeer");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_response_validate_failed() {
+        let peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+
+        let tx_seq = 0;
+        let chunk_count = 123;
+        let (store, peer_store, tx) = create_2_store(tx_seq, chunk_count);
+
+        let runtime = TestRuntime::default();
+        let task_executor = runtime.task_executor.clone();
+        let (mut controller, mut network_recv) = create_controller(
+            task_executor,
+            Some(peer_id),
+            store,
+            tx.data_merkle_root,
+            tx_seq,
+            chunk_count,
+        );
+
+        let chunks = peer_store
+            .get_chunks_with_proof_by_tx_and_index_range(tx_seq, 0, chunk_count)
+            .unwrap()
+            .unwrap();
+
+        controller.state = SyncState::Downloading {
+            peer_id,
+            from_chunk: 0,
+            to_chunk: chunk_count,
+            since: Instant::now(),
+        };
+
+        controller.num_chunks = 1;
+
+        controller.on_response(peer_id, chunks).await;
+        assert_eq!(*controller.get_status(), SyncState::Idle);
+        if let Some(msg) = network_recv.recv().await {
+            match msg {
+                NetworkMessage::ReportPeer {
+                    peer_id,
+                    action,
+                    source,
+                    msg,
+                } => {
+                    assert_eq!(peer_id, peer_id);
+                    match action {
+                        PeerAction::Fatal => {}
+                        _ => {
+                            panic!("PeerAction expect Fatal");
+                        }
+                    }
+
+                    match source {
+                        ReportSource::SyncService => {}
+                        _ => {
+                            panic!("ReportSource expect SyncService");
+                        }
+                    }
+
+                    assert_eq!(msg, "Chunk array validation failed");
+                }
+                _ => {
+                    panic!("Not expected message: NetworkMessage::ReportPeer");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_response_put_failed() {
+        let peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+
+        let tx_seq = 0;
+        let chunk_count = 123;
+        let (_, peer_store, tx1) = create_2_store(tx_seq, chunk_count);
+        let (store, _, tx2) = create_2_store(tx_seq, chunk_count);
+
+        let runtime = TestRuntime::default();
+        let task_executor = runtime.task_executor.clone();
+        let (mut controller, mut network_recv) = create_controller(
+            task_executor,
+            Some(peer_id),
+            store,
+            tx2.data_merkle_root,
+            tx_seq,
+            chunk_count,
+        );
+
+        let chunks = peer_store
+            .get_chunks_with_proof_by_tx_and_index_range(tx_seq, 0, chunk_count)
+            .unwrap()
+            .unwrap();
+
+        controller.state = SyncState::Downloading {
+            peer_id,
+            from_chunk: 0,
+            to_chunk: chunk_count,
+            since: Instant::now(),
+        };
+
+        controller.data_root = tx1.data_merkle_root;
+
+        drop(runtime);
+        controller.on_response(peer_id, chunks).await;
+        match controller.get_status() {
+            SyncState::Failed { reason } => {
+                assert!(reason.starts_with("Unexpected DB error while storing chunks: "));
+            }
+            _ => {
+                panic!("Not expected SyncState");
+            }
+        }
+
+        assert_eq!(network_recv.try_recv().is_err(), true);
+    }
+
+    #[tokio::test]
+    async fn test_response_finilize_failed() {
+        let peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+
+        let tx_seq = 0;
+        let chunk_count = 123;
+        let (store, peer_store, tx) = create_2_store(tx_seq, chunk_count);
+
+        let runtime = TestRuntime::default();
+        let task_executor = runtime.task_executor.clone();
+        let (mut controller, mut network_recv) = create_controller(
+            task_executor,
+            Some(peer_id),
+            store,
+            tx.data_merkle_root,
+            tx_seq,
+            chunk_count,
+        );
+
+        let chunks = peer_store
+            .get_chunks_with_proof_by_tx_and_index_range(tx_seq, 0, chunk_count)
+            .unwrap()
+            .unwrap();
+
+        controller.state = SyncState::Downloading {
+            peer_id,
+            from_chunk: 0,
+            to_chunk: chunk_count,
+            since: Instant::now(),
+        };
+
+        controller.tx_seq = 1;
+
+        controller.on_response(peer_id, chunks).await;
+        match controller.get_status() {
+            SyncState::Failed { reason } => {
+                assert!(reason.starts_with("Unexpected error during finalize_tx: "));
+            }
+            _ => {
+                panic!("Not expected SyncState");
+            }
+        }
+
+        assert_eq!(network_recv.try_recv().is_err(), true);
+    }
+
+    #[tokio::test]
+    async fn test_response_success() {
+        let peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+
+        let tx_seq = 0;
+        let chunk_count = 123;
+        let (store, peer_store, tx) = create_2_store(tx_seq, chunk_count);
+
+        let runtime = TestRuntime::default();
+        let task_executor = runtime.task_executor.clone();
+        let (mut controller, mut network_recv) = create_controller(
+            task_executor,
+            Some(peer_id),
+            store,
+            tx.data_merkle_root,
+            tx_seq,
+            chunk_count,
+        );
+
+        let chunks = peer_store
+            .get_chunks_with_proof_by_tx_and_index_range(tx_seq, 0, chunk_count)
+            .unwrap()
+            .unwrap();
+
+        controller.state = SyncState::Downloading {
+            peer_id,
+            from_chunk: 0,
+            to_chunk: chunk_count,
+            since: Instant::now(),
+        };
+
+        controller.on_response(peer_id, chunks).await;
+        assert_eq!(*controller.get_status(), SyncState::Completed);
+        assert_eq!(network_recv.try_recv().is_err(), true);
+    }
+
+    #[tokio::test]
+    async fn test_handle_response_failure() {
+        let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+
+        let tx_seq = 0;
+        let chunk_count = 123;
+        let (store, _, tx) = create_2_store(tx_seq, chunk_count);
+
+        let runtime = TestRuntime::default();
+        let task_executor = runtime.task_executor.clone();
+        let (mut controller, mut network_recv) = create_controller(
+            task_executor,
+            Some(init_peer_id),
+            store,
+            tx.data_merkle_root,
+            tx_seq,
+            chunk_count,
+        );
+
+        for i in 0..(MAX_REQUEST_FAILURES + 1) {
+            controller.handle_response_failure(init_peer_id, "unit test");
+            if let Some(msg) = network_recv.recv().await {
+                match msg {
+                    NetworkMessage::ReportPeer {
+                        peer_id,
+                        action,
+                        source,
+                        msg,
+                    } => {
+                        assert_eq!(peer_id, init_peer_id);
+                        match action {
+                            PeerAction::LowToleranceError => {}
+                            _ => {
+                                panic!("PeerAction expect LowToleranceError");
+                            }
+                        }
+
+                        match source {
+                            ReportSource::SyncService => {}
+                            _ => {
+                                panic!("ReportSource expect SyncService");
+                            }
+                        }
+
+                        assert_eq!(msg, "unit test");
+                    }
+                    _ => {
+                        panic!("Not expected message: NetworkMessage::ReportPeer");
+                    }
+                }
+            }
+
+            assert_eq!(controller.failures, i + 1);
+            if i == MAX_REQUEST_FAILURES {
+                assert_eq!(*controller.get_status(), SyncState::Idle);
+
+                if let Some(msg) = network_recv.recv().await {
+                    match msg {
+                        NetworkMessage::ReportPeer {
+                            peer_id,
+                            action,
+                            source,
+                            msg,
+                        } => {
+                            assert_eq!(peer_id, init_peer_id);
+                            match action {
+                                PeerAction::Fatal => {}
+                                _ => {
+                                    panic!("PeerAction expect Fatal");
+                                }
+                            }
+
+                            match source {
+                                ReportSource::SyncService => {}
+                                _ => {
+                                    panic!("ReportSource expect SyncService");
+                                }
+                            }
+
+                            assert_eq!(msg, "unit test");
+                        }
+                        _ => {
+                            panic!("Not expected message: NetworkMessage::ReportPeer");
+                        }
+                    }
+                }
+            } else {
+                assert_eq!(*controller.get_status(), SyncState::AwaitingDownload);
+            }
+        }
+    }
+
+    fn create_default_controller(
+        task_executor: TaskExecutor,
+        peer_id: Option<PeerId>,
+    ) -> (SerialSyncController, UnboundedReceiver<NetworkMessage>) {
+        let tx_seq = 0;
+        let num_chunks = 123;
+        let data_merkle_root = Default::default();
+
+        let (network_send, network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
+        let ctx = Arc::new(SyncNetworkContext::new(network_send));
+
+        let store = Arc::new(
+            SimpleLogStore::memorydb()
+                .map_err(|e| format!("Unable to start in-memory store: {:?}", e))
+                .unwrap(),
+        );
+
+        let peer_id = match peer_id {
+            Some(v) => v,
+            _ => identity::Keypair::generate_ed25519().public().to_peer_id(),
+        };
+
+        let file_location_cache: Arc<FileLocationCache> = Default::default();
+        {
+            let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
+            let msg = AnnounceFile {
+                tx_seq,
+                peer_id: peer_id.into(),
+                at: address.into(),
+                timestamp: timestamp_now(),
+            };
+
+            let local_private_key = identity::Keypair::generate_secp256k1();
+            let signed_msg = msg
+                .into_signed(&local_private_key)
+                .expect("Sign msg failed");
+            file_location_cache.insert(signed_msg);
+        }
+
+        let controller = SerialSyncController::new(
+            tx_seq,
+            data_merkle_root,
+            num_chunks,
+            ctx,
+            Store::new(store, task_executor),
+            file_location_cache.clone(),
+        );
+
+        (controller, network_recv)
+    }
+
+    fn create_controller(
+        task_executor: TaskExecutor,
+        peer_id: Option<PeerId>,
+        store: Arc<SimpleLogStore>,
+        data_merkle_root: DataRoot,
+        tx_seq: u64,
+        num_chunks: usize,
+    ) -> (SerialSyncController, UnboundedReceiver<NetworkMessage>) {
+        let (network_send, network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
+        let ctx = Arc::new(SyncNetworkContext::new(network_send));
+
+        let peer_id = match peer_id {
+            Some(v) => v,
+            _ => identity::Keypair::generate_ed25519().public().to_peer_id(),
+        };
+
+        let file_location_cache: Arc<FileLocationCache> = Default::default();
+        {
+            let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
+            let msg = AnnounceFile {
+                tx_seq,
+                peer_id: peer_id.into(),
+                at: address.into(),
+                timestamp: timestamp_now(),
+            };
+
+            let local_private_key = identity::Keypair::generate_secp256k1();
+            let signed_msg = msg
+                .into_signed(&local_private_key)
+                .expect("Sign msg failed");
+            file_location_cache.insert(signed_msg);
+        }
+
+        let controller = SerialSyncController::new(
+            tx_seq,
+            data_merkle_root,
+            num_chunks,
+            ctx,
+            Store::new(store, task_executor),
+            file_location_cache.clone(),
+        );
+
+        (controller, network_recv)
+    }
+
+    fn create_2_store(
+        tx_seq: u64,
+        chunk_count: usize,
+    ) -> (Arc<SimpleLogStore>, Arc<SimpleLogStore>, Transaction) {
+        let data_size = CHUNK_SIZE * chunk_count;
+        let mut data = vec![0u8; data_size];
+
+        for i in 0..chunk_count {
+            data[i * CHUNK_SIZE] = random();
+        }
+
+        let merkle = sub_merkle_tree(&data).unwrap();
+        let tx = Transaction {
+            stream_ids: vec![],
+            size: data_size as u64,
+            data_merkle_root: merkle.root().into(),
+            seq: tx_seq,
+            data: vec![],
+        };
+
+        let store = Arc::new(
+            SimpleLogStore::memorydb()
+                .map_err(|e| format!("Unable to start in-memory store: {:?}", e))
+                .unwrap(),
+        );
+
+        let peer_store = Arc::new(
+            SimpleLogStore::memorydb()
+                .map_err(|e| format!("Unable to start in-memory store: {:?}", e))
+                .unwrap(),
+        );
+
+        store.put_tx(tx.clone()).unwrap();
+        peer_store.put_tx(tx.clone()).unwrap();
+        for start_index in (0..chunk_count).step_by(peer_store.chunk_batch_size) {
+            let end = cmp::min(
+                (start_index + peer_store.chunk_batch_size) * CHUNK_SIZE,
+                data.len(),
+            );
+            let chunk_array = ChunkArray {
+                data: data[start_index * CHUNK_SIZE..end].to_vec(),
+                start_index: start_index as u32,
+            };
+            peer_store.put_chunks(tx.seq, chunk_array.clone()).unwrap();
+        }
+        peer_store.finalize_tx(tx.seq).unwrap();
+
+        (store, peer_store, tx)
     }
 }

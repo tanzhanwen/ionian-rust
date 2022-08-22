@@ -3,7 +3,9 @@ use shared_types::{Chunk, ChunkArray, ChunkArrayWithProof, ChunkWithProof, DataR
 use crate::error::Result;
 
 mod simple_log_store;
+pub use simple_log_store::sub_merkle_tree;
 pub use simple_log_store::SimpleLogStore;
+
 #[cfg(test)]
 mod tests;
 

@@ -15,3 +15,9 @@ storage-async = { path = "../storage-async" }
 task_executor = { path = "../../common/task_executor" }
 tokio = { version = "1.19.2", features = ["full"] }
 tracing = "0.1.35"
+
+[dev-dependencies]
+[dependencies.libp2p]
+version = "0.45.1"
+default-features = false
+features = ["websocket", "identify", "mplex", "yamux", "noise", "gossipsub", "dns-tokio", "tcp-tokio", "plaintext", "secp256k1"]

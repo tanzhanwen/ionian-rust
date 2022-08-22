@@ -99,7 +99,7 @@ impl Environment {
     pub fn core_context(&mut self) -> RuntimeContext {
         RuntimeContext {
             executor: TaskExecutor::new(
-                Arc::downgrade(self.runtime()),
+                self.runtime().handle().clone(),
                 self.exit.clone(),
                 self.signal_tx.clone(),
             ),

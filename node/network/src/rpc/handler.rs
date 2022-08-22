@@ -39,7 +39,7 @@ const SHUTDOWN_TIMEOUT_SECS: u8 = 15;
 
 /// Identifier of inbound and outbound substreams from the handler's perspective.
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
-pub struct SubstreamId(usize);
+pub struct SubstreamId(pub usize);
 
 type InboundSubstream = InboundFramed<NegotiatedSubstream>;
 

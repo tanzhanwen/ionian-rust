@@ -132,3 +132,179 @@ impl SyncPeers {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use libp2p::identity;
+    use std::collections::HashSet;
+
+    use super::*;
+
+    #[test]
+    fn test_add_new_peer() {
+        let mut sync_peers: SyncPeers = Default::default();
+        let peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let addr: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
+
+        assert!(sync_peers.add_new_peer(peer_id, addr.clone()));
+        assert!(!sync_peers.add_new_peer(peer_id, addr));
+    }
+
+    #[test]
+    fn test_update_state() {
+        let mut sync_peers: SyncPeers = Default::default();
+        let peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let addr: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
+
+        assert_eq!(
+            sync_peers.update_state(&peer_id, PeerState::Found, PeerState::Connecting),
+            None
+        );
+        assert_eq!(sync_peers.peer_state(&peer_id), None);
+
+        sync_peers.add_new_peer(peer_id, addr);
+        assert_eq!(sync_peers.peer_state(&peer_id), Some(PeerState::Found));
+
+        assert_eq!(
+            sync_peers.update_state(&peer_id, PeerState::Found, PeerState::Connecting),
+            Some(true)
+        );
+        assert_eq!(sync_peers.peer_state(&peer_id), Some(PeerState::Connecting));
+
+        assert_eq!(
+            sync_peers.update_state(&peer_id, PeerState::Found, PeerState::Connected),
+            Some(false)
+        );
+        assert_eq!(sync_peers.peer_state(&peer_id), Some(PeerState::Connecting));
+    }
+
+    #[test]
+    fn test_update_state_force() {
+        let mut sync_peers: SyncPeers = Default::default();
+        let peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let addr: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
+
+        assert_eq!(
+            sync_peers.update_state_force(&peer_id, PeerState::Connecting),
+            None
+        );
+        assert_eq!(sync_peers.peer_state(&peer_id), None);
+
+        sync_peers.add_new_peer(peer_id, addr);
+
+        assert_eq!(
+            sync_peers.update_state_force(&peer_id, PeerState::Connecting),
+            Some(PeerState::Found)
+        );
+        assert_eq!(sync_peers.peer_state(&peer_id), Some(PeerState::Connecting));
+    }
+
+    #[test]
+    fn test_random_peer() {
+        let count = 10;
+        let mut sync_peers: SyncPeers = Default::default();
+        let addr: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
+
+        let mut peers_found = HashSet::new();
+        let mut peers_connecting = HashSet::new();
+
+        for i in 0..count {
+            let peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+            sync_peers.add_new_peer(peer_id, addr.clone());
+            peers_found.insert(peer_id);
+
+            assert_eq!(sync_peers.count(&[PeerState::Found]), i + 1);
+            assert_eq!(sync_peers.count(&[PeerState::Connecting]), 0);
+            assert_eq!(
+                sync_peers.count(&[PeerState::Found, PeerState::Connecting]),
+                i + 1
+            );
+        }
+
+        for i in 0..count {
+            let peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+            sync_peers.add_new_peer(peer_id, addr.clone());
+            sync_peers.update_state_force(&peer_id, PeerState::Connecting);
+            peers_connecting.insert(peer_id);
+
+            assert_eq!(sync_peers.count(&[PeerState::Found]), count);
+            assert_eq!(sync_peers.count(&[PeerState::Connecting]), i + 1);
+            assert_eq!(
+                sync_peers.count(&[PeerState::Found, PeerState::Connecting]),
+                count + i + 1
+            );
+        }
+
+        // random pick
+        for _ in 0..30 {
+            let peer = sync_peers.random_peer(PeerState::Found).unwrap();
+            assert!(peers_found.contains(&peer.0));
+            assert_eq!(peer.1, addr);
+            let peer = sync_peers.random_peer(PeerState::Connecting).unwrap();
+            assert!(peers_connecting.contains(&peer.0));
+            assert_eq!(peer.1, addr);
+            assert!(sync_peers.random_peer(PeerState::Disconnected).is_none());
+        }
+    }
+
+    #[test]
+    fn test_transition() {
+        let mut sync_peers: SyncPeers = Default::default();
+        let addr: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
+
+        let peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+        sync_peers.add_new_peer(peer_id, addr.clone());
+
+        let peer_id_connected = identity::Keypair::generate_ed25519().public().to_peer_id();
+        sync_peers.add_new_peer(peer_id_connected, addr.clone());
+        sync_peers.update_state_force(&peer_id_connected, PeerState::Connected);
+
+        let peer_id_connecting = identity::Keypair::generate_ed25519().public().to_peer_id();
+        sync_peers.add_new_peer(peer_id_connecting, addr.clone());
+        sync_peers.update_state_force(&peer_id_connecting, PeerState::Connecting);
+        sync_peers.peers.get_mut(&peer_id_connecting).unwrap().since =
+            Instant::now() - PEER_CONNECT_TIMEOUT;
+
+        let peer_id_disconnecting = identity::Keypair::generate_ed25519().public().to_peer_id();
+        sync_peers.add_new_peer(peer_id_disconnecting, addr.clone());
+        sync_peers.update_state_force(&peer_id_disconnecting, PeerState::Disconnecting);
+        sync_peers
+            .peers
+            .get_mut(&peer_id_disconnecting)
+            .unwrap()
+            .since = Instant::now() - PEER_DISCONNECT_TIMEOUT;
+
+        let peer_id_disconnected = identity::Keypair::generate_ed25519().public().to_peer_id();
+        sync_peers.add_new_peer(peer_id_disconnected, addr.clone());
+        sync_peers.update_state_force(&peer_id_disconnected, PeerState::Disconnected);
+
+        assert_eq!(sync_peers.peer_state(&peer_id), Some(PeerState::Found));
+        assert_eq!(
+            sync_peers.peer_state(&peer_id_connected),
+            Some(PeerState::Connected)
+        );
+        assert_eq!(
+            sync_peers.peer_state(&peer_id_connecting),
+            Some(PeerState::Connecting)
+        );
+        assert_eq!(
+            sync_peers.peer_state(&peer_id_disconnecting),
+            Some(PeerState::Disconnecting)
+        );
+        assert_eq!(
+            sync_peers.peer_state(&peer_id_disconnected),
+            Some(PeerState::Disconnected)
+        );
+
+        sync_peers.transition();
+
+        assert_eq!(sync_peers.peer_state(&peer_id), Some(PeerState::Found));
+        assert_eq!(
+            sync_peers.peer_state(&peer_id_connected),
+            Some(PeerState::Connected)
+        );
+        assert_eq!(sync_peers.peer_state(&peer_id_connecting), None);
+        assert_eq!(sync_peers.peer_state(&peer_id_disconnecting), None);
+        assert_eq!(sync_peers.peer_state(&peer_id_disconnected), None);
+    }
+}
