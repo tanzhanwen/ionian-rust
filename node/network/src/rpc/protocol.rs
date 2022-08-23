@@ -8,7 +8,7 @@ use futures::future::BoxFuture;
 use futures::prelude::{AsyncRead, AsyncWrite};
 use futures::{FutureExt, StreamExt};
 use libp2p::core::{InboundUpgrade, ProtocolName, UpgradeInfo};
-use shared_types::{ChunkArray, ChunkArrayWithProof, Proof};
+use shared_types::{ChunkArray, ChunkArrayWithProof, FlowRangeProof};
 use ssz::Encode;
 use ssz_types::VariableList;
 use std::io;
@@ -46,8 +46,7 @@ lazy_static! {
             data: vec![],
             start_index: 0,
         },
-        start_proof: Proof::new_empty(),
-        end_proof: Proof::new_empty(),
+        proof: FlowRangeProof::new_empty(),
     }
     .as_ssz_bytes()
     .len();
@@ -57,8 +56,7 @@ lazy_static! {
             data: vec![0u8; MAX_CHUNKS_LENGTH as usize],
             start_index: 0,
         },
-        start_proof: Proof::new_empty(),
-        end_proof: Proof::new_empty(),
+        proof: FlowRangeProof::new_empty(),
     }
     .as_ssz_bytes()
     .len();

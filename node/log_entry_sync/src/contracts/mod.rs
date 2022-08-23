@@ -1,2 +1,2 @@
 use ethers::prelude::abigen;
-abigen!(IonianLogContract, "./src/contracts/IonianLog.json");
+abigen!(IonianFlow, "./src/contracts/Flow.json");

@@ -9,6 +9,7 @@ members = [
     "common/task_executor",
     "common/ionian_version",
     "common/unused_port",
+    "common/append_merkle",
 
     "node",
     "node/chunk_pool",

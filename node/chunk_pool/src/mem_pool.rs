@@ -167,7 +167,7 @@ impl Inner {
                 .get_or_insert_with(Default::default)
                 .push_back(ChunkArray {
                     data: segment,
-                    start_index: start_index as u32,
+                    start_index: start_index as u64,
                 });
             return Ok(Some((file.tx_seq, file.segments.take().unwrap())));
         }
@@ -199,7 +199,7 @@ impl Inner {
             .get_or_insert_with(Default::default)
             .push_back(ChunkArray {
                 data: segment,
-                start_index: start_index as u32,
+                start_index: start_index as u64,
             });
 
         Ok(None)

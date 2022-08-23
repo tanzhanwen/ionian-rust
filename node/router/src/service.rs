@@ -14,7 +14,7 @@ use storage::log_store::Store as LogStore;
 use storage_async::Store;
 use sync::{SyncMessage, SyncSender};
 use task_executor::ShutdownReason;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 
 pub fn peer_id_to_public_key(peer_id: &PeerId) -> Result<PublicKey, String> {
     // A libp2p peer id byte representation should be 2 length bytes + 4 protobuf bytes + compressed pk bytes
@@ -83,7 +83,7 @@ impl RouterService {
         network_send: mpsc::UnboundedSender<NetworkMessage>,
         sync_send: SyncSender,
         miner_send: mpsc::UnboundedSender<MinerMessage>,
-        store: Arc<dyn LogStore>,
+        store: Arc<RwLock<dyn LogStore>>,
         file_location_cache: Arc<FileLocationCache>,
         local_keypair: Keypair,
     ) {

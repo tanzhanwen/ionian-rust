@@ -1,67 +1,48 @@
-use crate::log_store::simple_log_store::{sub_merkle_tree, SimpleLogStore};
+use crate::log_store::log_manager::{
+    bytes_to_entries, data_to_merkle_leaves, sub_merkle_tree, LogConfig, LogManager, ENTRY_SIZE,
+    PORA_CHUNK_SIZE,
+};
 use crate::log_store::{LogStoreChunkRead, LogStoreChunkWrite, LogStoreRead, LogStoreWrite};
+use append_merkle::{Algorithm, AppendMerkleTree, Sha3Algorithm};
+use ethereum_types::H256;
+use merkle_light::merkle::{log2_pow2, next_pow2};
 use rand::random;
-use shared_types::{ChunkArray, Proof, Transaction, CHUNK_SIZE};
+use shared_types::{ChunkArray, DataRoot, Transaction, CHUNK_SIZE};
 use std::cmp;
-use std::ops::Deref;
-use tempdir::TempDir;
-
-struct TempSimpleLogStore {
-    // Keep this so that the directory will be automatically deleted.
-    _temp_dir: TempDir,
-    pub store: SimpleLogStore,
-}
-
-impl AsRef<SimpleLogStore> for TempSimpleLogStore {
-    fn as_ref(&self) -> &SimpleLogStore {
-        &self.store
-    }
-}
-
-impl Deref for TempSimpleLogStore {
-    type Target = SimpleLogStore;
-
-    fn deref(&self) -> &Self::Target {
-        &self.store
-    }
-}
-
-#[allow(unused)]
-fn create_temp_log_store() -> TempSimpleLogStore {
-    let temp_dir = TempDir::new("test_ionian_storage").unwrap();
-    let store = SimpleLogStore::open(&temp_dir.path()).unwrap();
-    TempSimpleLogStore {
-        _temp_dir: temp_dir,
-        store,
-    }
-}
 
 #[test]
 fn test_put_get() {
-    let store = SimpleLogStore::memorydb().unwrap();
-    let chunk_count = store.chunk_batch_size + store.chunk_batch_size / 2 - 1;
+    let config = LogConfig::default();
+    let mut store = LogManager::memorydb(config.clone()).unwrap();
+    let chunk_count = config.flow.batch_size + config.flow.batch_size / 2 - 1;
+    // Aligned with size.
+    let start_offset = 1024;
     let data_size = CHUNK_SIZE * chunk_count;
     let mut data = vec![0u8; data_size];
     for i in 0..chunk_count {
         data[i * CHUNK_SIZE] = random();
     }
-    let merkle = sub_merkle_tree(&data).unwrap();
+    let mut merkle = AppendMerkleTree::<H256, Sha3Algorithm>::new(vec![H256::zero()]);
+    merkle.append_list(data_to_merkle_leaves(&LogManager::padding(start_offset - 1)).unwrap());
+    merkle.append_list(data_to_merkle_leaves(&data).unwrap());
+    merkle.commit();
+    let tx_merkle = sub_merkle_tree(&data).unwrap();
     let tx = Transaction {
         stream_ids: vec![],
         size: data_size as u64,
-        data_merkle_root: merkle.root().into(),
+        data_merkle_root: tx_merkle.root().into(),
         seq: 0,
         data: vec![],
+        start_entry_index: start_offset as u64,
+        // TODO: This can come from `tx_merkle`.
+        merkle_nodes: tx_subtree_root_list(&data),
     };
     store.put_tx(tx.clone()).unwrap();
-    for start_index in (0..chunk_count).step_by(store.chunk_batch_size) {
-        let end = cmp::min(
-            (start_index + store.chunk_batch_size) * CHUNK_SIZE,
-            data.len(),
-        );
+    for start_index in (0..chunk_count).step_by(PORA_CHUNK_SIZE) {
+        let end = cmp::min((start_index + PORA_CHUNK_SIZE) * CHUNK_SIZE, data.len());
         let chunk_array = ChunkArray {
             data: data[start_index * CHUNK_SIZE..end].to_vec(),
-            start_index: start_index as u32,
+            start_index: start_index as u64,
         };
         store.put_chunks(tx.seq, chunk_array.clone()).unwrap();
     }
@@ -99,48 +80,72 @@ fn test_put_get() {
         assert_eq!(chunk_with_proof.chunk, chunk_array.chunk_at(i).unwrap());
         assert_eq!(
             chunk_with_proof.proof,
-            Proof::from_merkle_proof(&merkle.gen_proof(i))
+            merkle.gen_proof(i + start_offset).unwrap()
         );
-        assert!(
-            chunk_with_proof
-                .validate(&tx.data_merkle_root, i, chunk_count)
-                .unwrap(),
-            "proof={:?}",
-            chunk_with_proof.proof
+        let r = chunk_with_proof.proof.validate::<Sha3Algorithm>(
+            &Sha3Algorithm::leaf(&chunk_with_proof.chunk.0),
+            i + start_offset,
         );
+        assert!(r.is_ok(), "proof={:?} \n r={:?}", chunk_with_proof.proof, r);
+        assert!(merkle.check_root(&chunk_with_proof.proof.root()));
     }
-    for i in (0..chunk_count).step_by(store.chunk_batch_size / 3) {
-        let end = std::cmp::min(i + store.chunk_batch_size, chunk_count);
+    for i in (0..chunk_count).step_by(PORA_CHUNK_SIZE / 3) {
+        let end = std::cmp::min(i + PORA_CHUNK_SIZE, chunk_count);
         let chunk_array_with_proof = store
             .get_chunks_with_proof_by_tx_and_index_range(tx.seq, i, end)
             .unwrap()
             .unwrap();
         assert_eq!(
             chunk_array_with_proof.chunks,
-            chunk_array.sub_array(i, end).unwrap()
+            chunk_array.sub_array(i as u64, end as u64).unwrap()
         );
         assert!(chunk_array_with_proof
-            .validate(&tx.data_merkle_root, chunk_count)
-            .unwrap());
+            .proof
+            .validate::<Sha3Algorithm>(
+                &data_to_merkle_leaves(&chunk_array_with_proof.chunks.data).unwrap(),
+                i + start_offset
+            )
+            .is_ok());
     }
 }
 
 #[test]
 fn test_root() {
-    let results = [
-        [
-            241, 48, 193, 94, 101, 245, 240, 244, 161, 29, 60, 193, 132, 4, 58, 78, 37, 196, 155,
-            133, 151, 104, 229, 103, 105, 91, 48, 189, 66, 90, 95, 116,
-        ],
-        [
-            122, 137, 1, 255, 31, 110, 121, 53, 237, 46, 119, 179, 186, 109, 25, 47, 207, 184, 83,
-            210, 235, 132, 9, 94, 252, 42, 77, 88, 169, 8, 80, 157,
-        ],
-    ];
-    for (test_index, n_chunk) in [6, 7].into_iter().enumerate() {
-        let data = vec![0; n_chunk * CHUNK_SIZE];
+    for depth in 0..12 {
+        let n_chunk = 1 << depth;
+        let mut data = vec![0; n_chunk * CHUNK_SIZE];
+        for i in 0..n_chunk {
+            data[i * CHUNK_SIZE] = random();
+        }
         let mt = sub_merkle_tree(&data).unwrap();
         println!("{:?} {}", mt.root(), hex::encode(&mt.root()));
-        assert_eq!(results[test_index], mt.root());
+        let append_mt =
+            AppendMerkleTree::<H256, Sha3Algorithm>::new(data_to_merkle_leaves(&data).unwrap());
+        assert_eq!(mt.root(), append_mt.root().0);
+    }
+}
+
+fn tx_subtree_root_list(data: &[u8]) -> Vec<(usize, DataRoot)> {
+    let mut root_list = Vec::new();
+    let mut start_index = 0;
+    let data_entry_len = bytes_to_entries(data.len() as u64) as usize;
+    while start_index != data_entry_len {
+        let next = next_subtree_size(data_entry_len - start_index);
+        let end = cmp::min((start_index + next) * ENTRY_SIZE, data.len());
+        let submerkle_root = sub_merkle_tree(&data[start_index * ENTRY_SIZE..end])
+            .unwrap()
+            .root();
+        root_list.push((log2_pow2(next) + 1, submerkle_root.into()));
+        start_index = start_index + next;
+    }
+    root_list
+}
+
+fn next_subtree_size(tree_size: usize) -> usize {
+    let next = next_pow2(tree_size);
+    if next == tree_size {
+        tree_size
+    } else {
+        next >> 1
     }
 }

@@ -4,7 +4,7 @@ use merkle_light::hash::Algorithm;
 use merkle_light::merkle::MerkleTree;
 use merkle_tree::{RawLeafSha3Algorithm, LEAF};
 use serde::{Deserialize, Serialize};
-use shared_types::{DataRoot, Proof, Transaction, CHUNK_SIZE};
+use shared_types::{DataRoot, FileProof, Transaction, CHUNK_SIZE};
 use std::hash::Hasher;
 
 pub(crate) type RpcResult<T> = Result<T, RpcError>;
@@ -36,7 +36,7 @@ pub struct SegmentWithProof {
     /// Segment index.
     pub index: u32,
     /// File merkle proof whose leaf node is segment root.
-    pub proof: Proof,
+    pub proof: FileProof,
 }
 
 impl SegmentWithProof {
@@ -118,6 +118,7 @@ impl SegmentWithProof {
         }
 
         // Calculate segment merkle root to verify proof.
+        // FIXME(zz): Fix validation.
         let segment_root = self.calculate_segment_merkle_root();
         if !self
             .proof

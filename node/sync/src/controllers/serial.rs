@@ -48,6 +48,7 @@ pub struct SerialSyncController {
     /// The transaction sequence number.
     tx_seq: u64,
 
+    #[allow(unused)]
     /// The transaction data root.
     data_root: DataRoot,
 
@@ -319,7 +320,6 @@ impl SerialSyncController {
         };
 
         debug_assert!(from_chunk < to_chunk, "Invalid chunk boundaries");
-
         // invalid chunk array size: ban and re-request
         let data_len = response.chunks.data.len();
         if data_len == 0 || data_len % CHUNK_SIZE > 0 {
@@ -340,8 +340,18 @@ impl SerialSyncController {
         }
 
         // validate Merkle proofs
-        let validation_result = response.validate(&self.data_root, self.num_chunks);
+        // TODO(ionian-dev): consider doing this in a worker task
+        // FIXME(zz): Fix proof generation. Check proof root existence.
+        let validation_result = self
+            .store
+            .get_store()
+            .read()
+            .await
+            .validate_range_proof(self.tx_seq, &response);
+
+        // FIXME: Do not ban peer for `Ok(false)`.
         if !matches!(validation_result, Ok(true)) {
+            warn!("ChunkResponse validation error: e={:?}", validation_result);
             self.ban_peer(from_peer_id, "Chunk array validation failed");
             self.state = SyncState::Idle;
             return;

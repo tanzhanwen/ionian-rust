@@ -1,30 +1,33 @@
 use crate::sync_manager::config::LogSyncConfig;
 use crate::sync_manager::log_entry_fetcher::LogEntryFetcher;
 use anyhow::Result;
-use jsonrpsee::tracing::{debug, error, info};
+use jsonrpsee::tracing::{debug, error};
 use shared_types::Transaction;
+use std::cmp::Ordering;
 use std::future::Future;
 use std::sync::Arc;
 use storage::log_store::Store;
 use task_executor::{ShutdownReason, TaskExecutor};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio::sync::RwLock;
 
 pub struct LogSyncManager {
+    #[allow(unused)]
     config: LogSyncConfig,
     log_fetcher: LogEntryFetcher,
+    store: Arc<RwLock<dyn Store>>,
 
     next_tx_seq: u64,
 }
 
 impl LogSyncManager {
-    pub fn spawn(
+    pub async fn spawn(
         config: LogSyncConfig,
         executor: TaskExecutor,
-        store: Arc<dyn Store>,
+        store: Arc<RwLock<dyn Store>>,
     ) -> Result<()> {
-        let next_tx_seq = store.next_tx_seq()?;
-        let (tx, mut rx) = unbounded_channel();
+        let next_tx_seq = store.read().await.next_tx_seq()?;
 
+        let executor_clone = executor.clone();
         // Spawn the task to sync log entries from the blockchain.
         executor.spawn(
             run_and_log(executor.shutdown_sender(), async move {
@@ -34,79 +37,60 @@ impl LogSyncManager {
                     config,
                     log_fetcher,
                     next_tx_seq,
+                    store,
                 };
 
-                // TODO: Do we need to notify that the recover process completes?
-                log_sync_manager
-                    .fetch_to_end(tx.clone(), next_tx_seq)
-                    .await?;
-                log_sync_manager.sync(tx).await?;
+                // Start watching before recovery to ensure that no log is skipped.
+                // TODO(zz): Rate limit to avoid OOM during recovery.
+                let mut watch_rx = log_sync_manager.log_fetcher.start_watch(0, &executor_clone);
+                let mut recover_rx = log_sync_manager
+                    .log_fetcher
+                    .start_recover(0, &executor_clone);
+                while let Some(tx) = recover_rx.recv().await {
+                    if !log_sync_manager.put_tx(tx).await {
+                        // Unexpected error.
+                        error!("log sync error");
+                        break;
+                    }
+                }
+                while let Some(tx) = watch_rx.recv().await {
+                    if !log_sync_manager.put_tx(tx).await {
+                        // Unexpected error.
+                        error!("log watch error");
+                        break;
+                    }
+                }
                 Ok(())
             }),
             "log_sync",
         );
-
-        // Spawn the task to persist the downloaded log entries.
-        executor.spawn(
-            run_and_log(executor.shutdown_sender(), async move {
-                while let Some(tx) = rx.recv().await {
-                    store.put_tx(tx)?;
-                }
-                Ok(())
-            }),
-            "log_write",
-        );
         Ok(())
     }
 
-    async fn fetch_to_end(
-        &mut self,
-        sender: UnboundedSender<Transaction>,
-        start_tx_seq: u64,
-    ) -> Result<()> {
-        let end_tx_seq = self.log_fetcher.num_log_entries().await?;
-        if start_tx_seq >= end_tx_seq {
-            return Ok(());
-        }
-
-        info!("start_tx_seq={} end_tx_seq={}", start_tx_seq, end_tx_seq);
-        for i in (start_tx_seq..end_tx_seq).step_by(self.config.fetch_batch_size) {
-            let log_list = self
-                .log_fetcher
-                .entry_at(i, Some(self.config.fetch_batch_size))
-                .await?;
-            let log_len = log_list.len();
-            for log in log_list {
-                sender.send(log)?;
+    async fn put_tx(&mut self, tx: Transaction) -> bool {
+        match tx.seq.cmp(&self.next_tx_seq) {
+            Ordering::Less => {
+                // FIXME(zz): Handle reorg after restart.
+                debug!("Ignore old tx: seq={}", tx.seq);
+                true
             }
-            self.next_tx_seq = i + log_len as u64;
-            if log_len != self.config.fetch_batch_size {
-                debug!(
-                    "last batch incomplete: get={} limit={}",
-                    log_len, self.config.fetch_batch_size
+            Ordering::Equal => {
+                debug!("log entry sync get entry: {:?}", tx);
+                if let Err(e) = self.store.write().await.put_tx(tx) {
+                    error!("put_tx error: e={:?}", e);
+                    false
+                } else {
+                    self.next_tx_seq += 1;
+                    true
+                }
+            }
+            Ordering::Greater => {
+                error!(
+                    "Unexpected transaction skip: next={} get={}",
+                    self.next_tx_seq, tx.seq
                 );
-                break;
+                false
             }
-        }
-        Ok(())
-    }
-
-    async fn sync(&mut self, sender: UnboundedSender<Transaction>) -> Result<()> {
-        loop {
-            debug!("start sync from tx_seq={}", self.next_tx_seq);
-            // `next_tx_seq` is only updated after successfully fetching data, so retrying
-            // here ensures we will fetch all data.
-            // TODO(zz): Handle errors when we call `put_tx` in another thread.
-            match self.fetch_to_end(sender.clone(), self.next_tx_seq).await {
-                Ok(()) => {}
-                Err(e) => {
-                    error!(
-                        "log sync error: next_tx_seq={}, e={:?}",
-                        self.next_tx_seq, e
-                    );
-                }
-            }
-            tokio::time::sleep(self.config.sync_period).await;
         }
     }
 }

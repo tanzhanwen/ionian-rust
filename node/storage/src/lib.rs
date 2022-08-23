@@ -7,8 +7,9 @@ pub mod error;
 pub mod log_store;
 
 pub use config::Config as StorageConfig;
+pub use log_store::log_manager::LogManager;
 
-trait IonianKeyValueDB: KeyValueDB {
+pub trait IonianKeyValueDB: KeyValueDB {
     fn put(&self, col: u32, key: &[u8], value: &[u8]) -> std::io::Result<()> {
         let mut tx = self.transaction();
         tx.put(col, key, value);

@@ -6,7 +6,7 @@ use shared_types::{Chunk, ChunkArray, ChunkArrayWithProof, DataRoot, Transaction
 use std::sync::Arc;
 use storage::{error, error::Result, log_store::Store as LogStore};
 use task_executor::TaskExecutor;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, RwLock};
 
 /// The name of the worker tokio tasks.
 const WORKER_TASK_NAME: &str = "async_storage_worker";
@@ -26,14 +26,14 @@ macro_rules! delegate {
 #[derive(Clone)]
 pub struct Store {
     /// Log and transaction storage.
-    store: Arc<dyn LogStore>,
+    store: Arc<RwLock<dyn LogStore>>,
 
     /// Tokio executor for spawning worker tasks.
     executor: TaskExecutor,
 }
 
 impl Store {
-    pub fn new(store: Arc<dyn LogStore>, executor: TaskExecutor) -> Self {
+    pub fn new(store: Arc<RwLock<dyn LogStore>>, executor: TaskExecutor) -> Self {
         Store { store, executor }
     }
 
@@ -53,15 +53,16 @@ impl Store {
 
     async fn spawn<T, F>(&self, f: F) -> Result<T>
     where
-        F: FnOnce(Arc<dyn LogStore>) -> Result<T> + Send + 'static,
+        F: FnOnce(&mut dyn LogStore) -> Result<T> + Send + 'static,
         T: Send + 'static,
     {
         let store = self.store.clone();
         let (tx, rx) = oneshot::channel();
 
-        self.executor.spawn_blocking(
-            move || {
-                let res = f(store);
+        self.executor.spawn(
+            async move {
+                // FIXME(zz): Not all functions need `write`. Refactor store usage.
+                let res = f(&mut *store.write().await);
 
                 if tx.send(res).is_err() {
                     error!("Unable to complete async storage operation: the receiver dropped");
@@ -72,5 +73,10 @@ impl Store {
 
         rx.await
             .unwrap_or_else(|_| bail!(error::Error::Custom("Receiver error".to_string())))
+    }
+
+    // FIXME(zz): Refactor the lock and async call here.
+    pub fn get_store(&self) -> &RwLock<dyn LogStore> {
+        self.store.as_ref()
     }
 }

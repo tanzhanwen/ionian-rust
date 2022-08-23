@@ -27,7 +27,8 @@ async fn start_node(context: RuntimeContext, config: IonianConfig) -> Result<Cli
         .with_router()?
         .with_rpc(rpc_config, config.chunk_pool_config())
         .await?
-        .with_log_sync(log_sync_config)?
+        .with_log_sync(log_sync_config)
+        .await?
         .build()
 }
 

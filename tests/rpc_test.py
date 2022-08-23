@@ -12,7 +12,7 @@ from utility.utils import (
 )
 
 
-class ExampleTest(TestFramework):
+class RpcTest(TestFramework):
     def setup_params(self):
         self.num_blockchain_nodes = 2
         self.num_nodes = 2
@@ -23,7 +23,7 @@ class ExampleTest(TestFramework):
 
         chunk_data = b"\x00" * 256
         data_root = generate_data_root(chunk_data)
-        self.contract.append_log(data_root, 256)
+        self.contract.append_log([256, [[data_root, 0]]])
         wait_until(lambda: self.contract.num_log_entries() == 1)
         wait_until(lambda: self.contract.num_log_entries(1) == 1)
         assert_equal(self.contract.num_log_entries(), self.contract.num_log_entries(1))
@@ -101,4 +101,4 @@ class ExampleTest(TestFramework):
 
 
 if __name__ == "__main__":
-    ExampleTest().main()
+    RpcTest().main()

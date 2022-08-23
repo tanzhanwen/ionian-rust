@@ -4,9 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = { version = "1.0.58", features = ["backtrace"] }
+anyhow = { version = "=1.0.58", features = ["backtrace"] }
+append_merkle = {path = "../../common/append_merkle"}
 eth2_ssz = "0.4.0"
+eth2_ssz_derive = "0.3.0"
 ethereum-types = "0.12"
+hex = "0.4.3"
 kvdb = "0.10.0"
 kvdb-memorydb = "0.10.0"
 kvdb-rocksdb = "0.14.0"
@@ -17,7 +20,6 @@ rayon = "1.5.3"
 shared_types = { path = "../shared_types" }
 tracing = "0.1.35"
 typenum = "1.15.0"
-hex = "0.4.3"
 
 [dev-dependencies]
 tempdir = "0.3.7"

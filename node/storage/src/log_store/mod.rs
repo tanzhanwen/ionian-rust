@@ -2,12 +2,11 @@ use shared_types::{Chunk, ChunkArray, ChunkArrayWithProof, ChunkWithProof, DataR
 
 use crate::error::Result;
 
-mod simple_log_store;
-pub use simple_log_store::sub_merkle_tree;
-pub use simple_log_store::SimpleLogStore;
-
+mod flow_store;
+pub mod log_manager;
 #[cfg(test)]
 mod tests;
+mod tx_store;
 
 /// The trait to read the transactions already appended to the log.
 ///
@@ -36,6 +35,8 @@ pub trait LogStoreRead: LogStoreChunkRead {
     fn check_tx_completed(&self, tx_seq: u64) -> Result<bool>;
 
     fn next_tx_seq(&self) -> Result<u64>;
+
+    fn validate_range_proof(&self, tx_seq: u64, data: &ChunkArrayWithProof) -> Result<bool>;
 }
 
 pub trait LogStoreChunkRead {
@@ -69,7 +70,7 @@ pub trait LogStoreChunkRead {
 
 pub trait LogStoreWrite: LogStoreChunkWrite {
     /// Store a data entry metadata.
-    fn put_tx(&self, tx: Transaction) -> Result<()>;
+    fn put_tx(&mut self, tx: Transaction) -> Result<()>;
     /// Finalize a transaction storage.
     /// This will compute and the merkle tree, check the data root, and persist a part of the merkle
     /// tree for future queries.
@@ -81,7 +82,7 @@ pub trait LogStoreWrite: LogStoreChunkWrite {
 
 pub trait LogStoreChunkWrite {
     /// Store data chunks of a data entry.
-    fn put_chunks(&self, tx_seq: u64, chunks: ChunkArray) -> Result<()>;
+    fn put_chunks(&mut self, tx_seq: u64, chunks: ChunkArray) -> Result<()>;
 
     /// Delete all chunks of a tx.
     fn remove_all_chunks(&self, tx_seq: u64) -> Result<()>;
@@ -92,3 +93,19 @@ impl<T: LogStoreChunkRead + LogStoreChunkWrite + Send + Sync + 'static> LogChunk
 
 pub trait Store: LogStoreRead + LogStoreWrite + Send + Sync + 'static {}
 impl<T: LogStoreRead + LogStoreWrite + Send + Sync + 'static> Store for T {}
+
+pub trait FlowRead {
+    fn get_entries(&self, index_start: u64, index_end: u64) -> Result<Option<ChunkArray>>;
+
+    fn get_chunk_root_list(&self) -> Result<Vec<DataRoot>>;
+}
+
+pub trait FlowWrite {
+    /// Append data to the flow. `start_index` is included in `ChunkArray`, so
+    /// it's possible to append arrays in any place.
+    /// Return the list of completed chunks.
+    fn append_entries(&self, data: ChunkArray) -> Result<Vec<(u64, DataRoot)>>;
+}
+
+pub trait Flow: FlowRead + FlowWrite {}
+impl<T: FlowRead + FlowWrite> Flow for T {}

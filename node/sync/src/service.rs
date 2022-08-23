@@ -14,7 +14,7 @@ use std::{
 use storage::error::Result as StorageResult;
 use storage::log_store::Store as LogStore;
 use storage_async::Store;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 
 const HEARTBEAT_INTERVAL_SEC: u64 = 5;
 
@@ -88,7 +88,7 @@ impl SyncService {
     pub fn spawn(
         executor: task_executor::TaskExecutor,
         network_send: mpsc::UnboundedSender<NetworkMessage>,
-        store: Arc<dyn LogStore>,
+        store: Arc<RwLock<dyn LogStore>>,
         file_location_cache: Arc<FileLocationCache>,
     ) -> SyncSender {
         let (sync_send, sync_recv) = channel::Channel::unbounded();

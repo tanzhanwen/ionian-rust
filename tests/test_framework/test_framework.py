@@ -56,8 +56,9 @@ class TestFramework:
                     self.blockchain_binary,
                     updated_config,
                     self.contract_path,
+                    self.token_contract_path,
                     self.log,
-                    30,
+                    60,
                 )
                 if self.blockchain_node_type == BlockChainNodeType.BSC
                 else None
@@ -164,7 +165,17 @@ class TestFramework:
             dest="contract",
             default=os.path.join(
                 __file_path__,
-                "../../node/log_entry_sync/src/contracts/IonianLog.json",
+                "../../node/log_entry_sync/src/contracts/Flow.json",
+            ),
+            type=str,
+        )
+
+        parser.add_argument(
+            "--token-contract-path",
+            dest="token_contract",
+            default=os.path.join(
+                __file_path__,
+                "../config/MockToken.json",
             ),
             type=str,
         )
@@ -262,6 +273,7 @@ class TestFramework:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
+        proc.wait()
 
         root = None
         for line in proc.stdout.readlines():
@@ -271,7 +283,6 @@ class TestFramework:
                 root = line[index + 5 : -1]
                 self.log.info("root: %s", root)
 
-        proc.wait()
         assert proc.returncode == 0
         self.log.info("file uploaded")
 
@@ -322,8 +333,13 @@ class TestFramework:
         self.ionian_binary = self.options.ionian
         self.cli_binary = self.options.cli
         self.contract_path = self.options.contract
+        self.token_contract_path = self.options.token_contract
+
         assert os.path.exists(self.contract_path), (
             "%s should be exist" % self.contract_path
+        )
+        assert os.path.exists(self.token_contract_path), (
+            "%s should be exist" % self.token_contract_path
         )
 
         if self.options.random_seed is not None:

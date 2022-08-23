@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+append_merkle = { path = "../../common/append_merkle"}
 merkle_tree = { path = "../../common/merkle_tree"}
-anyhow = { version = "1.0.57", features = ["backtrace"] }
+anyhow = { version = "=1.0.58", features = ["backtrace"] }
 ethereum-types = "0.12"
 eth2_ssz = "0.4.0"
 eth2_ssz_derive = "0.3.0"

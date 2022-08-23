@@ -10,10 +10,11 @@ use network::{
 use router::RouterService;
 use rpc::RPCConfig;
 use std::sync::Arc;
-use storage::log_store::{SimpleLogStore, Store};
-use storage::StorageConfig;
+use storage::log_store::log_manager::LogConfig;
+use storage::log_store::Store;
+use storage::{LogManager, StorageConfig};
 use sync::{SyncSender, SyncService};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 
 macro_rules! require {
     ($component:expr, $self:ident, $e:ident) => {
@@ -52,7 +53,7 @@ struct MinerComponents {
 /// initialized, _before_ the `self.build(..)` method has been called.
 pub struct ClientBuilder {
     runtime_context: Option<RuntimeContext>,
-    store: Option<Arc<dyn Store>>,
+    store: Option<Arc<RwLock<dyn Store>>>,
     async_store: Option<storage_async::Store>,
     file_location_cache: Option<Arc<FileLocationCache>>,
     network: Option<NetworkComponents>,
@@ -82,10 +83,11 @@ impl ClientBuilder {
 
     /// Initializes in-memory storage.
     pub fn with_memory_store(mut self) -> Result<Self, String> {
-        let store = Arc::new(
-            SimpleLogStore::memorydb()
+        // TODO(zz): Set config.
+        let store = Arc::new(RwLock::new(
+            LogManager::memorydb(LogConfig::default())
                 .map_err(|e| format!("Unable to start in-memory store: {:?}", e))?,
-        );
+        ));
 
         self.store = Some(store.clone());
 
@@ -98,10 +100,10 @@ impl ClientBuilder {
 
     /// Initializes RocksDB storage.
     pub fn with_rocksdb_store(mut self, config: &StorageConfig) -> Result<Self, String> {
-        let store = Arc::new(
-            SimpleLogStore::rocksdb(&config.db_dir)
+        let store = Arc::new(RwLock::new(
+            LogManager::rocksdb(LogConfig::default(), &config.db_dir)
                 .map_err(|e| format!("Unable to start RocksDB store: {:?}", e))?,
-        );
+        ));
 
         self.store = Some(store.clone());
 
@@ -232,10 +234,12 @@ impl ClientBuilder {
         Ok(self)
     }
 
-    pub fn with_log_sync(self, config: LogSyncConfig) -> Result<Self, String> {
+    pub async fn with_log_sync(self, config: LogSyncConfig) -> Result<Self, String> {
         let executor = require!("log_sync", self, runtime_context).clone().executor;
         let store = require!("log_sync", self, store).clone();
-        LogSyncManager::spawn(config, executor, store).map_err(|e| e.to_string())?;
+        LogSyncManager::spawn(config, executor, store)
+            .await
+            .map_err(|e| e.to_string())?;
         Ok(self)
     }
 

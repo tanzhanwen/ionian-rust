@@ -198,11 +198,14 @@ class BlockchainNode(TestNode):
         binary,
         local_conf,
         contract_path,
+        token_contract_path,
         log,
         blockchain_node_type,
         rpc_timeout=10,
     ):
         self.contract_path = contract_path
+        self.token_contract_path = token_contract_path
+
         self.blockchain_node_type = blockchain_node_type
 
         super().__init__(
@@ -227,16 +230,27 @@ class BlockchainNode(TestNode):
         contract_interface = json.load(open(self.contract_path, "r"))
         contract = w3.eth.contract(
             abi=contract_interface["abi"],
-            bytecode=contract_interface["bytecode"]["object"],
+            bytecode=contract_interface["bytecode"],
+        )
+        token_contract_interface = json.load(open(self.token_contract_path, "r"))
+        token_contract = w3.eth.contract(
+            abi=token_contract_interface["abi"],
+            bytecode=token_contract_interface["bytecode"],
         )
         account = w3.eth.account.from_key(GENESIS_PRIV_KEY)
         w3.middleware_onion.add(construct_sign_and_send_raw_middleware(account))
 
-        tx_hash = contract.constructor().transact(TX_PARAMS)
+        tx_hash = token_contract.constructor().transact(TX_PARAMS)
         tx_receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
-        return w3.eth.contract(
+        token_contract = token_contract(tx_receipt.contractAddress)
+        tx_hash = contract.constructor(tx_receipt.contractAddress).transact(TX_PARAMS)
+        tx_receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+        contract = w3.eth.contract(
             address=tx_receipt.contractAddress, abi=contract_interface["abi"]
         )
+        tx_hash = token_contract.functions.approve(tx_receipt.contractAddress, int(1e9)).transact(TX_PARAMS)
+        w3.eth.wait_for_transaction_receipt(tx_hash)
+        return contract
 
     def get_contract(self, contract_address):
         w3 = Web3(HTTPProvider(self.rpc_url))
