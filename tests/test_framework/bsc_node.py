@@ -117,7 +117,7 @@ class BSCNode(BlockchainNode):
 
         wait_until(lambda: self.process.poll() is not None)
         ret = self.process.poll()
-        assert ret == 0
+        assert ret == 0, "BSC init should be successful"
 
         self.log.info("BSC node%d init finished with return code %d", self.index, ret)
 

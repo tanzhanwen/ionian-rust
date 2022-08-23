@@ -42,7 +42,7 @@ class ExampleTest(TestFramework):
         assert_equal(client1.ionian_download_segment(data_root, 0, 1), segment["data"])
 
         client2.admin_start_sync_file(0)
-        wait_until(lambda: client2.admin_get_sync_status(0) == "Completed")
+        wait_until(lambda: client2.sycn_status_is_completed_or_unknown(0))
 
         wait_until(lambda: client2.ionian_get_file_info(data_root)["finalized"])
         assert_equal(client2.ionian_download_segment(data_root, 0, 1), segment["data"])
@@ -84,8 +84,9 @@ class ExampleTest(TestFramework):
                 self.log.info("wait node %d", i)
                 self.nodes[i].admin_start_sync_file(n_files - 1)
                 wait_until(
-                    lambda: self.nodes[i].admin_get_sync_status(n_files - 1)
-                    == "Completed"
+                    lambda: self.nodes[i].sycn_status_is_completed_or_unknown(
+                        n_files - 1
+                    )
                 )
 
                 wait_until(lambda: self.nodes[i].ionian_get_file_info(root) is not None)

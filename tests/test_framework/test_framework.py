@@ -1,6 +1,8 @@
 import argparse
+from enum import Enum
 import logging
 import os
+import pdb
 import random
 import shutil
 import subprocess
@@ -18,6 +20,15 @@ from test_framework.blockchain_node import BlockChainNodeType
 from utility.utils import PortMin, is_windows_platform, wait_until
 
 __file_path__ = os.path.dirname(os.path.realpath(__file__))
+
+
+class TestStatus(Enum):
+    PASSED = 1
+    FAILED = 2
+
+
+TEST_EXIT_PASSED = 0
+TEST_EXIT_FAILED = 1
 
 
 class TestFramework:
@@ -81,6 +92,9 @@ class TestFramework:
             else:
                 updated_config = {}
 
+            assert os.path.exists(self.ionian_binary), (
+                "%s should be exist" % self.ionian_binary
+            )
             node = IonianNode(
                 i,
                 self.root_dir,
@@ -173,6 +187,14 @@ class TestFramework:
 
         parser.add_argument("--port-min", dest="port_min", default=11000, type=int)
 
+        parser.add_argument(
+            "--pdbonfailure",
+            dest="pdbonfailure",
+            default=False,
+            action="store_true",
+            help="Attach a python debugger if test fails",
+        )
+
         self.options = parser.parse_args()
 
     def __start_logging(self):
@@ -217,7 +239,7 @@ class TestFramework:
         ionion_node_rpc_url,
         file_to_upload,
     ):
-        assert os.path.exists(self.cli_binary)
+        assert os.path.exists(self.cli_binary), "%s should be exist" % self.cli_binary
         upload_args = [
             self.cli_binary,
             "upload",
@@ -300,25 +322,44 @@ class TestFramework:
         self.ionian_binary = self.options.ionian
         self.cli_binary = self.options.cli
         self.contract_path = self.options.contract
-
-        assert os.path.exists(self.contract_path)
+        assert os.path.exists(self.contract_path), (
+            "%s should be exist" % self.contract_path
+        )
 
         if self.options.random_seed is not None:
             random.seed(self.options.random_seed)
 
-        success = False
+        success = TestStatus.FAILED
         try:
             self.setup_params()
             self.setup_nodes()
             self.run_test()
-            success = True
+            success = TestStatus.PASSED
+        except AssertionError as e:
+            self.log.exception("Assertion failed %s", repr(e))
+        except KeyboardInterrupt as e:
+            self.log.warning("Exiting after keyboard interrupt %s", repr(e))
         except Exception as e:
             self.log.error("Test exception %s %s", repr(e), traceback.format_exc())
             self.log.error(f"Test data are not deleted: {self.root_dir}")
 
+        if success == TestStatus.FAILED and self.options.pdbonfailure:
+            print("Testcase failed. Attaching python debugger. Enter ? for help")
+            pdb.set_trace()
+
+        if success == TestStatus.PASSED:
+            self.log.info("Tests successful")
+            exit_code = TEST_EXIT_PASSED
+        else:
+            self.log.error(
+                "Test failed. Test logging available at %s/test_framework.log",
+                self.options.tmpdir,
+            )
+            exit_code = TEST_EXIT_FAILED
+
         self.stop_nodes()
 
-        if success:
+        if success == TestStatus.PASSED:
             self.log.info("Test success")
             shutil.rmtree(self.root_dir)
 
@@ -327,3 +368,5 @@ class TestFramework:
             self.log.removeHandler(handler)
             handler.close()
         logging.shutdown()
+
+        sys.exit(exit_code)
