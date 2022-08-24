@@ -9,10 +9,10 @@ use anyhow::{bail, Result};
 use append_merkle::{AppendMerkleTree, Sha3Algorithm};
 use ethereum_types::H256;
 use shared_types::{ChunkArray, DataRoot};
-use ssz::{Decode, Encode};
+use ssz::{Decode, DecodeError, Encode};
 use ssz_derive::{Decode as DeriveDecode, Encode as DeriveEncode};
-use std::cmp;
 use std::sync::Arc;
+use std::{cmp, mem};
 
 pub struct FlowStore {
     db: FlowDBStore,
@@ -271,13 +271,55 @@ impl FlowDBStore {
     }
 }
 
-// TODO: Is it better to use `Vec<[u8; ENTRY_SIZE]>`?
-#[derive(DeriveEncode, DeriveDecode)]
-#[ssz(enum_behaviour = "union")]
 enum EntryBatch {
     Complete(Vec<u8>),
     /// All `PartialBatch`s are ordered based on `start_index`.
     Incomplete(Vec<PartialBatch>),
+}
+
+const COMPLETE_BATCH_TYPE: u8 = 0;
+const INCOMPLETE_BATCH_TYPE: u8 = 1;
+
+impl Encode for EntryBatch {
+    fn is_ssz_fixed_len() -> bool {
+        false
+    }
+
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
+        match &self {
+            EntryBatch::Complete(data) => {
+                buf.extend_from_slice(&[COMPLETE_BATCH_TYPE]);
+                buf.extend_from_slice(data.as_slice());
+            }
+            EntryBatch::Incomplete(data_list) => {
+                buf.extend_from_slice(&[INCOMPLETE_BATCH_TYPE]);
+                buf.extend_from_slice(&data_list.as_ssz_bytes());
+            }
+        }
+    }
+
+    fn ssz_bytes_len(&self) -> usize {
+        match &self {
+            EntryBatch::Complete(data) => 1 + data.len(),
+            EntryBatch::Incomplete(batch_list) => 1 + batch_list.ssz_bytes_len(),
+        }
+    }
+}
+
+impl Decode for EntryBatch {
+    fn is_ssz_fixed_len() -> bool {
+        false
+    }
+
+    fn from_ssz_bytes(bytes: &[u8]) -> std::result::Result<Self, DecodeError> {
+        match *bytes.get(0).ok_or(DecodeError::ZeroLengthItem)? {
+            COMPLETE_BATCH_TYPE => Ok(EntryBatch::Complete(bytes[1..].to_vec())),
+            INCOMPLETE_BATCH_TYPE => Ok(EntryBatch::Incomplete(
+                <Vec<PartialBatch> as Decode>::from_ssz_bytes(&bytes[1..])?,
+            )),
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[derive(DeriveEncode, DeriveDecode)]
@@ -287,16 +329,45 @@ pub enum BatchRoot {
     Multiple((DataRoot, usize)),
 }
 
-#[derive(DeriveEncode, DeriveDecode)]
 struct PartialBatch {
     /// Offset in this batch.
     start_offset: usize,
     data: Vec<u8>,
 }
 
+impl Encode for PartialBatch {
+    fn is_ssz_fixed_len() -> bool {
+        false
+    }
+
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&self.start_offset.to_be_bytes());
+        buf.extend_from_slice(&self.data);
+    }
+
+    fn ssz_bytes_len(&self) -> usize {
+        1 + self.data.len()
+    }
+}
+
+impl Decode for PartialBatch {
+    fn is_ssz_fixed_len() -> bool {
+        false
+    }
+
+    fn from_ssz_bytes(bytes: &[u8]) -> std::result::Result<Self, DecodeError> {
+        Ok(Self {
+            start_offset: usize::from_be_bytes(
+                bytes[..mem::size_of::<usize>()].try_into().unwrap(),
+            ),
+            data: bytes[mem::size_of::<usize>()..].to_vec(),
+        })
+    }
+}
+
 impl PartialBatch {
     fn end_offset(&self) -> usize {
-        self.start_offset + self.data.len()
+        self.start_offset + self.data.len() / ENTRY_SIZE
     }
 }
 

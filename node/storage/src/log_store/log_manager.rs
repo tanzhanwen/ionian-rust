@@ -420,47 +420,45 @@ impl LogManager {
                     data: pad_data[..last_chunk_pad].to_vec(),
                     start_index: tx_start_flow_index as u64,
                 })?;
+
+                self.last_chunk_merkle =
+                    Merkle::new_with_depth(vec![], log2_pow2(PORA_CHUNK_SIZE) + 1);
                 let mut start_index = last_chunk_pad / ENTRY_SIZE;
-                loop {
-                    if pad_data.len() >= (start_index + PORA_CHUNK_SIZE) * ENTRY_SIZE {
-                        // This will insert data to `flow_store` and update `pora_chunks_merkle`.
-                        self.append_entries(ChunkArray {
-                            data: pad_data[start_index * ENTRY_SIZE
-                                ..(start_index + PORA_CHUNK_SIZE) * ENTRY_SIZE]
-                                .to_vec(),
-                            start_index: start_index as u64 + tx_start_flow_index,
-                        })?;
-                        start_index += PORA_CHUNK_SIZE;
-                    }
-                    if pad_data.len() < (start_index + PORA_CHUNK_SIZE) * ENTRY_SIZE {
-                        // Process the last chunk and break.
-                        assert_eq!(
-                            pad_data.len(),
-                            start_index * ENTRY_SIZE,
-                            "No trailing data if the padding goes beyond a chunk",
-                        );
-                        self.last_chunk_merkle =
-                            Merkle::new_with_depth(vec![], log2_pow2(PORA_CHUNK_SIZE) + 1);
-                        break;
-                    }
+
+                // Pad with more complete chunks.
+                while pad_data.len() >= (start_index + PORA_CHUNK_SIZE) * ENTRY_SIZE {
+                    let data = pad_data
+                        [start_index * ENTRY_SIZE..(start_index + PORA_CHUNK_SIZE) * ENTRY_SIZE]
+                        .to_vec();
+                    self.pora_chunks_merkle
+                        .append(*Merkle::new(data_to_merkle_leaves(&data)?).root());
+                    self.flow_store.append_entries(ChunkArray {
+                        data,
+                        start_index: start_index as u64 + tx_start_flow_index,
+                    })?;
+                    start_index += PORA_CHUNK_SIZE;
                 }
+                assert_eq!(pad_data.len(), start_index * ENTRY_SIZE);
             }
         }
         Ok(())
     }
 
     fn append_entries(&mut self, flow_entry_array: ChunkArray) -> Result<()> {
-        if flow_entry_array.start_index
-            >= (self.pora_chunks_merkle.leaves() - 1) as u64 * PORA_CHUNK_SIZE as u64
-        {
+        if flow_entry_array.start_index >= self.last_chunk_start_index() {
             // Update `last_chunk_merkle` with real data.
-            let chunk_start_index = flow_entry_array.start_index
-                - (self.pora_chunks_merkle.leaves() - 1) as u64 * PORA_CHUNK_SIZE as u64;
-            for (local_index, entry) in flow_entry_array.data.chunks_exact(ENTRY_SIZE).enumerate() {
-                self.last_chunk_merkle.fill_leaf(
-                    chunk_start_index as usize + local_index,
-                    Sha3Algorithm::leaf(entry),
-                );
+            let chunk_start_index =
+                (flow_entry_array.start_index - self.last_chunk_start_index()) as usize;
+            for (local_index, entry) in flow_entry_array.data[..self
+                .last_chunk_merkle
+                .leaves()
+                .saturating_sub(chunk_start_index)
+                * ENTRY_SIZE]
+                .chunks_exact(ENTRY_SIZE)
+                .enumerate()
+            {
+                self.last_chunk_merkle
+                    .fill_leaf(chunk_start_index + local_index, Sha3Algorithm::leaf(entry));
             }
         }
         let chunk_roots = self.flow_store.append_entries(flow_entry_array)?;
@@ -468,12 +466,6 @@ impl LogManager {
             if chunk_index < self.pora_chunks_merkle.leaves() as u64 - 1 {
                 self.pora_chunks_merkle
                     .fill_leaf(chunk_index as usize, chunk_root);
-            } else if chunk_index == self.pora_chunks_merkle.leaves() as u64 - 1 {
-                self.pora_chunks_merkle.update_last(chunk_root);
-                self.last_chunk_merkle =
-                    Merkle::new_with_depth(vec![], log2_pow2(PORA_CHUNK_SIZE) + 1);
-            } else if chunk_index == self.pora_chunks_merkle.leaves() as u64 {
-                self.pora_chunks_merkle.append(chunk_root);
             } else {
                 // TODO(zz): This assumption may be false in the future.
                 unreachable!("We always insert tx nodes before put_chunks");
@@ -485,6 +477,22 @@ impl LogManager {
     // FIXME(zz): Implement padding.
     pub fn padding(len: usize) -> Vec<u8> {
         vec![0; len * ENTRY_SIZE]
+    }
+
+    fn last_chunk_start_index(&self) -> u64 {
+        if self.pora_chunks_merkle.leaves() == 0 {
+            0
+        } else {
+            PORA_CHUNK_SIZE as u64
+                * if self.last_chunk_merkle.leaves() == 0 {
+                    // The last chunk is empty and its root hash is not in `pora_chunk_merkle`,
+                    // so all chunks in `pora_chunk_merkle` is complete.
+                    self.pora_chunks_merkle.leaves()
+                } else {
+                    // The last chunk has data, so we need to exclude it from `pora_chunks_merkle`.
+                    self.pora_chunks_merkle.leaves() - 1
+                } as u64
+        }
     }
 }
 
