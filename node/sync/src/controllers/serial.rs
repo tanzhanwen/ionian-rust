@@ -487,17 +487,17 @@ impl SerialSyncController {
 
 #[cfg(test)]
 mod tests {
-    use std::cmp;
+    use tokio::sync::RwLock;
 
     use libp2p::identity;
     use network::{types::AnnounceFile, Request};
-    use rand::random;
-    use shared_types::{ChunkArray, Transaction};
-    use storage::log_store::{
-        sub_merkle_tree, LogStoreChunkWrite, LogStoreRead, LogStoreWrite, SimpleLogStore,
-    };
+    use storage::log_store::log_manager::LogConfig;
+    use storage::log_store::log_manager::LogManager;
+    use storage::log_store::LogStoreRead;
     use task_executor::{test_utils::TestRuntime, TaskExecutor};
     use tokio::sync::mpsc::{self, UnboundedReceiver};
+
+    use crate::test_util::tests::create_2_store;
 
     use super::*;
 
@@ -924,7 +924,7 @@ mod tests {
 
         let tx_seq = 0;
         let chunk_count = 123;
-        let (store, peer_store, tx) = create_2_store(tx_seq, chunk_count);
+        let (store, peer_store, txs, _) = create_2_store(vec![chunk_count]);
 
         let runtime = TestRuntime::default();
         let task_executor = runtime.task_executor.clone();
@@ -932,12 +932,14 @@ mod tests {
             task_executor,
             Some(peer_id),
             store,
-            tx.data_merkle_root,
+            txs[0].data_merkle_root,
             tx_seq,
             chunk_count,
         );
 
         let chunks = peer_store
+            .read()
+            .await
             .get_chunks_with_proof_by_tx_and_index_range(tx_seq, 0, chunk_count)
             .unwrap()
             .unwrap();
@@ -957,7 +959,7 @@ mod tests {
 
         let tx_seq = 0;
         let chunk_count = 123;
-        let (store, peer_store, tx) = create_2_store(tx_seq, chunk_count);
+        let (store, peer_store, txs, _) = create_2_store(vec![chunk_count]);
 
         let runtime = TestRuntime::default();
         let task_executor = runtime.task_executor.clone();
@@ -965,12 +967,14 @@ mod tests {
             task_executor,
             Some(peer_id),
             store,
-            tx.data_merkle_root,
+            txs[0].data_merkle_root,
             tx_seq,
             chunk_count,
         );
 
         let mut chunks = peer_store
+            .read()
+            .await
             .get_chunks_with_proof_by_tx_and_index_range(tx_seq, 0, chunk_count)
             .unwrap()
             .unwrap();
@@ -1023,7 +1027,7 @@ mod tests {
 
         let tx_seq = 0;
         let chunk_count = 123;
-        let (store, peer_store, tx) = create_2_store(tx_seq, chunk_count);
+        let (store, peer_store, txs, _) = create_2_store(vec![chunk_count]);
 
         let runtime = TestRuntime::default();
         let task_executor = runtime.task_executor.clone();
@@ -1031,12 +1035,14 @@ mod tests {
             task_executor,
             Some(peer_id),
             store,
-            tx.data_merkle_root,
+            txs[0].data_merkle_root,
             tx_seq,
             chunk_count,
         );
 
         let chunks = peer_store
+            .read()
+            .await
             .get_chunks_with_proof_by_tx_and_index_range(tx_seq, 0, chunk_count)
             .unwrap()
             .unwrap();
@@ -1088,7 +1094,7 @@ mod tests {
 
         let tx_seq = 0;
         let chunk_count = 123;
-        let (store, peer_store, tx) = create_2_store(tx_seq, chunk_count);
+        let (store, peer_store, txs, _) = create_2_store(vec![chunk_count]);
 
         let runtime = TestRuntime::default();
         let task_executor = runtime.task_executor.clone();
@@ -1096,12 +1102,14 @@ mod tests {
             task_executor,
             Some(peer_id),
             store,
-            tx.data_merkle_root,
+            txs[0].data_merkle_root,
             tx_seq,
             chunk_count,
         );
 
         let chunks = peer_store
+            .read()
+            .await
             .get_chunks_with_proof_by_tx_and_index_range(tx_seq, 0, chunk_count)
             .unwrap()
             .unwrap();
@@ -1113,7 +1121,7 @@ mod tests {
             since: Instant::now(),
         };
 
-        controller.num_chunks = 1;
+        controller.tx_seq = 1;
 
         controller.on_response(peer_id, chunks).await;
         assert_eq!(*controller.get_status(), SyncState::Idle);
@@ -1155,21 +1163,22 @@ mod tests {
 
         let tx_seq = 0;
         let chunk_count = 123;
-        let (_, peer_store, tx1) = create_2_store(tx_seq, chunk_count);
-        let (store, _, tx2) = create_2_store(tx_seq, chunk_count);
+        let (_, peer_store, txs, _) = create_2_store(vec![chunk_count]);
 
         let runtime = TestRuntime::default();
         let task_executor = runtime.task_executor.clone();
         let (mut controller, mut network_recv) = create_controller(
             task_executor,
             Some(peer_id),
-            store,
-            tx2.data_merkle_root,
+            peer_store.clone(),
+            txs[0].data_merkle_root,
             tx_seq,
             chunk_count,
         );
 
         let chunks = peer_store
+            .read()
+            .await
             .get_chunks_with_proof_by_tx_and_index_range(tx_seq, 0, chunk_count)
             .unwrap()
             .unwrap();
@@ -1181,9 +1190,6 @@ mod tests {
             since: Instant::now(),
         };
 
-        controller.data_root = tx1.data_merkle_root;
-
-        drop(runtime);
         controller.on_response(peer_id, chunks).await;
         match controller.get_status() {
             SyncState::Failed { reason } => {
@@ -1202,8 +1208,8 @@ mod tests {
         let peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
 
         let tx_seq = 0;
-        let chunk_count = 123;
-        let (store, peer_store, tx) = create_2_store(tx_seq, chunk_count);
+        let chunk_count = 2049;
+        let (store, peer_store, txs, _) = create_2_store(vec![chunk_count]);
 
         let runtime = TestRuntime::default();
         let task_executor = runtime.task_executor.clone();
@@ -1211,24 +1217,26 @@ mod tests {
             task_executor,
             Some(peer_id),
             store,
-            tx.data_merkle_root,
+            txs[0].data_merkle_root,
             tx_seq,
             chunk_count,
         );
 
         let chunks = peer_store
-            .get_chunks_with_proof_by_tx_and_index_range(tx_seq, 0, chunk_count)
+            .read()
+            .await
+            .get_chunks_with_proof_by_tx_and_index_range(tx_seq, 0, 2048)
             .unwrap()
             .unwrap();
 
         controller.state = SyncState::Downloading {
             peer_id,
             from_chunk: 0,
-            to_chunk: chunk_count,
+            to_chunk: 2048,
             since: Instant::now(),
         };
 
-        controller.tx_seq = 1;
+        controller.num_chunks = 2048;
 
         controller.on_response(peer_id, chunks).await;
         match controller.get_status() {
@@ -1249,7 +1257,7 @@ mod tests {
 
         let tx_seq = 0;
         let chunk_count = 123;
-        let (store, peer_store, tx) = create_2_store(tx_seq, chunk_count);
+        let (store, peer_store, txs, _) = create_2_store(vec![chunk_count]);
 
         let runtime = TestRuntime::default();
         let task_executor = runtime.task_executor.clone();
@@ -1257,12 +1265,14 @@ mod tests {
             task_executor,
             Some(peer_id),
             store,
-            tx.data_merkle_root,
+            txs[0].data_merkle_root,
             tx_seq,
             chunk_count,
         );
 
         let chunks = peer_store
+            .read()
+            .await
             .get_chunks_with_proof_by_tx_and_index_range(tx_seq, 0, chunk_count)
             .unwrap()
             .unwrap();
@@ -1285,7 +1295,7 @@ mod tests {
 
         let tx_seq = 0;
         let chunk_count = 123;
-        let (store, _, tx) = create_2_store(tx_seq, chunk_count);
+        let (store, _, txs, _) = create_2_store(vec![chunk_count]);
 
         let runtime = TestRuntime::default();
         let task_executor = runtime.task_executor.clone();
@@ -1293,7 +1303,7 @@ mod tests {
             task_executor,
             Some(init_peer_id),
             store,
-            tx.data_merkle_root,
+            txs[0].data_merkle_root,
             tx_seq,
             chunk_count,
         );
@@ -1382,11 +1392,8 @@ mod tests {
         let (network_send, network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
         let ctx = Arc::new(SyncNetworkContext::new(network_send));
 
-        let store = Arc::new(
-            SimpleLogStore::memorydb()
-                .map_err(|e| format!("Unable to start in-memory store: {:?}", e))
-                .unwrap(),
-        );
+        let config = LogConfig::default();
+        let store = Arc::new(RwLock::new(LogManager::memorydb(config.clone()).unwrap()));
 
         let peer_id = match peer_id {
             Some(v) => v,
@@ -1394,6 +1401,7 @@ mod tests {
         };
 
         let file_location_cache: Arc<FileLocationCache> = Default::default();
+
         {
             let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
             let msg = AnnounceFile {
@@ -1425,7 +1433,7 @@ mod tests {
     fn create_controller(
         task_executor: TaskExecutor,
         peer_id: Option<PeerId>,
-        store: Arc<SimpleLogStore>,
+        store: Arc<RwLock<LogManager>>,
         data_merkle_root: DataRoot,
         tx_seq: u64,
         num_chunks: usize,
@@ -1465,55 +1473,5 @@ mod tests {
         );
 
         (controller, network_recv)
-    }
-
-    fn create_2_store(
-        tx_seq: u64,
-        chunk_count: usize,
-    ) -> (Arc<SimpleLogStore>, Arc<SimpleLogStore>, Transaction) {
-        let data_size = CHUNK_SIZE * chunk_count;
-        let mut data = vec![0u8; data_size];
-
-        for i in 0..chunk_count {
-            data[i * CHUNK_SIZE] = random();
-        }
-
-        let merkle = sub_merkle_tree(&data).unwrap();
-        let tx = Transaction {
-            stream_ids: vec![],
-            size: data_size as u64,
-            data_merkle_root: merkle.root().into(),
-            seq: tx_seq,
-            data: vec![],
-        };
-
-        let store = Arc::new(
-            SimpleLogStore::memorydb()
-                .map_err(|e| format!("Unable to start in-memory store: {:?}", e))
-                .unwrap(),
-        );
-
-        let peer_store = Arc::new(
-            SimpleLogStore::memorydb()
-                .map_err(|e| format!("Unable to start in-memory store: {:?}", e))
-                .unwrap(),
-        );
-
-        store.put_tx(tx.clone()).unwrap();
-        peer_store.put_tx(tx.clone()).unwrap();
-        for start_index in (0..chunk_count).step_by(peer_store.chunk_batch_size) {
-            let end = cmp::min(
-                (start_index + peer_store.chunk_batch_size) * CHUNK_SIZE,
-                data.len(),
-            );
-            let chunk_array = ChunkArray {
-                data: data[start_index * CHUNK_SIZE..end].to_vec(),
-                start_index: start_index as u32,
-            };
-            peer_store.put_chunks(tx.seq, chunk_array.clone()).unwrap();
-        }
-        peer_store.finalize_tx(tx.seq).unwrap();
-
-        (store, peer_store, tx)
     }
 }

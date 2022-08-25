@@ -470,26 +470,22 @@ impl SyncService {
 
 #[cfg(test)]
 mod tests {
-    use std::cmp;
     use std::thread;
 
     use libp2p::identity;
     use network::discovery::ConnectionId;
     use network::rpc::SubstreamId;
-    use network::types::AnnounceFile;
     use network::ReportSource;
-    use rand::random;
-    use shared_types::timestamp_now;
-    use shared_types::{ChunkArray, Transaction, CHUNK_SIZE};
+    use shared_types::ChunkArray;
     use std::time::Duration;
     use std::time::Instant;
-    use storage::log_store::sub_merkle_tree;
-    use storage::log_store::LogStoreChunkWrite;
+    use storage::log_store::log_manager::LogConfig;
+    use storage::log_store::log_manager::LogManager;
     use storage::log_store::LogStoreRead;
-    use storage::log_store::LogStoreWrite;
-    use storage::log_store::SimpleLogStore;
     use task_executor::test_utils::TestRuntime;
     use tokio::sync::mpsc::UnboundedReceiver;
+
+    use crate::test_util::tests::{create_2_store, create_file_location_cache};
 
     use super::*;
 
@@ -498,7 +494,7 @@ mod tests {
         let runtime = TestRuntime::default();
 
         let chunk_count = 1535;
-        let (store, _, _) = create_store(chunk_count, true);
+        let (_, store, _, _) = create_2_store(vec![chunk_count]);
         let store = Store::new(store, runtime.task_executor.clone());
 
         let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
@@ -529,7 +525,7 @@ mod tests {
         let runtime = TestRuntime::default();
 
         let chunk_count = 1535;
-        let (store, _, _) = create_store(chunk_count, true);
+        let (_, store, _, _) = create_2_store(vec![chunk_count]);
         let store = Store::new(store, runtime.task_executor.clone());
 
         let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
@@ -560,7 +556,8 @@ mod tests {
         let runtime = TestRuntime::default();
 
         let chunk_count = 1535;
-        let (store, tx, data) = create_store(chunk_count, true);
+        let (_, store, _txs, data) = create_2_store(vec![chunk_count]);
+        let data = data[0].clone();
 
         let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
         let file_location_cache: Arc<FileLocationCache> =
@@ -608,11 +605,14 @@ mod tests {
 
                         assert_eq!(
                             response.chunks,
-                            chunk_array.sub_array(0, chunk_count).unwrap()
+                            chunk_array.sub_array(0, chunk_count as u64).unwrap()
                         );
-                        assert!(response
-                            .validate(&tx.data_merkle_root, chunk_count)
-                            .unwrap());
+
+                        store
+                            .read()
+                            .await
+                            .validate_range_proof(0, &response)
+                            .expect("validate proof");
                     }
                     _ => {
                         panic!("Not expected message: Response::Chunks");
@@ -630,7 +630,7 @@ mod tests {
         let runtime = TestRuntime::default();
 
         let chunk_count = 1535;
-        let (store, _, _) = create_store(chunk_count, true);
+        let (_, store, _, _) = create_2_store(vec![chunk_count]);
 
         let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
         let file_location_cache: Arc<FileLocationCache> =
@@ -695,7 +695,7 @@ mod tests {
         let runtime = TestRuntime::default();
 
         let chunk_count = 1535;
-        let (store, _, _) = create_store(chunk_count, true);
+        let (_, store, _, _) = create_2_store(vec![chunk_count]);
 
         let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
         let file_location_cache: Arc<FileLocationCache> =
@@ -725,7 +725,6 @@ mod tests {
             .unwrap();
 
         if let Some(msg) = network_recv.recv().await {
-            println!("{:?}", msg);
             match msg {
                 NetworkMessage::ReportPeer {
                     peer_id,
@@ -761,7 +760,7 @@ mod tests {
         let runtime = TestRuntime::default();
 
         let chunk_count = 1535;
-        let (store, _, _) = create_store(chunk_count, true);
+        let (_, store, _, _) = create_2_store(vec![chunk_count]);
 
         let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
         let file_location_cache: Arc<FileLocationCache> =
@@ -826,7 +825,7 @@ mod tests {
         let runtime = TestRuntime::default();
 
         let chunk_count = 1535;
-        let (store, _, _) = create_store(chunk_count, false);
+        let (store, _, _, _) = create_2_store(vec![chunk_count]);
 
         let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
         let file_location_cache: Arc<FileLocationCache> =
@@ -910,11 +909,9 @@ mod tests {
     async fn test_sync_file_tx_not_exist() {
         let runtime = TestRuntime::default();
 
-        let store = Arc::new(
-            SimpleLogStore::memorydb()
-                .map_err(|e| format!("Unable to start in-memory store: {:?}", e))
-                .unwrap(),
-        );
+        let config = LogConfig::default();
+
+        let store = Arc::new(RwLock::new(LogManager::memorydb(config.clone()).unwrap()));
 
         let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
         let file_location_cache: Arc<FileLocationCache> =
@@ -936,7 +933,10 @@ mod tests {
             .unwrap();
 
         thread::sleep(Duration::from_millis(1000));
-        assert_eq!(store.get_tx_by_seq_number(tx_seq).unwrap(), None);
+        assert_eq!(
+            store.read().await.get_tx_by_seq_number(tx_seq).unwrap(),
+            None
+        );
         assert_eq!(network_recv.try_recv().is_err(), true);
     }
 
@@ -945,7 +945,7 @@ mod tests {
         let runtime = TestRuntime::default();
 
         let chunk_count = 1535;
-        let (_, peer_store) = create_multi_stores(vec![chunk_count]);
+        let (_, peer_store, _, _) = create_2_store(vec![chunk_count]);
 
         let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
         let file_location_cache: Arc<FileLocationCache> =
@@ -967,7 +967,10 @@ mod tests {
             .unwrap();
 
         thread::sleep(Duration::from_millis(1000));
-        assert_eq!(peer_store.check_tx_completed(tx_seq).unwrap(), true);
+        assert_eq!(
+            peer_store.read().await.check_tx_completed(tx_seq).unwrap(),
+            true
+        );
         assert_eq!(network_recv.try_recv().is_err(), true);
     }
 
@@ -976,7 +979,7 @@ mod tests {
         let runtime = TestRuntime::default();
 
         let chunk_count = 1535;
-        let (store, peer_store) = create_multi_stores(vec![chunk_count]);
+        let (store, peer_store, _, _) = create_2_store(vec![chunk_count]);
 
         let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
         let file_location_cache: Arc<FileLocationCache> =
@@ -999,7 +1002,10 @@ mod tests {
 
         receive_dial(&mut network_recv, &sync_send, init_peer_id).await;
 
-        assert_eq!(store.check_tx_completed(tx_seq).unwrap(), false);
+        assert_eq!(
+            store.read().await.check_tx_completed(tx_seq).unwrap(),
+            false
+        );
 
         assert_ne!(
             sync_send
@@ -1023,7 +1029,7 @@ mod tests {
         .await;
 
         let deadline = Instant::now() + Duration::from_millis(5000);
-        while !store.check_tx_completed(tx_seq).unwrap() {
+        while !store.read().await.check_tx_completed(tx_seq).unwrap() {
             if Instant::now() >= deadline {
                 panic!("Failed to wait tx completed");
             }
@@ -1054,7 +1060,7 @@ mod tests {
         let runtime = TestRuntime::default();
 
         let chunk_count = 2049;
-        let (store, peer_store) = create_multi_stores(vec![chunk_count]);
+        let (store, peer_store, _, _) = create_2_store(vec![chunk_count]);
 
         let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
         let file_location_cache: Arc<FileLocationCache> =
@@ -1077,7 +1083,10 @@ mod tests {
 
         receive_dial(&mut network_recv, &sync_send, init_peer_id).await;
 
-        assert_eq!(store.check_tx_completed(tx_seq).unwrap(), false);
+        assert_eq!(
+            store.read().await.check_tx_completed(tx_seq).unwrap(),
+            false
+        );
 
         receive_chunk_request(
             &mut network_recv,
@@ -1113,7 +1122,7 @@ mod tests {
         .await;
 
         let deadline = Instant::now() + Duration::from_millis(5000);
-        while !store.check_tx_completed(tx_seq).unwrap() {
+        while !store.read().await.check_tx_completed(tx_seq).unwrap() {
             if Instant::now() >= deadline {
                 panic!("Failed to wait tx completed");
             }
@@ -1127,7 +1136,7 @@ mod tests {
         let runtime = TestRuntime::default();
 
         let chunk_count = vec![1535, 1535, 1535];
-        let (store, peer_store) = create_multi_stores(chunk_count.clone());
+        let (store, peer_store, _, _) = create_2_store(chunk_count.clone());
 
         let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
         let file_location_cache: Arc<FileLocationCache> =
@@ -1151,8 +1160,11 @@ mod tests {
 
         receive_dial(&mut network_recv, &sync_send, init_peer_id).await;
 
-        assert_eq!(store.check_tx_completed(tx_seq).unwrap(), false);
-        assert_eq!(store.check_tx_completed(0).unwrap(), false);
+        assert_eq!(
+            store.read().await.check_tx_completed(tx_seq).unwrap(),
+            false
+        );
+        assert_eq!(store.read().await.check_tx_completed(0).unwrap(), false);
 
         receive_chunk_request(
             &mut network_recv,
@@ -1161,12 +1173,12 @@ mod tests {
             init_peer_id,
             tx_seq,
             0,
-            chunk_count[1] as u32,
+            chunk_count[0] as u32,
         )
         .await;
 
         let deadline = Instant::now() + Duration::from_millis(5000);
-        while !store.check_tx_completed(tx_seq).unwrap() {
+        while !store.read().await.check_tx_completed(tx_seq).unwrap() {
             if Instant::now() >= deadline {
                 panic!("Failed to wait tx completed");
             }
@@ -1174,7 +1186,7 @@ mod tests {
             thread::sleep(Duration::from_millis(300));
         }
 
-        assert_eq!(store.check_tx_completed(0).unwrap(), false);
+        assert_eq!(store.read().await.check_tx_completed(0).unwrap(), false);
 
         // first file
         let tx_seq = 0u64;
@@ -1197,7 +1209,7 @@ mod tests {
         .await;
 
         let deadline = Instant::now() + Duration::from_millis(5000);
-        while !store.check_tx_completed(tx_seq).unwrap() {
+        while !store.read().await.check_tx_completed(tx_seq).unwrap() {
             if Instant::now() >= deadline {
                 panic!("Failed to wait tx completed");
             }
@@ -1220,7 +1232,7 @@ mod tests {
         let runtime = TestRuntime::default();
 
         let chunk_count = 1535;
-        let (store, _, _) = create_store(chunk_count, true);
+        let (_, store, _, _) = create_2_store(vec![chunk_count]);
 
         let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
         let file_location_cache: Arc<FileLocationCache> =
@@ -1251,7 +1263,7 @@ mod tests {
         let runtime = TestRuntime::default();
 
         let chunk_count = 1535;
-        let (store, peer_store) = create_multi_stores(vec![chunk_count]);
+        let (store, peer_store, _, _) = create_2_store(vec![chunk_count]);
 
         let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
         let file_location_cache: Arc<FileLocationCache> = Default::default();
@@ -1277,7 +1289,10 @@ mod tests {
 
         receive_dial(&mut network_recv, &sync_send, init_peer_id).await;
 
-        assert_eq!(store.check_tx_completed(tx_seq).unwrap(), false);
+        assert_eq!(
+            store.read().await.check_tx_completed(tx_seq).unwrap(),
+            false
+        );
 
         receive_chunk_request(
             &mut network_recv,
@@ -1291,7 +1306,7 @@ mod tests {
         .await;
 
         let deadline = Instant::now() + Duration::from_millis(5000);
-        while !store.check_tx_completed(tx_seq).unwrap() {
+        while !store.read().await.check_tx_completed(tx_seq).unwrap() {
             if Instant::now() >= deadline {
                 panic!("Failed to wait tx completed");
             }
@@ -1305,7 +1320,7 @@ mod tests {
         let runtime = TestRuntime::default();
 
         let chunk_count = 1535;
-        let (store, peer_store) = create_multi_stores(vec![chunk_count]);
+        let (store, peer_store, _, _) = create_2_store(vec![chunk_count]);
 
         let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
         let file_location_cache: Arc<FileLocationCache> =
@@ -1337,7 +1352,10 @@ mod tests {
 
         receive_dial(&mut network_recv, &sync_send, init_peer_id).await;
 
-        assert_eq!(store.check_tx_completed(tx_seq).unwrap(), false);
+        assert_eq!(
+            store.read().await.check_tx_completed(tx_seq).unwrap(),
+            false
+        );
 
         receive_chunk_request(
             &mut network_recv,
@@ -1351,7 +1369,7 @@ mod tests {
         .await;
 
         let deadline = Instant::now() + Duration::from_millis(5000);
-        while !store.check_tx_completed(tx_seq).unwrap() {
+        while !store.read().await.check_tx_completed(tx_seq).unwrap() {
             if Instant::now() >= deadline {
                 panic!("Failed to wait tx completed");
             }
@@ -1365,7 +1383,7 @@ mod tests {
         let runtime = TestRuntime::default();
 
         let chunk_count = 1535;
-        let (_, peer_store) = create_multi_stores(vec![chunk_count]);
+        let (_, peer_store, _, _) = create_2_store(vec![chunk_count]);
 
         let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
         let file_location_cache: Arc<FileLocationCache> =
@@ -1399,7 +1417,7 @@ mod tests {
         let runtime = TestRuntime::default();
 
         let chunk_count = 1535;
-        let (store, _) = create_multi_stores(vec![chunk_count]);
+        let (store, _, _, _) = create_2_store(vec![chunk_count]);
 
         let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
         let file_location_cache: Arc<FileLocationCache> =
@@ -1452,7 +1470,7 @@ mod tests {
     async fn receive_chunk_request(
         network_recv: &mut UnboundedReceiver<NetworkMessage>,
         sync_send: &SyncSender,
-        peer_store: Arc<SimpleLogStore>,
+        peer_store: Arc<RwLock<LogManager>>,
         init_peer_id: PeerId,
         tx_seq: u64,
         index_start: u32,
@@ -1486,6 +1504,8 @@ mod tests {
                     };
 
                     let chunks = peer_store
+                        .read()
+                        .await
                         .get_chunks_with_proof_by_tx_and_index_range(
                             req.tx_seq,
                             req.index_start as usize,
@@ -1506,138 +1526,6 @@ mod tests {
                     panic!("Not expected message: NetworkMessage::SendRequest");
                 }
             }
-        }
-    }
-
-    fn create_store(
-        chunk_count: usize,
-        finalize: bool,
-    ) -> (Arc<SimpleLogStore>, Transaction, Vec<u8>) {
-        let store = Arc::new(
-            SimpleLogStore::memorydb()
-                .map_err(|e| format!("Unable to start in-memory store: {:?}", e))
-                .unwrap(),
-        );
-
-        let data_size = CHUNK_SIZE * chunk_count;
-        let mut data = vec![0u8; data_size];
-
-        for i in 0..chunk_count {
-            data[i * CHUNK_SIZE] = random();
-        }
-
-        let merkle = sub_merkle_tree(&data).unwrap();
-        let tx = Transaction {
-            stream_ids: vec![],
-            size: data_size as u64,
-            data_merkle_root: merkle.root().into(),
-            seq: 0,
-            data: vec![],
-        };
-        store.put_tx(tx.clone()).unwrap();
-
-        if finalize {
-            for start_index in (0..chunk_count).step_by(store.chunk_batch_size) {
-                let end = cmp::min(
-                    (start_index + store.chunk_batch_size) * CHUNK_SIZE,
-                    data.len(),
-                );
-                let chunk_array = ChunkArray {
-                    data: data[start_index * CHUNK_SIZE..end].to_vec(),
-                    start_index: start_index as u32,
-                };
-                store.put_chunks(tx.seq, chunk_array.clone()).unwrap();
-            }
-            store.finalize_tx(tx.seq).unwrap();
-        }
-
-        (store, tx, data)
-    }
-
-    fn create_multi_stores(chunk_count: Vec<usize>) -> (Arc<SimpleLogStore>, Arc<SimpleLogStore>) {
-        let store = Arc::new(
-            SimpleLogStore::memorydb()
-                .map_err(|e| format!("Unable to start in-memory store: {:?}", e))
-                .unwrap(),
-        );
-
-        let peer_store = Arc::new(
-            SimpleLogStore::memorydb()
-                .map_err(|e| format!("Unable to start in-memory store: {:?}", e))
-                .unwrap(),
-        );
-
-        for i in 0..chunk_count.len() {
-            generate_data(chunk_count[i], store.clone(), peer_store.clone(), i as u64);
-        }
-
-        (store, peer_store)
-    }
-
-    fn generate_data(
-        chunk_count: usize,
-        store: Arc<SimpleLogStore>,
-        peer_store: Arc<SimpleLogStore>,
-        seq: u64,
-    ) {
-        let data_size = CHUNK_SIZE * chunk_count;
-        let mut data = vec![0u8; data_size];
-
-        for i in 0..chunk_count {
-            data[i * CHUNK_SIZE] = random();
-        }
-
-        let merkle = sub_merkle_tree(&data).unwrap();
-        let tx = Transaction {
-            stream_ids: vec![],
-            size: data_size as u64,
-            data_merkle_root: merkle.root().into(),
-            seq: seq,
-            data: vec![],
-        };
-        store.put_tx(tx.clone()).unwrap();
-
-        peer_store.put_tx(tx.clone()).unwrap();
-        for start_index in (0..chunk_count).step_by(store.chunk_batch_size) {
-            let end = cmp::min(
-                (start_index + store.chunk_batch_size) * CHUNK_SIZE,
-                data.len(),
-            );
-            let chunk_array = ChunkArray {
-                data: data[start_index * CHUNK_SIZE..end].to_vec(),
-                start_index: start_index as u32,
-            };
-            peer_store.put_chunks(tx.seq, chunk_array.clone()).unwrap();
-        }
-        peer_store.finalize_tx(tx.seq).unwrap();
-    }
-
-    fn create_file_location_cache(peer_id: PeerId, seq_size: usize) -> Arc<FileLocationCache> {
-        let file_location_cache: Arc<FileLocationCache> = Default::default();
-        generate_announce_file(peer_id, file_location_cache.clone(), seq_size);
-
-        file_location_cache
-    }
-
-    fn generate_announce_file(
-        peer_id: PeerId,
-        file_location_cache: Arc<FileLocationCache>,
-        seq_size: usize,
-    ) {
-        for i in 0..seq_size {
-            let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
-            let msg = AnnounceFile {
-                tx_seq: i as u64,
-                peer_id: peer_id.into(),
-                at: address.into(),
-                timestamp: timestamp_now(),
-            };
-
-            let local_private_key = identity::Keypair::generate_secp256k1();
-            let signed_msg = msg
-                .into_signed(&local_private_key)
-                .expect("Sign msg failed");
-            file_location_cache.insert(signed_msg);
         }
     }
 }

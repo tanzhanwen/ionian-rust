@@ -8,7 +8,7 @@ use crate::{try_option, IonianKeyValueDB};
 use anyhow::{bail, Result};
 use append_merkle::{AppendMerkleTree, Sha3Algorithm};
 use ethereum_types::H256;
-use shared_types::{ChunkArray, DataRoot};
+use shared_types::{bytes_to_chunks, ChunkArray, DataRoot};
 use ssz::{Decode, DecodeError, Encode};
 use ssz_derive::{Decode as DeriveDecode, Encode as DeriveEncode};
 use std::sync::Arc;
@@ -312,7 +312,7 @@ impl Decode for EntryBatch {
     }
 
     fn from_ssz_bytes(bytes: &[u8]) -> std::result::Result<Self, DecodeError> {
-        match *bytes.get(0).ok_or(DecodeError::ZeroLengthItem)? {
+        match *bytes.first().ok_or(DecodeError::ZeroLengthItem)? {
             COMPLETE_BATCH_TYPE => Ok(EntryBatch::Complete(bytes[1..].to_vec())),
             INCOMPLETE_BATCH_TYPE => Ok(EntryBatch::Incomplete(
                 <Vec<PartialBatch> as Decode>::from_ssz_bytes(&bytes[1..])?,
@@ -367,7 +367,7 @@ impl Decode for PartialBatch {
 
 impl PartialBatch {
     fn end_offset(&self) -> usize {
-        self.start_offset + self.data.len() / ENTRY_SIZE
+        self.start_offset + bytes_to_chunks(self.data.len())
     }
 }
 
@@ -379,7 +379,8 @@ impl EntryBatch {
                 .map(|s| s.to_vec()),
             EntryBatch::Incomplete(data_list) => {
                 for p in data_list {
-                    if offset >= p.start_offset && offset + length <= p.start_offset + p.data.len()
+                    if offset >= p.start_offset
+                        && offset + length <= p.start_offset + bytes_to_chunks(p.data.len())
                     {
                         return p
                             .data
@@ -403,6 +404,7 @@ impl EntryBatch {
                 bail!("overwriting a completed PoRA Chunk with partial data");
             }
             EntryBatch::Incomplete(list) => {
+                let data_entry_len = bytes_to_chunks(data.len());
                 match list.binary_search_by_key(&offset, |p| p.start_offset) {
                     Ok(i) => {
                         bail!(
@@ -421,18 +423,18 @@ impl EntryBatch {
                             );
                         }
                         if position != list.len()
-                            && offset + data.len() > list[position].start_offset
+                            && offset + data_entry_len > list[position].start_offset
                         {
                             bail!(
                                 "Overlap with index{}: start_offset={} new_end_offset={}",
                                 position,
                                 list[position].start_offset,
-                                offset + data.len()
+                                offset + data_entry_len
                             );
                         }
                         let merge_prev = position != 0 && offset == list[position - 1].end_offset();
                         let merge_next = position != list.len()
-                            && offset + data.len() == list[position].start_offset;
+                            && offset + data_entry_len == list[position].start_offset;
                         match (merge_prev, merge_next) {
                             (false, false) => {
                                 list.insert(
@@ -464,7 +466,7 @@ impl EntryBatch {
                         // TODO(zz): Use config here?
                         if list.len() == 1
                             && list[0].start_offset == 0
-                            && list[0].data.len() == PORA_CHUNK_SIZE
+                            && bytes_to_chunks(list[0].data.len()) == PORA_CHUNK_SIZE
                         {
                             // All data in this batch have been filled.
                             *self = EntryBatch::Complete(list.remove(0).data);
