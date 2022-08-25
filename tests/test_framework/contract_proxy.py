@@ -26,7 +26,6 @@ class ContractProxy:
         receipt = contract.web3.eth.wait_for_transaction_receipt(tx_hash)
         assert_equal(receipt["status"], 1)
 
-
     def append_log_with_data(self, data, stream_ids=None, node_idx=0):
         assert node_idx < len(self.blockchain_nodes)
 

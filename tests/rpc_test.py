@@ -47,7 +47,7 @@ class RpcTest(TestFramework):
         wait_until(lambda: client2.ionian_get_file_info(data_root)["finalized"])
         assert_equal(client2.ionian_download_segment(data_root, 0, 1), segment["data"])
 
-        self.__test_upload_file_with_cli(client1)
+        # self.__test_upload_file_with_cli(client1)
 
         client2.shutdown()
         wait_until(lambda: client1.ionian_get_status() == 0)

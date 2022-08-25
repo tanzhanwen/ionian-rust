@@ -1,6 +1,7 @@
 import os
 import platform
 import requests
+import shutil
 import stat
 
 from config.node_config import BSC_CONFIG
@@ -123,6 +124,10 @@ class BSCNode(BlockchainNode):
 
         self.log.info("BSC node%d init finished with return code %d", self.index, ret)
 
+        config_file = os.path.join(__file_path__, "..", "config", "bsc.toml")
+        target = os.path.join(self.data_dir, "bsc.toml")
+        shutil.copyfile(config_file, target)
+
         self.args = [
             self.binary,
             "--datadir",
@@ -145,6 +150,8 @@ class BSCNode(BlockchainNode):
             str(self.config["NetworkId"]),
             "--verbosity",
             str(self.config["Verbosity"]),
+            "--config",
+            "bsc.toml",
         ]
 
         self.log.info("Start BSC node %d", self.index)

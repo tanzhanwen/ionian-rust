@@ -73,18 +73,38 @@ class TestFramework:
             node.wait_for_rpc_connection()
 
         if self.blockchain_node_type == BlockChainNodeType.BSC:
-            enode = self.blockchain_nodes[0].admin_nodeInfo()["enode"]
-            for node in self.blockchain_nodes[1:]:
-                node.admin_addPeer([enode])
+            enodes = set(
+                [node.admin_nodeInfo()["enode"] for node in self.blockchain_nodes[1:]]
+            )
+            for enode in enodes:
+                self.blockchain_nodes[0].admin_addPeer([enode])
 
             # mine
             self.blockchain_nodes[0].miner_start([1])
 
+            def wait_for_peer():
+                peers = self.blockchain_nodes[0].admin_peers()
+                for peer in peers:
+                    if peer["enode"] in enodes:
+                        enodes.remove(peer["enode"])
+
+                if enodes:
+                    for enode in enodes:
+                        self.blockchain_nodes[0].admin_addPeer([enode])
+                    return False
+
+                return True
+
+            wait_until(lambda: wait_for_peer())
+
             for node in self.blockchain_nodes:
                 node.wait_for_start_mining()
 
-        contract = self.blockchain_nodes[0].setup_contract()
+        contract, tx_hash = self.blockchain_nodes[0].setup_contract()
         self.contract = ContractProxy(contract, self.blockchain_nodes)
+
+        for node in self.blockchain_nodes[1:]:
+            node.wait_for_transaction(tx_hash)
 
     def __setup_ionian_node(self):
         for i in range(self.num_nodes):
@@ -106,6 +126,9 @@ class TestFramework:
             )
             self.nodes.append(node)
             node.setup_config()
+            # wait firt node start for connection
+            if i == 1:
+                time.sleep(1)
             node.start()
 
         time.sleep(1)

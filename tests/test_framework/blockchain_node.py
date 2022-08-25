@@ -244,18 +244,25 @@ class BlockchainNode(TestNode):
         tx_receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
         token_contract = token_contract(tx_receipt.contractAddress)
         tx_hash = contract.constructor(tx_receipt.contractAddress).transact(TX_PARAMS)
+        flow_contract_hash = tx_hash
         tx_receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
         contract = w3.eth.contract(
             address=tx_receipt.contractAddress, abi=contract_interface["abi"]
         )
-        tx_hash = token_contract.functions.approve(tx_receipt.contractAddress, int(1e9)).transact(TX_PARAMS)
+        tx_hash = token_contract.functions.approve(
+            tx_receipt.contractAddress, int(1e9)
+        ).transact(TX_PARAMS)
         w3.eth.wait_for_transaction_receipt(tx_hash)
-        return contract
+        return contract, flow_contract_hash
 
     def get_contract(self, contract_address):
         w3 = Web3(HTTPProvider(self.rpc_url))
         contract_interface = json.load(open(self.contract_path, "r"))
         return w3.eth.contract(address=contract_address, abi=contract_interface["abi"])
+
+    def wait_for_transaction(self, tx_hash):
+        w3 = Web3(HTTPProvider(self.rpc_url))
+        w3.eth.wait_for_transaction_receipt(tx_hash)
 
     def start(self):
         super().start(self.blockchain_node_type == BlockChainNodeType.BSC)
