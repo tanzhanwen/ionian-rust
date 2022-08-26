@@ -6072,6 +6072,7 @@ dependencies = [
  "channel",
  "file_location_cache",
  "libp2p",
+ "merkle_light",
  "network",
  "rand 0.8.5",
  "shared_types",

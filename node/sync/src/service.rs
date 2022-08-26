@@ -1056,6 +1056,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_sync_file_special_size() {
+        test_sync_file(1).await;
+        test_sync_file(511).await;
+        test_sync_file(512).await;
+        test_sync_file(513).await;
+        test_sync_file(1023).await;
+        test_sync_file(1024).await;
+        test_sync_file(1025).await;
+        test_sync_file(2047).await;
+        test_sync_file(2048).await;
+    }
+
+    #[tokio::test]
     async fn test_sync_file_exceed_max_chunks_to_request() {
         let runtime = TestRuntime::default();
 
@@ -1464,6 +1477,68 @@ mod tests {
                     panic!("Not expected message: NetworkMessage::DialPeer");
                 }
             }
+        }
+    }
+
+    async fn test_sync_file(chunk_count: usize) {
+        let runtime = TestRuntime::default();
+
+        let (store, peer_store, _, _) = create_2_store(vec![chunk_count]);
+
+        let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let file_location_cache: Arc<FileLocationCache> =
+            create_file_location_cache(init_peer_id, 1);
+
+        let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
+
+        let sync_send = SyncService::spawn(
+            runtime.task_executor.clone(),
+            network_send,
+            store.clone(),
+            file_location_cache,
+        );
+
+        let tx_seq = 0u64;
+        sync_send
+            .request(SyncRequest::SyncFile { tx_seq })
+            .await
+            .unwrap();
+
+        receive_dial(&mut network_recv, &sync_send, init_peer_id).await;
+
+        assert_eq!(
+            store.read().await.check_tx_completed(tx_seq).unwrap(),
+            false
+        );
+
+        assert_ne!(
+            sync_send
+                .request(SyncRequest::SyncStatus { tx_seq })
+                .await
+                .unwrap(),
+            SyncResponse::SyncStatus {
+                status: "Completed".to_string()
+            }
+        );
+
+        receive_chunk_request(
+            &mut network_recv,
+            &sync_send,
+            peer_store.clone(),
+            init_peer_id,
+            tx_seq,
+            0,
+            chunk_count as u32,
+        )
+        .await;
+
+        let deadline = Instant::now() + Duration::from_millis(5000);
+        while !store.read().await.check_tx_completed(tx_seq).unwrap() {
+            if Instant::now() >= deadline {
+                panic!("Failed to wait tx completed");
+            }
+
+            thread::sleep(Duration::from_millis(300));
         }
     }
 

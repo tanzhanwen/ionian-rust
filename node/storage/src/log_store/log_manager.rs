@@ -311,7 +311,10 @@ impl LogManager {
 
         // TODO(zz): Maybe we can decide that all proofs are at the PoRA chunk level, so
         // we do not need to maintain the proof at the entry level below.
-        let sub_proof = if chunk_index as usize != self.pora_chunks_merkle.leaves() - 1 {
+        // Condition (self.last_chunk_merkle.leaves() == 0): When last chunk size is exactly PORA_CHUNK_SIZE, proof should be generated from flow data, as last_chunk_merkle.leaves() is zero at this time
+        let sub_proof = if chunk_index as usize != self.pora_chunks_merkle.leaves() - 1
+            || self.last_chunk_merkle.leaves() == 0
+        {
             // TODO(zz）: Even if the data is incomplete, given the intermediate merkle roots
             // it's still possible to generate needed proofs. These merkle roots may be stored
             // within `EntryBatch::Incomplete`.
@@ -327,7 +330,16 @@ impl LogManager {
                         flow_index
                     )
                 })?;
-            let leaves = data_to_merkle_leaves(&pora_chunk.data)?;
+
+            // Tempfix: for first chunk, its data is not complete, the hash of first entry is H256::zero()
+            let leaves =
+                if chunk_index == 0 && pora_chunk.data.len() / ENTRY_SIZE == PORA_CHUNK_SIZE - 1 {
+                    let mut leaves = vec![H256::zero()];
+                    leaves.append(&mut data_to_merkle_leaves(&pora_chunk.data)?);
+                    leaves
+                } else {
+                    data_to_merkle_leaves(&pora_chunk.data)?
+                };
             let chunk_merkle = Merkle::new_with_depth(leaves, log2_pow2(PORA_CHUNK_SIZE) + 1);
             chunk_merkle.gen_proof(flow_index as usize % PORA_CHUNK_SIZE)?
         } else {
@@ -463,7 +475,7 @@ impl LogManager {
         }
         let chunk_roots = self.flow_store.append_entries(flow_entry_array)?;
         for (chunk_index, chunk_root) in chunk_roots {
-            if chunk_index < self.pora_chunks_merkle.leaves() as u64 - 1 {
+            if chunk_index < self.pora_chunks_merkle.leaves() as u64 {
                 self.pora_chunks_merkle
                     .fill_leaf(chunk_index as usize, chunk_root);
             } else {

@@ -31,7 +31,7 @@ pub mod tests {
         let mut store = LogManager::memorydb(config.clone()).unwrap();
         let mut peer_store = LogManager::memorydb(config.clone()).unwrap();
 
-        let mut offset = 0;
+        let mut offset = 1;
         let mut txs = vec![];
         let mut data = vec![];
 
@@ -72,7 +72,11 @@ pub mod tests {
 
         let merkel_nodes = tx_subtree_root_list(&data);
         let first_tree_size = 1 << (merkel_nodes[0].0 - 1);
-        let start_offset = (offset / first_tree_size + 1) * first_tree_size;
+        let start_offset = if offset % first_tree_size == 0 {
+            offset
+        } else {
+            (offset / first_tree_size + 1) * first_tree_size
+        };
 
         let merkle = sub_merkle_tree(&data).unwrap();
         let tx = Transaction {

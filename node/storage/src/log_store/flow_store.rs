@@ -112,8 +112,15 @@ impl FlowRead for FlowStore {
             batch_iter(index_start, index_end, self.config.batch_size)
         {
             let chunk_index = start_entry_index / self.config.batch_size as u64;
-            let offset = start_entry_index - chunk_index * self.config.batch_size as u64;
-            let length = end_entry_index - start_entry_index;
+            let mut offset = start_entry_index - chunk_index * self.config.batch_size as u64;
+            let mut length = end_entry_index - start_entry_index;
+
+            // Tempfix: for first chunk, its offset is always 1
+            if chunk_index == 0 && offset == 0 {
+                offset = 1;
+                length -= 1;
+            }
+
             data.append(&mut try_option!(try_option!(self
                 .db
                 .get_entry_batch(chunk_index)?)
