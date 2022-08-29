@@ -106,10 +106,6 @@ impl SyncPeers {
                 PeerState::Found | PeerState::Connected => {}
 
                 PeerState::Connecting => {
-                    // handle timeout
-                    // Note: timeouts and other connection issues generate SwarmEvents,
-                    // however, these are currently not propagated to the higher layers.
-                    // TODO(ionian-dev): consider handling connection failure events.
                     if info.since.elapsed() >= PEER_CONNECT_TIMEOUT {
                         info!(%peer_id, %info.addr, "Peer connection timeout");
                         bad_peers.push(*peer_id);

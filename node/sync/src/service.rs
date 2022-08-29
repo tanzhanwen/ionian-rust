@@ -504,8 +504,7 @@ mod tests {
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
         let (_, sync_recv) = channel::Channel::unbounded();
 
-        let heartbeat =
-            tokio::time::interval(tokio::time::Duration::from_secs(HEARTBEAT_INTERVAL_SEC));
+        let heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SEC));
 
         let mut sync = SyncService {
             msg_recv: sync_recv,
@@ -535,8 +534,7 @@ mod tests {
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
         let (_, sync_recv) = channel::Channel::unbounded();
 
-        let heartbeat =
-            tokio::time::interval(tokio::time::Duration::from_secs(HEARTBEAT_INTERVAL_SEC));
+        let heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SEC));
 
         let mut sync = SyncService {
             msg_recv: sync_recv,
@@ -974,6 +972,17 @@ mod tests {
         assert_eq!(network_recv.try_recv().is_err(), true);
     }
 
+    async fn wait_for_tx_finalized(store: Arc<RwLock<LogManager>>, tx_seq: u64) {
+        let deadline = Instant::now() + Duration::from_millis(5000);
+        while !store.read().await.check_tx_completed(tx_seq).unwrap() {
+            if Instant::now() >= deadline {
+                panic!("Failed to wait tx completed");
+            }
+
+            thread::sleep(Duration::from_millis(300));
+        }
+    }
+
     #[tokio::test]
     async fn test_sync_file_success() {
         let runtime = TestRuntime::default();
@@ -1028,14 +1037,7 @@ mod tests {
         )
         .await;
 
-        let deadline = Instant::now() + Duration::from_millis(5000);
-        while !store.read().await.check_tx_completed(tx_seq).unwrap() {
-            if Instant::now() >= deadline {
-                panic!("Failed to wait tx completed");
-            }
-
-            thread::sleep(Duration::from_millis(300));
-        }
+        wait_for_tx_finalized(store, tx_seq).await;
 
         // test heartbeat
         let deadline = Instant::now() + Duration::from_secs(HEARTBEAT_INTERVAL_SEC + 1);
@@ -1134,14 +1136,7 @@ mod tests {
         )
         .await;
 
-        let deadline = Instant::now() + Duration::from_millis(5000);
-        while !store.read().await.check_tx_completed(tx_seq).unwrap() {
-            if Instant::now() >= deadline {
-                panic!("Failed to wait tx completed");
-            }
-
-            thread::sleep(Duration::from_millis(300));
-        }
+        wait_for_tx_finalized(store, tx_seq).await;
     }
 
     #[tokio::test]
@@ -1190,14 +1185,7 @@ mod tests {
         )
         .await;
 
-        let deadline = Instant::now() + Duration::from_millis(5000);
-        while !store.read().await.check_tx_completed(tx_seq).unwrap() {
-            if Instant::now() >= deadline {
-                panic!("Failed to wait tx completed");
-            }
-
-            thread::sleep(Duration::from_millis(300));
-        }
+        wait_for_tx_finalized(store.clone(), tx_seq).await;
 
         assert_eq!(store.read().await.check_tx_completed(0).unwrap(), false);
 
@@ -1221,14 +1209,7 @@ mod tests {
         )
         .await;
 
-        let deadline = Instant::now() + Duration::from_millis(5000);
-        while !store.read().await.check_tx_completed(tx_seq).unwrap() {
-            if Instant::now() >= deadline {
-                panic!("Failed to wait tx completed");
-            }
-
-            thread::sleep(Duration::from_millis(300));
-        }
+        wait_for_tx_finalized(store, tx_seq).await;
 
         sync_send
             .notify(SyncMessage::PeerDisconnected {
@@ -1318,14 +1299,7 @@ mod tests {
         )
         .await;
 
-        let deadline = Instant::now() + Duration::from_millis(5000);
-        while !store.read().await.check_tx_completed(tx_seq).unwrap() {
-            if Instant::now() >= deadline {
-                panic!("Failed to wait tx completed");
-            }
-
-            thread::sleep(Duration::from_millis(300));
-        }
+        wait_for_tx_finalized(store, tx_seq).await;
     }
 
     #[tokio::test]
@@ -1381,14 +1355,7 @@ mod tests {
         )
         .await;
 
-        let deadline = Instant::now() + Duration::from_millis(5000);
-        while !store.read().await.check_tx_completed(tx_seq).unwrap() {
-            if Instant::now() >= deadline {
-                panic!("Failed to wait tx completed");
-            }
-
-            thread::sleep(Duration::from_millis(300));
-        }
+        wait_for_tx_finalized(store, tx_seq).await;
     }
 
     #[tokio::test]

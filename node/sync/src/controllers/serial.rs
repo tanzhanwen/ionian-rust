@@ -18,10 +18,8 @@ const PEER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5);
 
 // TODO(ionian-dev):
-// - parallel requests for multiple files
-// - parallel requests for a single fie from multiple peers
 // - limit number of peers
-// - limit number of retries
+// - parallel requests from multiple peers
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SyncState {
@@ -320,6 +318,7 @@ impl SerialSyncController {
         };
 
         debug_assert!(from_chunk < to_chunk, "Invalid chunk boundaries");
+
         // invalid chunk array size: ban and re-request
         let data_len = response.chunks.data.len();
         if data_len == 0 || data_len % CHUNK_SIZE > 0 {
@@ -340,7 +339,6 @@ impl SerialSyncController {
         }
 
         // validate Merkle proofs
-        // TODO(ionian-dev): consider doing this in a worker task
         // FIXME(zz): Fix proof generation. Check proof root existence.
         let validation_result = self
             .store
@@ -475,11 +473,7 @@ impl SerialSyncController {
                     }
                 }
 
-                SyncState::Completed => {
-                    return;
-                }
-
-                SyncState::Failed { .. } => {}
+                SyncState::Completed | SyncState::Failed { .. } => return,
             }
         }
     }
@@ -490,6 +484,7 @@ mod tests {
     use tokio::sync::RwLock;
 
     use libp2p::identity;
+    use network::types::SignedAnnounceFile;
     use network::{types::AnnounceFile, Request};
     use storage::log_store::log_manager::LogConfig;
     use storage::log_store::log_manager::LogManager;
@@ -1381,6 +1376,20 @@ mod tests {
         }
     }
 
+    fn create_test_announcement(tx_seq: u64, peer_id: PeerId) -> SignedAnnounceFile {
+        let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
+        let msg = AnnounceFile {
+            tx_seq,
+            peer_id: peer_id.into(),
+            at: address.into(),
+            timestamp: timestamp_now(),
+        };
+
+        let local_private_key = identity::Keypair::generate_secp256k1();
+        msg.into_signed(&local_private_key)
+            .expect("Sign msg failed")
+    }
+
     fn create_default_controller(
         task_executor: TaskExecutor,
         peer_id: Option<PeerId>,
@@ -1401,22 +1410,7 @@ mod tests {
         };
 
         let file_location_cache: Arc<FileLocationCache> = Default::default();
-
-        {
-            let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
-            let msg = AnnounceFile {
-                tx_seq,
-                peer_id: peer_id.into(),
-                at: address.into(),
-                timestamp: timestamp_now(),
-            };
-
-            let local_private_key = identity::Keypair::generate_secp256k1();
-            let signed_msg = msg
-                .into_signed(&local_private_key)
-                .expect("Sign msg failed");
-            file_location_cache.insert(signed_msg);
-        }
+        file_location_cache.insert(create_test_announcement(tx_seq, peer_id));
 
         let controller = SerialSyncController::new(
             tx_seq,
@@ -1447,21 +1441,7 @@ mod tests {
         };
 
         let file_location_cache: Arc<FileLocationCache> = Default::default();
-        {
-            let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
-            let msg = AnnounceFile {
-                tx_seq,
-                peer_id: peer_id.into(),
-                at: address.into(),
-                timestamp: timestamp_now(),
-            };
-
-            let local_private_key = identity::Keypair::generate_secp256k1();
-            let signed_msg = msg
-                .into_signed(&local_private_key)
-                .expect("Sign msg failed");
-            file_location_cache.insert(signed_msg);
-        }
+        file_location_cache.insert(create_test_announcement(tx_seq, peer_id));
 
         let controller = SerialSyncController::new(
             tx_seq,
