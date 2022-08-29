@@ -23,10 +23,10 @@ class RpcTest(TestFramework):
 
         chunk_data = b"\x00" * 256
         data_root = generate_data_root(chunk_data)
-        self.contract.append_log([256, [[data_root, 0]]])
-        wait_until(lambda: self.contract.num_log_entries() == 1)
-        wait_until(lambda: self.contract.num_log_entries(1) == 1)
-        assert_equal(self.contract.num_log_entries(), self.contract.num_log_entries(1))
+        self.contract.submit([256, [[data_root, 0]]])
+        wait_until(lambda: self.contract.num_submissions() == 1)
+        wait_until(lambda: self.contract.num_submissions(1) == 1)
+        assert_equal(self.contract.num_submissions(), self.contract.num_submissions(1))
 
         wait_until(lambda: client1.ionian_get_file_info(data_root) is not None)
         assert_equal(client1.ionian_get_file_info(data_root)["finalized"], False)
@@ -47,7 +47,7 @@ class RpcTest(TestFramework):
         wait_until(lambda: client2.ionian_get_file_info(data_root)["finalized"])
         assert_equal(client2.ionian_download_segment(data_root, 0, 1), segment["data"])
 
-        # self.__test_upload_file_with_cli(client1)
+        self.__test_upload_file_with_cli(client1)
 
         client2.shutdown()
         wait_until(lambda: client1.ionian_get_status() == 0)
@@ -72,10 +72,7 @@ class RpcTest(TestFramework):
             )
 
             n_files += 1
-            wait_until(lambda: self.contract.num_log_entries() == n_files)
-            self.log.info(
-                "Log entries: %s", self.contract.get_log_entries(n_files - 1, 1)
-            )
+            wait_until(lambda: self.contract.num_submissions() == n_files)
 
             wait_until(lambda: client1.ionian_get_file_info(root) is not None)
             wait_until(lambda: client1.ionian_get_file_info(root)["finalized"])

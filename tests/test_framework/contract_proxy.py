@@ -18,7 +18,7 @@ class ContractProxy:
     def address(self):
         return self.contract_address
 
-    def append_log(self, submission_nodes, node_idx=0):
+    def submit(self, submission_nodes, node_idx=0):
         assert node_idx < len(self.blockchain_nodes)
 
         contract = self._get_contract(node_idx)
@@ -26,23 +26,8 @@ class ContractProxy:
         receipt = contract.web3.eth.wait_for_transaction_receipt(tx_hash)
         assert_equal(receipt["status"], 1)
 
-    def append_log_with_data(self, data, stream_ids=None, node_idx=0):
-        assert node_idx < len(self.blockchain_nodes)
-
-        contract = self._get_contract(node_idx)
-        if stream_ids:
-            contract.functions.appendLogWithData(data, stream_ids).transact(TX_PARAMS)
-        else:
-            contract.functions.appendLogWithData(data).transact(TX_PARAMS)
-
-    def num_log_entries(self, node_idx=0):
+    def num_submissions(self, node_idx=0):
         assert node_idx < len(self.blockchain_nodes)
 
         contract = self._get_contract(node_idx)
         return contract.functions.numSubmissions().call()
-
-    def get_log_entries(self, offset, limit, node_idx=0):
-        assert node_idx < len(self.blockchain_nodes)
-
-        contract = self._get_contract(node_idx)
-        return contract.functions.getLogEntries(offset, limit).call()

@@ -11,8 +11,8 @@ class ExampleTest(TestFramework):
         chunk_data = b"\x00" * 256
         data_root = generate_data_root(chunk_data)
         nodes = [[data_root, 0]]
-        self.contract.append_log([256, nodes])
-        wait_until(lambda: self.contract.num_log_entries() == 1)
+        self.contract.submit([256, nodes])
+        wait_until(lambda: self.contract.num_submissions() == 1)
         wait_until(lambda: client.ionian_get_file_info(data_root) is not None)
 
         _, segment = create_proof_and_segment(chunk_data, data_root)
