@@ -3,7 +3,7 @@ use crate::controllers::peers::{PeerState, SyncPeers};
 use file_location_cache::FileLocationCache;
 use network::{
     multiaddr::Protocol, rpc::GetChunksRequest, types::FindFile, Multiaddr, NetworkMessage,
-    PeerAction, PeerId, PubsubMessage, ReportSource, SyncId as RequestId,
+    PeerAction, PeerId, PubsubMessage, SyncId as RequestId,
 };
 use shared_types::{timestamp_now, ChunkArrayWithProof, DataRoot, CHUNK_SIZE};
 use std::{
@@ -201,28 +201,10 @@ impl SerialSyncController {
     }
 
     fn ban_peer(&mut self, peer_id: PeerId, reason: &'static str) {
-        info!(%peer_id, %self.tx_seq, %reason, "Banning peer");
-
-        self.ctx.send(NetworkMessage::ReportPeer {
-            peer_id,
-            action: PeerAction::Fatal,
-            source: ReportSource::SyncService,
-            msg: reason,
-        });
+        self.ctx.ban_peer(peer_id, reason);
 
         self.peers
             .update_state(&peer_id, PeerState::Connected, PeerState::Disconnecting);
-    }
-
-    fn report_peer(&self, peer_id: PeerId, action: PeerAction, reason: &'static str) {
-        debug!(%peer_id, ?action, %reason, "Report peer");
-
-        self.ctx.send(NetworkMessage::ReportPeer {
-            peer_id,
-            action,
-            source: ReportSource::SyncService,
-            msg: reason,
-        })
     }
 
     pub fn on_peer_found(&mut self, peer_id: PeerId, addr: Multiaddr) -> bool {
@@ -283,7 +265,7 @@ impl SerialSyncController {
                 // got response from wrong peer
                 // this can happen if we get a response for a timeout request
                 warn!(%self.tx_seq, %from_peer_id, %peer_id, "Got response from unexpected peer");
-                self.report_peer(
+                self.ctx.report_peer(
                     from_peer_id,
                     PeerAction::LowToleranceError,
                     "Peer id mismatch",
@@ -292,7 +274,7 @@ impl SerialSyncController {
             }
             _ => {
                 warn!(%self.tx_seq, %from_peer_id, ?self.state, "Got response in unexpected state");
-                self.report_peer(
+                self.ctx.report_peer(
                     from_peer_id,
                     PeerAction::LowToleranceError,
                     "Sync state mismatch",
@@ -347,12 +329,19 @@ impl SerialSyncController {
             .await
             .validate_range_proof(self.tx_seq, &response);
 
-        // FIXME: Do not ban peer for `Ok(false)`.
-        if !matches!(validation_result, Ok(true)) {
-            warn!("ChunkResponse validation error: e={:?}", validation_result);
-            self.ban_peer(from_peer_id, "Chunk array validation failed");
-            self.state = SyncState::Idle;
-            return;
+        match validation_result {
+            Ok(true) => {}
+            Ok(false) => {
+                info!("Failed to validate chunks response due to no root found");
+                self.state = SyncState::AwaitingDownload;
+                return;
+            }
+            Err(err) => {
+                warn!(%err, "Failed to validate chunks response");
+                self.ban_peer(from_peer_id, "Chunk array validation failed");
+                self.state = SyncState::Idle;
+                return;
+            }
         }
 
         self.failures = 0;
@@ -396,7 +385,8 @@ impl SerialSyncController {
         info!(%peer_id, %self.tx_seq, %reason, "Chunks request failed");
 
         // ban peer on too many failures
-        self.report_peer(peer_id, PeerAction::LowToleranceError, reason);
+        self.ctx
+            .report_peer(peer_id, PeerAction::LowToleranceError, reason);
 
         self.failures += 1;
 
@@ -485,7 +475,7 @@ mod tests {
 
     use libp2p::identity;
     use network::types::SignedAnnounceFile;
-    use network::{types::AnnounceFile, Request};
+    use network::{types::AnnounceFile, ReportSource, Request};
     use storage::log_store::log_manager::LogConfig;
     use storage::log_store::log_manager::LogManager;
     use storage::log_store::LogStoreRead;
@@ -539,12 +529,12 @@ mod tests {
                             assert_eq!(data.tx_seq, 0);
                         }
                         _ => {
-                            panic!("Not expected message: PubsubMessage::FindFile");
+                            panic!("Unexpected message type");
                         }
                     }
                 }
                 _ => {
-                    panic!("Not expected message: NetworkMessage::Publish");
+                    panic!("Unexpected message type");
                 }
             }
         }
@@ -571,12 +561,12 @@ mod tests {
                             assert_eq!(data.tx_seq, 1);
                         }
                         _ => {
-                            panic!("Not expected message: PubsubMessage::FindFile");
+                            panic!("Unexpected message type");
                         }
                     }
                 }
                 _ => {
-                    panic!("Not expected message: NetworkMessage::Publish");
+                    panic!("Unexpected message type");
                 }
             }
         }
@@ -727,7 +717,9 @@ mod tests {
         let (controller, mut network_recv) = create_default_controller(task_executor, None);
 
         let new_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
-        controller.report_peer(new_peer_id, PeerAction::MidToleranceError, "unit test");
+        controller
+            .ctx
+            .report_peer(new_peer_id, PeerAction::MidToleranceError, "unit test");
 
         if let Some(msg) = network_recv.recv().await {
             match msg {
@@ -762,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn test_peeer_connected() {
+    fn test_peer_connected() {
         let new_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
         let runtime = TestRuntime::default();
         let task_executor = runtime.task_executor.clone();
@@ -788,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn test_peeer_disconnected() {
+    fn test_peer_disconnected() {
         let new_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
         let runtime = TestRuntime::default();
         let task_executor = runtime.task_executor.clone();
@@ -1199,7 +1191,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_response_finilize_failed() {
+    async fn test_response_finalize_failed() {
         let peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
 
         let tx_seq = 0;

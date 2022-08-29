@@ -1500,14 +1500,7 @@ mod tests {
         )
         .await;
 
-        let deadline = Instant::now() + Duration::from_millis(5000);
-        while !store.read().await.check_tx_completed(tx_seq).unwrap() {
-            if Instant::now() >= deadline {
-                panic!("Failed to wait tx completed");
-            }
-
-            thread::sleep(Duration::from_millis(300));
-        }
+        wait_for_tx_finalized(store, tx_seq).await;
     }
 
     async fn receive_chunk_request(

@@ -83,7 +83,7 @@ pub mod tests {
             stream_ids: vec![],
             size: data_size as u64,
             data_merkle_root: merkle.root().into(),
-            seq: seq,
+            seq,
             data: vec![],
             start_entry_index: start_offset,
             merkle_nodes: merkel_nodes,

@@ -25,6 +25,7 @@ impl SyncNetworkContext {
     }
 
     pub fn report_peer(&self, peer_id: PeerId, action: PeerAction, msg: &'static str) {
+        debug!(%peer_id, ?action, %msg, "Report peer");
         self.send(NetworkMessage::ReportPeer {
             peer_id,
             action,
@@ -34,6 +35,12 @@ impl SyncNetworkContext {
     }
 
     pub fn ban_peer(&self, peer_id: PeerId, msg: &'static str) {
-        self.report_peer(peer_id, PeerAction::Fatal, msg);
+        info!(%peer_id, %msg, "Ban peer");
+        self.send(NetworkMessage::ReportPeer {
+            peer_id,
+            action: PeerAction::Fatal,
+            source: ReportSource::SyncService,
+            msg,
+        })
     }
 }
