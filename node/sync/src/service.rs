@@ -1063,6 +1063,7 @@ mod tests {
         test_sync_file(511).await;
         test_sync_file(512).await;
         test_sync_file(513).await;
+        test_sync_file(514).await;
         test_sync_file(1023).await;
         test_sync_file(1024).await;
         test_sync_file(1025).await;

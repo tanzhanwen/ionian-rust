@@ -13,8 +13,8 @@ use merkle_tree::RawLeafSha3Algorithm;
 use rayon::iter::ParallelIterator;
 use rayon::prelude::ParallelSlice;
 use shared_types::{
-    Chunk, ChunkArray, ChunkArrayWithProof, ChunkWithProof, DataRoot, FlowProof, FlowRangeProof,
-    Transaction,
+    bytes_to_chunks, Chunk, ChunkArray, ChunkArrayWithProof, ChunkWithProof, DataRoot, FlowProof,
+    FlowRangeProof, Transaction,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -457,15 +457,34 @@ impl LogManager {
     }
 
     fn append_entries(&mut self, flow_entry_array: ChunkArray) -> Result<()> {
-        if flow_entry_array.start_index >= self.last_chunk_start_index() {
+        let last_chunk_start_index = self.last_chunk_start_index();
+        if flow_entry_array.start_index + bytes_to_chunks(flow_entry_array.data.len()) as u64
+            > last_chunk_start_index
+        {
             // Update `last_chunk_merkle` with real data.
-            let chunk_start_index =
-                (flow_entry_array.start_index - self.last_chunk_start_index()) as usize;
-            for (local_index, entry) in flow_entry_array.data[..self
-                .last_chunk_merkle
-                .leaves()
-                .saturating_sub(chunk_start_index)
-                * ENTRY_SIZE]
+            let (chunk_start_index, flow_entry_data_index) = if flow_entry_array.start_index
+                >= last_chunk_start_index
+            {
+                // flow_entry_array only fill last chunk
+                (
+                    (flow_entry_array.start_index - last_chunk_start_index) as usize,
+                    0,
+                )
+            } else {
+                // flow_entry_array fill both last and last - 1 chunk
+                (
+                    0,
+                    (last_chunk_start_index - flow_entry_array.start_index) as usize * ENTRY_SIZE,
+                )
+            };
+
+            for (local_index, entry) in flow_entry_array.data[flow_entry_data_index
+                ..flow_entry_data_index
+                    + self
+                        .last_chunk_merkle
+                        .leaves()
+                        .saturating_sub(chunk_start_index)
+                        * ENTRY_SIZE]
                 .chunks_exact(ENTRY_SIZE)
                 .enumerate()
             {
