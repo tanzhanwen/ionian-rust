@@ -414,7 +414,6 @@ impl RouterService {
     fn construct_announce_file_message(&self, tx_seq: u64) -> Option<PubsubMessage> {
         let peer_id = *self.network_globals.peer_id.read();
 
-        // TODO(ionian-dev): consider choosing a random listen address
         let addr = match self.network_globals.listen_multiaddrs.read().first() {
             Some(addr) => addr.clone(),
             None => {

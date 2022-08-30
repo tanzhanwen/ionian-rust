@@ -182,8 +182,8 @@ pub struct DataByHashRequest {
 #[derive(Encode, Decode, Clone, Debug, PartialEq, Eq)]
 pub struct GetChunksRequest {
     pub tx_seq: u64,
-    pub index_start: u32,
-    pub index_end: u32,
+    pub index_start: u64,
+    pub index_end: u64,
 }
 
 /* RPC Handling and Grouping */

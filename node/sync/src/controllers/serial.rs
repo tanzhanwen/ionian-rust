@@ -12,14 +12,10 @@ use std::{
 };
 use storage_async::Store;
 
-const MAX_CHUNKS_TO_REQUEST: usize = 2 * 1024;
+const MAX_CHUNKS_TO_REQUEST: u64 = 2 * 1024;
 const MAX_REQUEST_FAILURES: usize = 3;
 const PEER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5);
-
-// TODO(ionian-dev):
-// - limit number of peers
-// - parallel requests from multiple peers
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SyncState {
@@ -32,8 +28,8 @@ pub enum SyncState {
     AwaitingDownload,
     Downloading {
         peer_id: PeerId,
-        from_chunk: usize,
-        to_chunk: usize,
+        from_chunk: u64,
+        to_chunk: u64,
         since: Instant,
     },
     Completed,
@@ -51,10 +47,10 @@ pub struct SerialSyncController {
     data_root: DataRoot,
 
     /// The size of the file to be synced.
-    num_chunks: usize,
+    num_chunks: u64,
 
     /// The next chunk id that we need to retrieve.
-    next_chunk: usize,
+    next_chunk: u64,
 
     /// Continuous RPC failures to request chunks.
     failures: usize,
@@ -79,7 +75,7 @@ impl SerialSyncController {
     pub fn new(
         tx_seq: u64,
         data_root: DataRoot,
-        num_chunks: usize,
+        num_chunks: u64,
         ctx: Arc<SyncNetworkContext>,
         store: Store,
         file_location_cache: Arc<FileLocationCache>,
@@ -181,9 +177,8 @@ impl SerialSyncController {
 
         let request = network::Request::GetChunks(GetChunksRequest {
             tx_seq: self.tx_seq,
-            // FIXME(ionian-dev): unify APIs with usize or u32
-            index_start: from_chunk as u32,
-            index_end: to_chunk as u32,
+            index_start: from_chunk,
+            index_end: to_chunk,
         });
 
         self.ctx.send(NetworkMessage::SendRequest {
@@ -209,11 +204,11 @@ impl SerialSyncController {
 
     pub fn on_peer_found(&mut self, peer_id: PeerId, addr: Multiaddr) -> bool {
         if self.peers.add_new_peer(peer_id, addr.clone()) {
-            info!(%peer_id, %addr, "Found new peer");
+            info!(%self.tx_seq, %peer_id, %addr, "Found new peer");
             true
         } else {
             // e.g. multiple `AnnounceFile` messages propagated
-            debug!(%peer_id, %addr, "Found an existing peer");
+            debug!(%self.tx_seq, %peer_id, %addr, "Found an existing peer");
             false
         }
     }
@@ -223,21 +218,22 @@ impl SerialSyncController {
             self.peers
                 .update_state(&peer_id, PeerState::Connecting, PeerState::Disconnected)
         {
+            info!(%self.tx_seq, %peer_id, "Failed to dail peer");
             self.state = SyncState::Idle;
         }
+
+        // TODO(qhz): handle different kinds of DailError.
+        //
+        // In case that outgoing connections limitation reached,
+        // could explicitly disconnect some idle peers and try again.
     }
 
     pub fn on_peer_connected(&mut self, peer_id: PeerId) {
-        match self
-            .peers
-            .update_state(&peer_id, PeerState::Connecting, PeerState::Connected)
+        if let Some(true) =
+            self.peers
+                .update_state(&peer_id, PeerState::Connecting, PeerState::Connected)
         {
-            Some(true) => info!(%peer_id, "Peer connected"),
-            _ => {
-                // e.g. one peer announced multiple files
-                let state = self.peers.peer_state(&peer_id);
-                debug!(%peer_id, ?state, "Peer already connected");
-            }
+            info!(%self.tx_seq, %peer_id, "Peer connected");
         }
     }
 
@@ -246,9 +242,11 @@ impl SerialSyncController {
             .peers
             .update_state_force(&peer_id, PeerState::Disconnected)
         {
-            Some(PeerState::Disconnecting) => info!(%peer_id, "Peer disconnected"),
-            Some(old_state) => info!(%peer_id, ?old_state, "Peer disconnected by remote"),
-            None => warn!(%peer_id, "Peer already disconnected"),
+            Some(PeerState::Disconnecting) => info!(%self.tx_seq, %peer_id, "Peer disconnected"),
+            Some(old_state) => {
+                info!(%self.tx_seq, %peer_id, ?old_state, "Peer disconnected by remote");
+            }
+            None => {}
         }
     }
 
@@ -311,8 +309,8 @@ impl SerialSyncController {
         }
 
         // invalid chunk range: ban and re-request
-        let start_index = response.chunks.start_index as usize;
-        let end_index = start_index + data_len / CHUNK_SIZE;
+        let start_index = response.chunks.start_index;
+        let end_index = start_index + (data_len / CHUNK_SIZE) as u64;
         if start_index != from_chunk || end_index != to_chunk {
             warn!(%self.tx_seq, "Invalid chunk response range, expected={from_chunk}..{to_chunk}, actual={start_index}..{end_index}");
             self.ban_peer(from_peer_id, "Invalid chunk response range");
@@ -969,7 +967,7 @@ mod tests {
         controller.state = SyncState::Downloading {
             peer_id,
             from_chunk: 0,
-            to_chunk: chunk_count,
+            to_chunk: chunk_count as u64,
             since: Instant::now(),
         };
 
@@ -1037,7 +1035,7 @@ mod tests {
         controller.state = SyncState::Downloading {
             peer_id,
             from_chunk: 1,
-            to_chunk: chunk_count,
+            to_chunk: chunk_count as u64,
             since: Instant::now(),
         };
 
@@ -1104,7 +1102,7 @@ mod tests {
         controller.state = SyncState::Downloading {
             peer_id,
             from_chunk: 0,
-            to_chunk: chunk_count,
+            to_chunk: chunk_count as u64,
             since: Instant::now(),
         };
 
@@ -1173,7 +1171,7 @@ mod tests {
         controller.state = SyncState::Downloading {
             peer_id,
             from_chunk: 0,
-            to_chunk: chunk_count,
+            to_chunk: chunk_count as u64,
             since: Instant::now(),
         };
 
@@ -1267,7 +1265,7 @@ mod tests {
         controller.state = SyncState::Downloading {
             peer_id,
             from_chunk: 0,
-            to_chunk: chunk_count,
+            to_chunk: chunk_count as u64,
             since: Instant::now(),
         };
 
@@ -1438,7 +1436,7 @@ mod tests {
         let controller = SerialSyncController::new(
             tx_seq,
             data_merkle_root,
-            num_chunks,
+            num_chunks as u64,
             ctx,
             Store::new(store, task_executor),
             file_location_cache.clone(),

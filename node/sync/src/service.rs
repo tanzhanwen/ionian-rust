@@ -218,7 +218,6 @@ impl SyncService {
         info!(%peer_id, "Peer connected");
 
         for controller in self.controllers.values_mut() {
-            // TODO(ionian-dev): only update controllers that need it?
             controller.on_peer_connected(peer_id);
             controller.transition();
         }
@@ -403,7 +402,7 @@ impl SyncService {
                 entry.insert(SerialSyncController::new(
                     tx_seq,
                     tx.data_merkle_root,
-                    num_chunks,
+                    num_chunks as u64,
                     self.ctx.clone(),
                     self.store.clone(),
                     self.file_location_cache.clone(),
@@ -465,6 +464,11 @@ impl SyncService {
         for tx_seq in completed {
             self.controllers.remove(&tx_seq);
         }
+
+        // TODO(qhz): serial controller removed, but the peers are not disconnected.
+        // If there are enough peers, the outgoing connections limitation will be reached
+        // over time. So, sync service requires to say goodbye to some peers after file sync
+        // completed. On the other hand, a few peers should be retained pub-sub messages.
     }
 }
 
@@ -573,7 +577,7 @@ mod tests {
         let request = GetChunksRequest {
             tx_seq: 0,
             index_start: 0,
-            index_end: chunk_count as u32,
+            index_end: chunk_count as u64,
         };
 
         sync_send
@@ -646,7 +650,7 @@ mod tests {
         let request = GetChunksRequest {
             tx_seq: 0,
             index_start: 0,
-            index_end: 0 as u32,
+            index_end: 0 as u64,
         };
 
         sync_send
@@ -711,7 +715,7 @@ mod tests {
         let request = GetChunksRequest {
             tx_seq: 1,
             index_start: 0,
-            index_end: chunk_count as u32,
+            index_end: chunk_count as u64,
         };
 
         sync_send
@@ -776,7 +780,7 @@ mod tests {
         let request = GetChunksRequest {
             tx_seq: 0,
             index_start: 0,
-            index_end: chunk_count as u32 + 1,
+            index_end: chunk_count as u64 + 1,
         };
 
         sync_send
@@ -841,7 +845,7 @@ mod tests {
         let request = GetChunksRequest {
             tx_seq: 0,
             index_start: 0,
-            index_end: chunk_count as u32,
+            index_end: chunk_count as u64,
         };
 
         sync_send
@@ -1033,7 +1037,7 @@ mod tests {
             init_peer_id,
             tx_seq,
             0,
-            chunk_count as u32,
+            chunk_count as u64,
         )
         .await;
 
@@ -1133,7 +1137,7 @@ mod tests {
             init_peer_id,
             tx_seq,
             2048,
-            chunk_count as u32,
+            chunk_count as u64,
         )
         .await;
 
@@ -1182,7 +1186,7 @@ mod tests {
             init_peer_id,
             tx_seq,
             0,
-            chunk_count[0] as u32,
+            chunk_count[0] as u64,
         )
         .await;
 
@@ -1206,7 +1210,7 @@ mod tests {
             init_peer_id,
             tx_seq,
             0,
-            chunk_count[0] as u32,
+            chunk_count[0] as u64,
         )
         .await;
 
@@ -1296,7 +1300,7 @@ mod tests {
             init_peer_id,
             tx_seq,
             0,
-            chunk_count as u32,
+            chunk_count as u64,
         )
         .await;
 
@@ -1352,7 +1356,7 @@ mod tests {
             init_peer_id,
             tx_seq,
             0,
-            chunk_count as u32,
+            chunk_count as u64,
         )
         .await;
 
@@ -1496,7 +1500,7 @@ mod tests {
             init_peer_id,
             tx_seq,
             0,
-            chunk_count as u32,
+            chunk_count as u64,
         )
         .await;
 
@@ -1509,8 +1513,8 @@ mod tests {
         peer_store: Arc<RwLock<LogManager>>,
         init_peer_id: PeerId,
         tx_seq: u64,
-        index_start: u32,
-        index_end: u32,
+        index_start: u64,
+        index_end: u64,
     ) {
         if let Some(msg) = network_recv.recv().await {
             match msg {
