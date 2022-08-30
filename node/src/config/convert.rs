@@ -73,6 +73,7 @@ impl IonianConfig {
         Ok(LogSyncConfig::new(
             self.blockchain_rpc_endpoint.clone(),
             contract_address,
+            self.log_sync_start_block_number,
         ))
     }
 

@@ -19,47 +19,87 @@ pub struct AppendMerkleTree<E: HashElement, A: Algorithm<E>> {
     /// Keep the delta nodes that can be used to construct a history tree.
     /// The key is the root node of that version.
     delta_nodes_map: HashMap<E, DeltaNodes<E>>,
+    tx_seq_to_root_map: HashMap<u64, E>,
+
+    /// For `last_chunk_merkle` after the first chunk, this is set to `Some(10)` so that
+    /// `revert_to` can reset the state correctly when needed.
+    min_depth: Option<usize>,
     _a: PhantomData<A>,
 }
 
 impl<E: HashElement, A: Algorithm<E>> AppendMerkleTree<E, A> {
-    pub fn new(leaves: Vec<E>) -> Self {
+    pub fn new(leaves: Vec<E>, start_tx_seq: Option<u64>) -> Self {
         let mut merkle = Self {
             layers: vec![leaves],
             delta_nodes_map: HashMap::new(),
+            tx_seq_to_root_map: HashMap::new(),
+            min_depth: None,
             _a: Default::default(),
         };
         if merkle.leaves() == 0 {
+            if let Some(seq) = start_tx_seq {
+                merkle.tx_seq_to_root_map.insert(seq, E::null());
+            }
             return merkle;
         }
         // Reconstruct the whole tree.
         merkle.recompute(0, None);
         // Commit the first version in memory.
-        merkle.commit();
+        // TODO(zz): Check when the roots become available.
+        merkle.commit(start_tx_seq);
         merkle
     }
 
-    /// This will panic if leaves are empty.
-    pub fn new_with_depth(leaves: Vec<E>, depth: usize) -> Self {
+    pub fn new_with_subtrees(
+        subtree_root_list: Vec<(usize, E)>,
+        start_tx_seq: Option<u64>,
+    ) -> Result<Self> {
+        let mut merkle = Self {
+            layers: vec![vec![]],
+            delta_nodes_map: HashMap::new(),
+            tx_seq_to_root_map: HashMap::new(),
+            min_depth: None,
+            _a: Default::default(),
+        };
+        if subtree_root_list.is_empty() {
+            if let Some(seq) = start_tx_seq {
+                merkle.tx_seq_to_root_map.insert(seq, E::null());
+            }
+            return Ok(merkle);
+        }
+        merkle.append_subtree_list(subtree_root_list)?;
+        merkle.commit(start_tx_seq);
+        Ok(merkle)
+    }
+
+    pub fn new_with_depth(leaves: Vec<E>, depth: usize, start_tx_seq: Option<u64>) -> Self {
         if leaves.is_empty() {
             // Create an empty merkle tree with `depth`.
-            Self {
+            let mut merkle = Self {
                 layers: vec![vec![]; depth],
                 delta_nodes_map: HashMap::new(),
+                tx_seq_to_root_map: HashMap::new(),
+                min_depth: Some(depth),
                 _a: Default::default(),
+            };
+            if let Some(seq) = start_tx_seq {
+                merkle.tx_seq_to_root_map.insert(seq, E::null());
             }
+            merkle
         } else {
             let mut layers = vec![vec![]; depth];
             layers[0] = leaves;
             let mut merkle = Self {
                 layers,
                 delta_nodes_map: HashMap::new(),
+                tx_seq_to_root_map: HashMap::new(),
+                min_depth: Some(depth),
                 _a: Default::default(),
             };
             // Reconstruct the whole tree.
             merkle.recompute(0, None);
             // Commit the first version in memory.
-            merkle.commit();
+            merkle.commit(start_tx_seq);
             merkle
         }
     }
@@ -193,16 +233,24 @@ impl<E: HashElement, A: Algorithm<E>> AppendMerkleTree<E, A> {
 }
 
 impl<E: HashElement, A: Algorithm<E>> AppendMerkleTree<E, A> {
-    pub fn commit(&mut self) -> E {
-        let mut right_most_nodes = Vec::new();
-        for layer in &self.layers {
-            right_most_nodes.push((layer.len() - 1, layer.last().unwrap().clone()));
+    pub fn commit(&mut self, tx_seq: Option<u64>) {
+        if let Some(tx_seq) = tx_seq {
+            if self.leaves() == 0 {
+                // The state is empty, so we just save the root as `null`.
+                // Note that this root should not be used.
+                self.tx_seq_to_root_map.insert(tx_seq, E::null());
+                return;
+            }
+            let mut right_most_nodes = Vec::new();
+            for layer in &self.layers {
+                right_most_nodes.push((layer.len() - 1, layer.last().unwrap().clone()));
+            }
+            let root = self.root().clone();
+            assert_eq!(root, right_most_nodes.last().unwrap().1);
+            self.delta_nodes_map
+                .insert(root.clone(), DeltaNodes::new(right_most_nodes));
+            self.tx_seq_to_root_map.insert(tx_seq, root);
         }
-        let root = self.root().clone();
-        assert_eq!(root, right_most_nodes.last().unwrap().1);
-        self.delta_nodes_map
-            .insert(root.clone(), DeltaNodes::new(right_most_nodes));
-        root
     }
 
     fn before_extend_layer(&mut self, height: usize) {
@@ -325,11 +373,58 @@ impl<E: HashElement, A: Algorithm<E>> AppendMerkleTree<E, A> {
         proof.validate::<A>(leaf, position)?;
         Ok(self.delta_nodes_map.contains_key(&proof.root()))
     }
+
+    pub fn revert_to(&mut self, tx_seq: u64) -> Result<()> {
+        if self.layers[0].is_empty() {
+            // Any previous state of an empty tree is always empty.
+            return Ok(());
+        }
+        let old_root = self
+            .tx_seq_to_root_map
+            .get(&tx_seq)
+            .ok_or_else(|| anyhow!("tx seq unavailable, seq={}", tx_seq))?;
+        if *old_root == E::null() {
+            // This is the special case to revert an empty state.
+            self.reset();
+            self.clear_after(tx_seq);
+            return Ok(());
+        }
+        let delta_nodes = self
+            .delta_nodes_map
+            .get(old_root)
+            .ok_or_else(|| anyhow!("old root unavailable, root={:?}", old_root))?;
+        // Dropping the upper layers that are not in the old merkle tree.
+        self.layers.truncate(delta_nodes.right_most_nodes.len());
+        for (height, (last_index, right_most_node)) in
+            delta_nodes.right_most_nodes.iter().enumerate()
+        {
+            self.layers[height].truncate(*last_index + 1);
+            self.layers[height][*last_index] = right_most_node.clone();
+        }
+        self.clear_after(tx_seq);
+        Ok(())
+    }
+
+    pub fn reset(&mut self) {
+        self.layers = match self.min_depth {
+            None => vec![vec![]],
+            Some(depth) => vec![vec![]; depth],
+        };
+    }
+
+    fn clear_after(&mut self, tx_seq: u64) {
+        let mut tx_seq = tx_seq + 1;
+        while self.tx_seq_to_root_map.contains_key(&tx_seq) {
+            if let Some(root) = self.tx_seq_to_root_map.remove(&tx_seq) {
+                self.delta_nodes_map.remove(&root);
+            }
+            tx_seq += 1;
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 struct DeltaNodes<E: HashElement> {
-    #[allow(unused)]
     /// The right most nodes in a layer and its position.
     right_most_nodes: Vec<(usize, E)>,
 }
@@ -420,21 +515,21 @@ mod tests {
             for _ in 0..entry_len {
                 data.push(H256::random());
             }
-            let mut merkle = AppendMerkleTree::<H256, Sha3Algorithm>::new(vec![H256::zero()]);
+            let mut merkle = AppendMerkleTree::<H256, Sha3Algorithm>::new(vec![H256::zero()], None);
             merkle.append_list(data.clone());
-            merkle.commit();
+            merkle.commit(Some(0));
             verify(&data, &merkle);
 
             data.push(H256::random());
             merkle.append(*data.last().unwrap());
-            merkle.commit();
+            merkle.commit(Some(1));
             verify(&data, &merkle);
 
             for _ in 0..6 {
                 data.push(H256::random());
             }
             merkle.append_list(data[data.len() - 6..].to_vec());
-            merkle.commit();
+            merkle.commit(Some(2));
             verify(&data, &merkle);
         }
     }

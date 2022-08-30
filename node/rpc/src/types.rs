@@ -118,7 +118,6 @@ impl SegmentWithProof {
         }
 
         // Calculate segment merkle root to verify proof.
-        // FIXME(zz): Fix validation.
         let segment_root = self.calculate_segment_merkle_root();
         if !self
             .proof

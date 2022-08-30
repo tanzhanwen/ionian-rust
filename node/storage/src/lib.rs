@@ -1,5 +1,3 @@
-#[macro_use]
-extern crate tracing;
 use kvdb::KeyValueDB;
 
 pub mod config;

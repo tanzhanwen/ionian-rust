@@ -22,10 +22,10 @@ fn test_put_get() {
     for i in 0..chunk_count {
         data[i * CHUNK_SIZE] = random();
     }
-    let mut merkle = AppendMerkleTree::<H256, Sha3Algorithm>::new(vec![H256::zero()]);
+    let mut merkle = AppendMerkleTree::<H256, Sha3Algorithm>::new(vec![H256::zero()], None);
     merkle.append_list(data_to_merkle_leaves(&LogManager::padding(start_offset - 1)).unwrap());
     merkle.append_list(data_to_merkle_leaves(&data).unwrap());
-    merkle.commit();
+    merkle.commit(Some(0));
     let tx_merkle = sub_merkle_tree(&data).unwrap();
     let tx = Transaction {
         stream_ids: vec![],
@@ -47,6 +47,7 @@ fn test_put_get() {
         store.put_chunks(tx.seq, chunk_array.clone()).unwrap();
     }
     store.finalize_tx(tx.seq).unwrap();
+
     let chunk_array = ChunkArray {
         data,
         start_index: 0,
@@ -119,10 +120,31 @@ fn test_root() {
         }
         let mt = sub_merkle_tree(&data).unwrap();
         println!("{:?} {}", mt.root(), hex::encode(&mt.root()));
-        let append_mt =
-            AppendMerkleTree::<H256, Sha3Algorithm>::new(data_to_merkle_leaves(&data).unwrap());
+        let append_mt = AppendMerkleTree::<H256, Sha3Algorithm>::new(
+            data_to_merkle_leaves(&data).unwrap(),
+            None,
+        );
         assert_eq!(mt.root(), append_mt.root().0);
     }
+}
+
+#[test]
+fn test_multi_tx() {
+    let mut store = create_store();
+    put_tx(&mut store, 3, 0, 2);
+    put_tx(&mut store, 3, 1, 6);
+    put_tx(&mut store, 5, 2, 12);
+}
+
+#[test]
+fn test_revert() {
+    let mut store = create_store();
+    put_tx(&mut store, 1, 0, 1);
+    store.revert_to(0u64.wrapping_sub(1)).unwrap();
+    put_tx(&mut store, 1, 0, 1);
+    put_tx(&mut store, 1, 1, 2);
+    store.revert_to(0).unwrap();
+    put_tx(&mut store, 1, 1, 2);
 }
 
 fn tx_subtree_root_list(data: &[u8]) -> Vec<(usize, DataRoot)> {
@@ -148,4 +170,39 @@ fn next_subtree_size(tree_size: usize) -> usize {
     } else {
         next >> 1
     }
+}
+
+fn create_store() -> LogManager {
+    let config = LogConfig::default();
+    let store = LogManager::memorydb(config).unwrap();
+    store
+}
+
+fn put_tx(store: &mut LogManager, chunk_count: usize, seq: u64, start_entry_index: u64) {
+    let data_size = CHUNK_SIZE * chunk_count;
+    let mut data = vec![0u8; data_size];
+    for i in 0..chunk_count {
+        data[i * CHUNK_SIZE] = random();
+    }
+    let tx_merkle = sub_merkle_tree(&data).unwrap();
+    let tx = Transaction {
+        stream_ids: vec![],
+        size: data_size as u64,
+        data_merkle_root: tx_merkle.root().into(),
+        seq,
+        data: vec![],
+        start_entry_index,
+        // TODO: This can come from `tx_merkle`.
+        merkle_nodes: tx_subtree_root_list(&data),
+    };
+    store.put_tx(tx.clone()).unwrap();
+    for start_index in (0..chunk_count).step_by(PORA_CHUNK_SIZE) {
+        let end = cmp::min((start_index + PORA_CHUNK_SIZE) * CHUNK_SIZE, data.len());
+        let chunk_array = ChunkArray {
+            data: data[start_index * CHUNK_SIZE..end].to_vec(),
+            start_index: start_index as u64,
+        };
+        store.put_chunks(tx.seq, chunk_array.clone()).unwrap();
+    }
+    store.finalize_tx(tx.seq).unwrap();
 }

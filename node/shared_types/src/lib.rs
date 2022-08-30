@@ -48,6 +48,14 @@ pub struct Transaction {
     pub seq: u64,
 }
 
+impl Transaction {
+    pub fn num_entries(&self) -> usize {
+        self.merkle_nodes
+            .iter()
+            .fold(0, |size, &(depth, _)| size + (1 << (depth - 1)))
+    }
+}
+
 pub struct ChunkWithProof {
     pub chunk: Chunk,
     pub proof: FlowProof,

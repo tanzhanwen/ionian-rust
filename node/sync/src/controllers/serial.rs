@@ -319,7 +319,6 @@ impl SerialSyncController {
         }
 
         // validate Merkle proofs
-        // FIXME(zz): Fix proof generation. Check proof root existence.
         let validation_result = self
             .store
             .get_store()

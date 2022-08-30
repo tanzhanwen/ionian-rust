@@ -1,3 +1,4 @@
+use ethereum_types::H256;
 use shared_types::{Chunk, ChunkArray, ChunkArrayWithProof, ChunkWithProof, DataRoot, Transaction};
 
 use crate::error::Result;
@@ -36,6 +37,8 @@ pub trait LogStoreRead: LogStoreChunkRead {
 
     fn next_tx_seq(&self) -> Result<u64>;
 
+    fn get_sync_progress(&self) -> Result<Option<(u64, H256)>>;
+
     fn validate_range_proof(&self, tx_seq: u64, data: &ChunkArrayWithProof) -> Result<bool>;
 }
 
@@ -71,6 +74,7 @@ pub trait LogStoreChunkRead {
 pub trait LogStoreWrite: LogStoreChunkWrite {
     /// Store a data entry metadata.
     fn put_tx(&mut self, tx: Transaction) -> Result<()>;
+
     /// Finalize a transaction storage.
     /// This will compute and the merkle tree, check the data root, and persist a part of the merkle
     /// tree for future queries.
@@ -78,6 +82,16 @@ pub trait LogStoreWrite: LogStoreChunkWrite {
     /// This will return error if not all chunks are stored. But since this check can be expensive,
     /// the caller is supposed to track chunk statuses and call this after storing all the chunks.
     fn finalize_tx(&self, tx_seq: u64) -> Result<()>;
+
+    /// Store the progress of synced block number and its hash.
+    fn put_sync_progress(&self, progress: (u64, H256)) -> Result<()>;
+
+    /// Revert the log state to a given tx seq.
+    /// This is needed when transactions are reverted because of chain reorg.
+    ///
+    /// Note that in the current implementation this just reverts the merkle tree and relies on
+    /// inserting new transactions to overwrite the old tx data.
+    fn revert_to(&mut self, tx_seq: u64) -> Result<()>;
 }
 
 pub trait LogStoreChunkWrite {
@@ -97,7 +111,7 @@ impl<T: LogStoreRead + LogStoreWrite + Send + Sync + 'static> Store for T {}
 pub trait FlowRead {
     fn get_entries(&self, index_start: u64, index_end: u64) -> Result<Option<ChunkArray>>;
 
-    fn get_chunk_root_list(&self) -> Result<Vec<DataRoot>>;
+    fn get_chunk_root_list(&self) -> Result<Vec<(usize, DataRoot)>>;
 }
 
 pub trait FlowWrite {
@@ -105,6 +119,10 @@ pub trait FlowWrite {
     /// it's possible to append arrays in any place.
     /// Return the list of completed chunks.
     fn append_entries(&self, data: ChunkArray) -> Result<Vec<(u64, DataRoot)>>;
+
+    /// Remove all the entries after `start_index`.
+    /// This is used to remove deprecated data in case of chain reorg.
+    fn truncate(&self, start_index: u64) -> Result<()>;
 }
 
 pub trait Flow: FlowRead + FlowWrite {}

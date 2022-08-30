@@ -18,6 +18,7 @@ build_config! {
     // log sync
     (blockchain_rpc_endpoint, (String), "http://127.0.0.1:8545".to_string())
     (log_contract_address, (String), "".to_string())
+    (log_sync_start_block_number, (u64), 0)
 
     // rpc
     (rpc_enabled, (bool), true)

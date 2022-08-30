@@ -86,7 +86,7 @@ def initialize_ionian_config(data_dir, config_parameters):
     local_conf.update(config_parameters)
     initialize_config(config_path, local_conf)
     with open(log_config_path, "w") as f:
-        f.write("debug")
+        f.write("trace")
 
 
 def generate_data_root(chunk_data):

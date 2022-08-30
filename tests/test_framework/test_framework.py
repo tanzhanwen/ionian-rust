@@ -327,6 +327,12 @@ class TestFramework:
         for node in self.blockchain_nodes:
             node.stop()
 
+    def stop_storage_node(self, index):
+        self.nodes[index].stop()
+
+    def start_storage_node(self, index):
+        self.nodes[index].start()
+
     def run_test(self):
         raise NotImplementedError
 

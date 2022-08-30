@@ -51,7 +51,7 @@ class TestNode:
         self.args = [binary, "--config", self.config_file]
         self.running = False
         self.rpc_connected = False
-        self.rpc = SimpleRpcProxy(self.rpc_url, timeout=self.rpc_timeout)
+        self.rpc = None
         self.log = log
 
     def __del__(self):
@@ -122,8 +122,10 @@ class TestNode:
                         )
                     )
                 )
-            if check(self.rpc):
+            rpc = SimpleRpcProxy(self.rpc_url, timeout=self.rpc_timeout)
+            if check(rpc):
                 self.rpc_connected = True
+                self.rpc = rpc
                 return
             time.sleep(1.0 / poll_per_s)
         self._raise_assertion_error(
@@ -163,6 +165,8 @@ class TestNode:
 
         self.stdout.close()
         self.stderr.close()
+        self.stdout = None
+        self.stderr = None
 
     def is_node_stopped(self):
         """Checks whether the node has stopped.

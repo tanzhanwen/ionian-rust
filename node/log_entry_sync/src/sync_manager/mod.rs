@@ -1,13 +1,15 @@
 use crate::sync_manager::config::LogSyncConfig;
-use crate::sync_manager::log_entry_fetcher::LogEntryFetcher;
-use anyhow::Result;
-use jsonrpsee::tracing::{debug, error};
+use crate::sync_manager::log_entry_fetcher::{LogEntryFetcher, LogFetchProgress};
+use anyhow::{bail, Result};
+use ethers::prelude::Middleware;
+use jsonrpsee::tracing::{debug, error, trace};
 use shared_types::Transaction;
 use std::cmp::Ordering;
 use std::future::Future;
 use std::sync::Arc;
 use storage::log_store::Store;
 use task_executor::{ShutdownReason, TaskExecutor};
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::RwLock;
 
 pub struct LogSyncManager {
@@ -40,26 +42,50 @@ impl LogSyncManager {
                     store,
                 };
 
+                // Load previous progress from db and check if chain reorg happens after restart.
+                // TODO(zz): Handle reorg instead of return.
+                let start_block_number =
+                    match log_sync_manager.store.read().await.get_sync_progress()? {
+                        // No previous progress, so just use config.
+                        None => log_sync_manager.config.start_block_number,
+                        Some((block_number, block_hash)) => {
+                            match log_sync_manager
+                                .log_fetcher
+                                .provider()
+                                .get_block(block_number)
+                                .await
+                            {
+                                Ok(Some(b)) => {
+                                    if b.hash == Some(block_hash) {
+                                        block_number
+                                    } else {
+                                        error!(
+                                            "log sync progress check hash fails, \
+                                            block_number={:?} expect={:?} get={:?}",
+                                            block_number, block_hash, b.hash
+                                        );
+                                        bail!("log sync data mismatch");
+                                    }
+                                }
+                                e => {
+                                    error!("log sync progress check rpc fails, e={:?}", e);
+                                    bail!("log sync start error");
+                                }
+                            }
+                        }
+                    };
+
                 // Start watching before recovery to ensure that no log is skipped.
                 // TODO(zz): Rate limit to avoid OOM during recovery.
-                let mut watch_rx = log_sync_manager.log_fetcher.start_watch(0, &executor_clone);
-                let mut recover_rx = log_sync_manager
+                let watch_rx = log_sync_manager
                     .log_fetcher
-                    .start_recover(0, &executor_clone);
-                while let Some(tx) = recover_rx.recv().await {
-                    if !log_sync_manager.put_tx(tx).await {
-                        // Unexpected error.
-                        error!("log sync error");
-                        break;
-                    }
-                }
-                while let Some(tx) = watch_rx.recv().await {
-                    if !log_sync_manager.put_tx(tx).await {
-                        // Unexpected error.
-                        error!("log watch error");
-                        break;
-                    }
-                }
+                    .start_watch(start_block_number, &executor_clone);
+                let recover_rx = log_sync_manager
+                    .log_fetcher
+                    .start_recover(start_block_number, &executor_clone);
+                log_sync_manager.handle_data(recover_rx).await?;
+                // Syncing `watch_rx` is supposed to block forever.
+                log_sync_manager.handle_data(watch_rx).await?;
                 Ok(())
             }),
             "log_sync",
@@ -71,8 +97,20 @@ impl LogSyncManager {
         match tx.seq.cmp(&self.next_tx_seq) {
             Ordering::Less => {
                 // FIXME(zz): Handle reorg after restart.
-                debug!("Ignore old tx: seq={}", tx.seq);
-                true
+                debug!("revert for chain reorg: seq={}", tx.seq);
+                // TODO(zz): `wrapping_sub` here is a hack to handle the case of tx_seq=0.
+                if let Err(e) = self.store.write().await.revert_to(tx.seq.wrapping_sub(1)) {
+                    error!("revert_to fails: e={:?}", e);
+                    return false;
+                }
+                self.next_tx_seq = tx.seq;
+                if let Err(e) = self.store.write().await.put_tx(tx) {
+                    error!("put_tx error: e={:?}", e);
+                    false
+                } else {
+                    self.next_tx_seq += 1;
+                    true
+                }
             }
             Ordering::Equal => {
                 debug!("log entry sync get entry: {:?}", tx);
@@ -92,6 +130,25 @@ impl LogSyncManager {
                 false
             }
         }
+    }
+
+    async fn handle_data(&mut self, mut rx: UnboundedReceiver<LogFetchProgress>) -> Result<()> {
+        while let Some(data) = rx.recv().await {
+            trace!("handle_data: data={:?}", data);
+            match data {
+                LogFetchProgress::SyncedBlock(progress) => {
+                    self.store.read().await.put_sync_progress(progress)?;
+                }
+                LogFetchProgress::Transaction(tx) => {
+                    if !self.put_tx(tx).await {
+                        // Unexpected error.
+                        error!("log sync write error");
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 

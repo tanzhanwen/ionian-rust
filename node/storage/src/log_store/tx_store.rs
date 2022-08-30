@@ -1,12 +1,16 @@
 use crate::error::Error;
 use crate::log_store::log_manager::{
-    sub_merkle_tree, COL_TX, COL_TX_COMPLETED, COL_TX_DATA_ROOT_INDEX, ENTRY_SIZE,
+    sub_merkle_tree, COL_MISC, COL_TX, COL_TX_COMPLETED, COL_TX_DATA_ROOT_INDEX, ENTRY_SIZE,
 };
 use crate::{try_option, IonianKeyValueDB};
 use anyhow::{anyhow, Result};
+use ethereum_types::H256;
 use shared_types::{DataRoot, Transaction};
 use ssz::{Decode, Encode};
 use std::sync::Arc;
+use tracing::instrument;
+
+const LOG_SYNC_PROGRESS_KEY: &str = "log_sync_progress";
 
 pub struct TransactionStore {
     kvdb: Arc<dyn IonianKeyValueDB>,
@@ -17,6 +21,7 @@ impl TransactionStore {
         Self { kvdb }
     }
 
+    #[instrument(skip(self))]
     pub fn put_tx(&self, mut tx: Transaction) -> Result<()> {
         let mut db_tx = self.kvdb.transaction();
 
@@ -60,6 +65,7 @@ impl TransactionStore {
         Ok(Some(decode_tx_seq(&value)?))
     }
 
+    #[instrument(skip(self))]
     pub fn finalize_tx(&self, tx_seq: u64) -> Result<()> {
         Ok(self
             .kvdb
@@ -78,6 +84,25 @@ impl TransactionStore {
             .last()
             .map(|(k, _)| decode_tx_seq(k.as_ref()).map(|seq| seq + 1))
             .unwrap_or(Ok(0))
+    }
+
+    #[instrument(skip(self))]
+    pub fn put_progress(&self, progress: (u64, H256)) -> Result<()> {
+        Ok(self.kvdb.put(
+            COL_MISC,
+            LOG_SYNC_PROGRESS_KEY.as_bytes(),
+            &progress.as_ssz_bytes(),
+        )?)
+    }
+
+    #[instrument(skip(self))]
+    pub fn get_progress(&self) -> Result<Option<(u64, H256)>> {
+        Ok(Some(
+            <(u64, H256)>::from_ssz_bytes(&try_option!(self
+                .kvdb
+                .get(COL_MISC, LOG_SYNC_PROGRESS_KEY.as_bytes())?))
+            .map_err(Error::from)?,
+        ))
     }
 }
 

@@ -10,15 +10,21 @@ pub struct LogSyncConfig {
 
     pub fetch_batch_size: usize,
     pub sync_period: Duration,
+    pub start_block_number: u64,
 }
 
 impl LogSyncConfig {
-    pub fn new(rpc_endpoint_url: String, contract_address: ContractAddress) -> Self {
+    pub fn new(
+        rpc_endpoint_url: String,
+        contract_address: ContractAddress,
+        start_block_number: u64,
+    ) -> Self {
         Self {
             rpc_endpoint_url,
             contract_address,
             fetch_batch_size: DEFAULT_FETCH_BATCH_SIZE,
             sync_period: Duration::from_millis(DEFAULT_SYNC_PERIOD_MS),
+            start_block_number,
         }
     }
 }

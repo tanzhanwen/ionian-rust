@@ -5,14 +5,16 @@ use crate::log_store::log_manager::{
 };
 use crate::log_store::{FlowRead, FlowWrite};
 use crate::{try_option, IonianKeyValueDB};
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use append_merkle::{AppendMerkleTree, Sha3Algorithm};
 use ethereum_types::H256;
 use shared_types::{bytes_to_chunks, ChunkArray, DataRoot};
 use ssz::{Decode, DecodeError, Encode};
 use ssz_derive::{Decode as DeriveDecode, Encode as DeriveEncode};
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use std::{cmp, mem};
+use tracing::trace;
 
 pub struct FlowStore {
     db: FlowDBStore,
@@ -25,58 +27,6 @@ impl FlowStore {
             db: FlowDBStore::new(db),
             config,
         }
-    }
-
-    /// Return the data from `index_start` until data missing or `index_end`.
-    pub fn get_entries_to_end(&self, index_start: u64, index_end: u64) -> Result<ChunkArray> {
-        if index_end <= index_start {
-            bail!(
-                "invalid entry index: start={} end={}",
-                index_start,
-                index_end
-            );
-        }
-        let mut data = Vec::with_capacity((index_end - index_start) as usize * ENTRY_SIZE);
-        for (start_entry_index, end_entry_index) in
-            batch_iter(index_start, index_end, self.config.batch_size)
-        {
-            let chunk_index = start_entry_index / self.config.batch_size as u64;
-            let mut batch_data = match self.db.get_entry_batch(chunk_index)? {
-                Some(EntryBatch::Complete(d)) => d,
-                Some(EntryBatch::Incomplete(mut batch_list)) => {
-                    if batch_list.is_empty() {
-                        bail!(
-                            "Unexpected error, empty entry batch: batch_index={}",
-                            chunk_index
-                        );
-                    }
-                    if batch_list[0].start_offset == 0 {
-                        batch_list.swap_remove(0).data
-                    } else {
-                        vec![]
-                    }
-                }
-                None => vec![],
-            };
-            let batch_len = batch_data.len() / ENTRY_SIZE;
-            if end_entry_index != index_end {
-                data.append(&mut batch_data);
-                // data supposed to be full
-                if batch_len != PORA_CHUNK_SIZE {
-                    break;
-                }
-            } else if start_entry_index + batch_len as u64 >= end_entry_index {
-                let end_offset = (end_entry_index - start_entry_index) as usize * ENTRY_SIZE;
-                data.extend_from_slice(&batch_data[..end_offset]);
-            } else {
-                // data missing.
-                data.append(&mut batch_data);
-            }
-        }
-        Ok(ChunkArray {
-            data,
-            start_index: index_start,
-        })
     }
 
     pub fn put_batch_root(&self, batch_index: u64, root: DataRoot, length: usize) -> Result<()> {
@@ -133,12 +83,15 @@ impl FlowRead for FlowStore {
     }
 
     /// Return the list of all stored chunk roots.
-    fn get_chunk_root_list(&self) -> Result<Vec<DataRoot>> {
+    fn get_chunk_root_list(&self) -> Result<Vec<(usize, DataRoot)>> {
         let mut chunk_roots = Vec::new();
         let mut i = 0;
-        // FIXME(zz): Process the root of a range of chunks.
-        while let Some(BatchRoot::Single(root)) = self.db.get_batch_root(i)? {
-            chunk_roots.push(root);
+        while let Some(root) = self.db.get_batch_root(i)? {
+            let subtree = match root {
+                BatchRoot::Single(r) => (1, r),
+                BatchRoot::Multiple(t) => t,
+            };
+            chunk_roots.push(subtree);
             i += 1;
         }
         Ok(chunk_roots)
@@ -149,6 +102,7 @@ impl FlowWrite for FlowStore {
     /// Return the roots of completed chunks. The order is guaranteed to be increasing
     /// by chunk index.
     fn append_entries(&self, data: ChunkArray) -> Result<Vec<(u64, DataRoot)>> {
+        trace!("append_entries: {} {}", data.start_index, data.data.len());
         if data.data.len() % ENTRY_SIZE != 0 {
             bail!("append_entries: invalid data size, len={}", data.data.len());
         }
@@ -190,6 +144,10 @@ impl FlowWrite for FlowStore {
         }
         self.db.put_entry_batch_list(batch_list)
     }
+
+    fn truncate(&self, start_index: u64) -> crate::error::Result<()> {
+        self.db.truncate(start_index, self.config.batch_size)
+    }
 }
 
 pub struct FlowDBStore {
@@ -220,13 +178,15 @@ impl FlowDBStore {
                         bail!("Unexpected first batch");
                     }
                     EntryBatch::Incomplete(p) => {
+                        trace!("put first batch: {:?}", p);
                         if p.len() == 1
                             && p[0].start_offset == 1
                             && p[0].data.len() == ENTRY_SIZE * (PORA_CHUNK_SIZE - 1)
                         {
                             let mut leaves = vec![H256::zero()];
                             leaves.append(&mut data_to_merkle_leaves(&p[0].data)?);
-                            let root = *AppendMerkleTree::<H256, Sha3Algorithm>::new(leaves).root();
+                            let root =
+                                *AppendMerkleTree::<H256, Sha3Algorithm>::new(leaves, None).root();
                             tx.put(
                                 COL_ENTRY_BATCH_ROOT,
                                 &batch_index.to_be_bytes(),
@@ -261,7 +221,7 @@ impl FlowDBStore {
         let root = if length == 1 {
             BatchRoot::Single(root)
         } else {
-            BatchRoot::Multiple((root, length))
+            BatchRoot::Multiple((length, root))
         };
         Ok(self.kvdb.put(
             COL_ENTRY_BATCH_ROOT,
@@ -275,6 +235,39 @@ impl FlowDBStore {
             .kvdb
             .get(COL_ENTRY_BATCH_ROOT, &batch_index.to_be_bytes())?);
         Ok(Some(BatchRoot::from_ssz_bytes(&raw).map_err(Error::from)?))
+    }
+
+    fn truncate(&self, start_index: u64, batch_size: usize) -> crate::error::Result<()> {
+        let mut tx = self.kvdb.transaction();
+        let mut start_batch_index = start_index / batch_size as u64;
+        let first_batch_offset = start_index as usize % batch_size;
+        if first_batch_offset != 0 {
+            if let Some(mut first_batch) = self.get_entry_batch(start_batch_index)? {
+                first_batch.truncate(first_batch_offset as usize);
+                tx.put(
+                    COL_ENTRY_BATCH,
+                    &start_batch_index.to_be_bytes(),
+                    &first_batch.as_ssz_bytes(),
+                );
+            }
+
+            start_batch_index += 1;
+        }
+        // TODO: `kvdb` and `kvdb-rocksdb` does not support `seek_to_last` yet.
+        // We'll need to fork it or use another wrapper for a better performance in this.
+        let end = match self.kvdb.iter(COL_ENTRY_BATCH).last() {
+            Some((k, _)) => decode_batch_index(k.as_ref())?,
+            None => {
+                // The db has no data, so we can just return;
+                return Ok(());
+            }
+        };
+        for batch_index in start_batch_index..=end {
+            tx.delete(COL_ENTRY_BATCH, &batch_index.to_be_bytes());
+            tx.delete(COL_ENTRY_BATCH_ROOT, &batch_index.to_be_bytes());
+        }
+        self.kvdb.write(tx)?;
+        Ok(())
     }
 }
 
@@ -333,13 +326,24 @@ impl Decode for EntryBatch {
 #[ssz(enum_behaviour = "union")]
 pub enum BatchRoot {
     Single(DataRoot),
-    Multiple((DataRoot, usize)),
+    Multiple((usize, DataRoot)),
 }
 
 struct PartialBatch {
     /// Offset in this batch.
     start_offset: usize,
     data: Vec<u8>,
+}
+
+impl Debug for PartialBatch {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "PartialBatch: start_offset={} data_len={}",
+            self.start_offset,
+            self.data.len()
+        )
+    }
 }
 
 impl Encode for PartialBatch {
@@ -484,6 +488,33 @@ impl EntryBatch {
             }
         }
     }
+
+    fn truncate(&mut self, start_offset: usize) {
+        assert!(start_offset > 0 && start_offset < PORA_CHUNK_SIZE);
+        match self {
+            EntryBatch::Complete(data) => {
+                data.truncate(start_offset);
+            }
+            EntryBatch::Incomplete(batch_list) => {
+                let mut start_partial_batch_index = None;
+                for (i, b) in batch_list.iter_mut().enumerate() {
+                    if b.start_offset >= start_offset {
+                        // All partial chunks after (including) i should be removed;
+                        start_partial_batch_index = Some(i);
+                        break;
+                    } else if b.start_offset + bytes_to_chunks(b.data.len()) > start_offset {
+                        start_partial_batch_index = Some(i + 1);
+                        b.data
+                            .truncate((start_offset - b.start_offset) * ENTRY_SIZE);
+                        break;
+                    }
+                }
+                if let Some(start_index) = start_partial_batch_index {
+                    batch_list.truncate(start_index);
+                }
+            }
+        }
+    }
 }
 
 /// Return the batch boundaries `(batch_start_index, batch_end_index)` given the index range.
@@ -495,4 +526,10 @@ pub fn batch_iter(start: u64, end: u64, batch_size: usize) -> Vec<(u64, u64)> {
         list.push((batch_start, batch_end));
     }
     list
+}
+
+fn decode_batch_index(data: &[u8]) -> Result<u64> {
+    Ok(u64::from_be_bytes(
+        data.try_into().map_err(|e| anyhow!("{:?}", e))?,
+    ))
 }
