@@ -177,7 +177,7 @@ class TestFramework:
             dest="cli",
             default=os.path.join(
                 __file_path__,
-                "../../ionian-client/ionian-client"
+                "../../target/ionian-client"
                 + (".exe" if is_windows_platform() else ""),
             ),
             type=str,
@@ -306,7 +306,7 @@ class TestFramework:
                 root = line[index + 5 : -1]
                 self.log.info("root: %s", root)
 
-        assert proc.returncode == 0
+        assert proc.returncode == 0, "%s upload file failed" % self.cli_binary
         self.log.info("file uploaded")
 
         return root

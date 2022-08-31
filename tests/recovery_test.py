@@ -35,7 +35,5 @@ class RecoveryTest(TestFramework):
         wait_until(lambda: client.ionian_get_file_info(data_root)["finalized"])
 
 
-
-
 if __name__ == "__main__":
     RecoveryTest().main()

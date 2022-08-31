@@ -9,7 +9,7 @@ fn main() {
 
     let status = Command::new("go")
         .current_dir("../ionian-client")
-        .args(vec!["build"])
+        .args(vec!["build", "-o", "../target"])
         .status()
         .unwrap();
 
