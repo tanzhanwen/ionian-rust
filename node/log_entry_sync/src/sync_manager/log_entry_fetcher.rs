@@ -1,13 +1,14 @@
 use crate::contracts::{IonianFlow, SubmissionFilter};
 use crate::rpc_proxy::ContractAddress;
+use crate::sync_manager::{repeat_run_and_log, RETRY_WAIT_MS};
 use anyhow::{anyhow, Result};
 use append_merkle::{Algorithm, Sha3Algorithm};
-use ethers::prelude::builders::Event;
-use ethers::prelude::{BlockNumber, Http, Log, Middleware, Provider, U256};
+use ethers::abi::RawLog;
+use ethers::prelude::{BlockNumber, EthLogDecode, Http, Log, Middleware, Provider, U256};
 use ethers::providers::FilterKind;
 use ethers::types::H256;
 use futures::StreamExt;
-use jsonrpsee::tracing::{debug, error};
+use jsonrpsee::tracing::{debug, error, info};
 use shared_types::{DataRoot, Transaction};
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,8 +42,9 @@ impl LogEntryFetcher {
         let contract = IonianFlow::new(self.contract_address, provider.clone());
         executor.spawn(
             async move {
-                let events = contract.submission_filter().from_block(start_block_number);
-                let mut stream = provider.get_logs_paginated(&events.filter, LOG_PAGE_SIZE);
+                let mut progress = start_block_number;
+                let mut filter = contract.submission_filter().from_block(progress).filter;
+                let mut stream = provider.get_logs_paginated(&filter, LOG_PAGE_SIZE);
                 debug!("start_recover starts, start={}", start_block_number);
                 while let Some(maybe_log) = stream.next().await {
                     match maybe_log {
@@ -53,12 +55,16 @@ impl LogEntryFetcher {
                                         log.block_number.unwrap().as_u64(),
                                         log.block_hash.unwrap(),
                                     ));
+                                    progress = log.block_number.unwrap().as_u64();
                                     Some(synced_block)
                                 } else {
                                     None
                                 };
 
-                            match events.parse_log(log) {
+                            match SubmissionFilter::decode_log(&RawLog {
+                                topics: log.topics,
+                                data: log.data.to_vec(),
+                            }) {
                                 Ok(event) => {
                                     if let Err(e) = recover_tx
                                         .send(submission_event_to_transaction(event))
@@ -77,6 +83,9 @@ impl LogEntryFetcher {
                         }
                         Err(e) => {
                             error!("log query error: e={:?}", e);
+                            filter = filter.from_block(progress);
+                            stream = provider.get_logs_paginated(&filter, LOG_PAGE_SIZE);
+                            tokio::time::sleep(Duration::from_millis(RETRY_WAIT_MS)).await;
                         }
                     }
                 }
@@ -96,23 +105,37 @@ impl LogEntryFetcher {
         let provider = self.provider.clone();
         executor.spawn(
             async move {
-                let events = contract.submission_filter().from_block(start_block_number);
+                let mut filter = contract
+                    .submission_filter()
+                    .from_block(start_block_number)
+                    .filter;
                 debug!("start_watch starts, start={}", start_block_number);
-                let filter_id = match provider.new_filter(FilterKind::Logs(&events.filter)).await {
-                    Ok(id) => id,
-                    Err(e) => {
-                        error!("start_watch error: e={:?}", e);
-                        return;
-                    }
-                };
+                let mut filter_id =
+                    repeat_run_and_log(|| provider.new_filter(FilterKind::Logs(&filter))).await;
+                let mut progress = start_block_number;
 
                 loop {
-                    if let Err(e) =
-                        Self::watch_loop(provider.as_ref(), filter_id, &events, &watch_tx).await
-                    {
-                        error!("log sync watch error: e={:?}", e);
+                    match Self::watch_loop(provider.as_ref(), filter_id, &watch_tx).await {
+                        Err(e) => {
+                            error!("log sync watch error: e={:?}", e);
+                            filter = filter.from_block(progress);
+                            filter_id = repeat_run_and_log(|| {
+                                provider.new_filter(FilterKind::Logs(&filter))
+                            })
+                            .await;
+                        }
+                        Ok(Some(p)) => {
+                            progress = p;
+                            info!("log sync to block number {:?}", progress);
+                        }
+                        Ok(None) => {
+                            error!(
+                                "log sync gets entries without progress? old_progress={}",
+                                progress
+                            )
+                        }
                     }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    tokio::time::sleep(Duration::from_millis(RETRY_WAIT_MS)).await;
                 }
             },
             "log watch",
@@ -123,9 +146,8 @@ impl LogEntryFetcher {
     async fn watch_loop(
         provider: &Provider<Http>,
         filter_id: U256,
-        events: &Event<'_, Provider<Http>, SubmissionFilter>,
         watch_tx: &UnboundedSender<LogFetchProgress>,
-    ) -> Result<()> {
+    ) -> Result<Option<u64>> {
         let latest_block = provider
             .get_block(BlockNumber::Latest)
             .await?
@@ -136,17 +158,25 @@ impl LogEntryFetcher {
             // directly, we also do not need to notify with reverted logs.
             if !log.removed.unwrap_or(false) {
                 // TODO(zz): Log parse error means logs might be lost here.
-                let tx = events.parse_log(log)?;
+                let tx = SubmissionFilter::decode_log(&RawLog {
+                    topics: log.topics,
+                    data: log.data.to_vec(),
+                })?;
                 watch_tx.send(submission_event_to_transaction(tx))?;
             }
         }
-        if latest_block.hash.is_some() && latest_block.number.is_some() {
-            watch_tx.send(LogFetchProgress::SyncedBlock((
+        let progress = if latest_block.hash.is_some() && latest_block.number.is_some() {
+            Some((
                 latest_block.number.unwrap().as_u64(),
                 latest_block.hash.unwrap(),
-            )))?;
+            ))
+        } else {
+            None
+        };
+        if let Some(p) = &progress {
+            watch_tx.send(LogFetchProgress::SyncedBlock(*p))?;
         }
-        Ok(())
+        Ok(progress.map(|p| p.0))
     }
 
     pub fn provider(&self) -> &Provider<Http> {

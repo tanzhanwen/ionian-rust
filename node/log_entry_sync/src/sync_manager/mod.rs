@@ -2,15 +2,20 @@ use crate::sync_manager::config::LogSyncConfig;
 use crate::sync_manager::log_entry_fetcher::{LogEntryFetcher, LogFetchProgress};
 use anyhow::{bail, Result};
 use ethers::prelude::Middleware;
+use futures::FutureExt;
 use jsonrpsee::tracing::{debug, error, trace};
 use shared_types::Transaction;
 use std::cmp::Ordering;
+use std::fmt::Debug;
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 use storage::log_store::Store;
 use task_executor::{ShutdownReason, TaskExecutor};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::RwLock;
+
+const RETRY_WAIT_MS: u64 = 500;
 
 pub struct LogSyncManager {
     #[allow(unused)]
@@ -30,64 +35,74 @@ impl LogSyncManager {
         let next_tx_seq = store.read().await.next_tx_seq()?;
 
         let executor_clone = executor.clone();
+        let mut shutdown_sender = executor.shutdown_sender();
         // Spawn the task to sync log entries from the blockchain.
         executor.spawn(
-            run_and_log(executor.shutdown_sender(), async move {
-                let log_fetcher =
-                    LogEntryFetcher::new(&config.rpc_endpoint_url, config.contract_address).await?;
-                let mut log_sync_manager = Self {
-                    config,
-                    log_fetcher,
-                    next_tx_seq,
-                    store,
-                };
-
-                // Load previous progress from db and check if chain reorg happens after restart.
-                // TODO(zz): Handle reorg instead of return.
-                let start_block_number =
-                    match log_sync_manager.store.read().await.get_sync_progress()? {
-                        // No previous progress, so just use config.
-                        None => log_sync_manager.config.start_block_number,
-                        Some((block_number, block_hash)) => {
-                            match log_sync_manager
-                                .log_fetcher
-                                .provider()
-                                .get_block(block_number)
-                                .await
-                            {
-                                Ok(Some(b)) => {
-                                    if b.hash == Some(block_hash) {
-                                        block_number
-                                    } else {
-                                        error!(
-                                            "log sync progress check hash fails, \
-                                            block_number={:?} expect={:?} get={:?}",
-                                            block_number, block_hash, b.hash
-                                        );
-                                        bail!("log sync data mismatch");
-                                    }
-                                }
-                                e => {
-                                    error!("log sync progress check rpc fails, e={:?}", e);
-                                    bail!("log sync start error");
-                                }
-                            }
-                        }
+            run_and_log(
+                move || {
+                    shutdown_sender
+                        .try_send(ShutdownReason::Failure("log sync failure"))
+                        .expect("shutdown send error")
+                },
+                async move {
+                    let log_fetcher =
+                        LogEntryFetcher::new(&config.rpc_endpoint_url, config.contract_address)
+                            .await?;
+                    let mut log_sync_manager = Self {
+                        config,
+                        log_fetcher,
+                        next_tx_seq,
+                        store,
                     };
 
-                // Start watching before recovery to ensure that no log is skipped.
-                // TODO(zz): Rate limit to avoid OOM during recovery.
-                let watch_rx = log_sync_manager
-                    .log_fetcher
-                    .start_watch(start_block_number, &executor_clone);
-                let recover_rx = log_sync_manager
-                    .log_fetcher
-                    .start_recover(start_block_number, &executor_clone);
-                log_sync_manager.handle_data(recover_rx).await?;
-                // Syncing `watch_rx` is supposed to block forever.
-                log_sync_manager.handle_data(watch_rx).await?;
-                Ok(())
-            }),
+                    // Load previous progress from db and check if chain reorg happens after restart.
+                    // TODO(zz): Handle reorg instead of return.
+                    let start_block_number =
+                        match log_sync_manager.store.read().await.get_sync_progress()? {
+                            // No previous progress, so just use config.
+                            None => log_sync_manager.config.start_block_number,
+                            Some((block_number, block_hash)) => {
+                                match log_sync_manager
+                                    .log_fetcher
+                                    .provider()
+                                    .get_block(block_number)
+                                    .await
+                                {
+                                    Ok(Some(b)) => {
+                                        if b.hash == Some(block_hash) {
+                                            block_number
+                                        } else {
+                                            error!(
+                                                "log sync progress check hash fails, \
+                                            block_number={:?} expect={:?} get={:?}",
+                                                block_number, block_hash, b.hash
+                                            );
+                                            bail!("log sync data mismatch");
+                                        }
+                                    }
+                                    e => {
+                                        error!("log sync progress check rpc fails, e={:?}", e);
+                                        bail!("log sync start error");
+                                    }
+                                }
+                            }
+                        };
+
+                    // Start watching before recovery to ensure that no log is skipped.
+                    // TODO(zz): Rate limit to avoid OOM during recovery.
+                    let watch_rx = log_sync_manager
+                        .log_fetcher
+                        .start_watch(start_block_number, &executor_clone);
+                    let recover_rx = log_sync_manager
+                        .log_fetcher
+                        .start_recover(start_block_number, &executor_clone);
+                    log_sync_manager.handle_data(recover_rx).await?;
+                    // Syncing `watch_rx` is supposed to block forever.
+                    log_sync_manager.handle_data(watch_rx).await?;
+                    Ok(())
+                },
+            )
+            .map(|_| ()),
             "log_sync",
         );
         Ok(())
@@ -152,15 +167,33 @@ impl LogSyncManager {
     }
 }
 
-async fn run_and_log(
-    mut shutdown_sender: futures::channel::mpsc::Sender<ShutdownReason>,
-    f: impl Future<Output = Result<()>> + Send + 'static,
-) {
-    if let Err(e) = f.await {
-        error!("log sync failure: e={:?}", e);
-        shutdown_sender
-            .try_send(ShutdownReason::Failure("log sync failure"))
-            .expect("shutdown send error");
+async fn run_and_log<R, E>(
+    mut on_error: impl FnMut(),
+    f: impl Future<Output = std::result::Result<R, E>> + Send,
+) -> Option<R>
+where
+    E: Debug,
+{
+    match f.await {
+        Err(e) => {
+            error!("log sync failure: e={:?}", e);
+            on_error();
+            None
+        }
+        Ok(r) => Some(r),
+    }
+}
+
+async fn repeat_run_and_log<R, E, F>(f: impl Fn() -> F) -> R
+where
+    E: Debug,
+    F: Future<Output = std::result::Result<R, E>> + Send,
+{
+    loop {
+        if let Some(r) = run_and_log(|| {}, f()).await {
+            break r;
+        }
+        tokio::time::sleep(Duration::from_millis(RETRY_WAIT_MS)).await;
     }
 }
 
