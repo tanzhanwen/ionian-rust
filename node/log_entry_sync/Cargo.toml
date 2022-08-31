@@ -10,12 +10,12 @@ build = "build.rs"
 anyhow = { version = "=1.0.58", features = ["backtrace"] }
 append_merkle = { path = "../../common/append_merkle" }
 async-trait = "0.1.56"
-ethereum-types = "0.12"
+ethereum-types = "0.13"
 futures = "0.3.21"
 jsonrpsee = { version = "0.14.0", features = ["full"] }
 shared_types = { path = "../shared_types" }
 task_executor = { path = "../../common/task_executor" }
 tokio = "1.19.2"
-ethers = { version = "0.13", features = ["ws", "rustls", "abigen"] }
+ethers = { git = "https://github.com/k-huetsch/ethers-rs.git", branch="ionian-dev", features = ["ws", "rustls", "abigen"] }
 serde_json = "1.0.82"
 storage = { path = "../storage" }
