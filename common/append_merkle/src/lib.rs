@@ -230,6 +230,18 @@ impl<E: HashElement, A: Algorithm<E>> AppendMerkleTree<E, A> {
     pub fn check_root(&self, root: &E) -> bool {
         self.delta_nodes_map.contains_key(root)
     }
+
+    pub fn leaf_at(&self, position: usize) -> Result<Option<E>> {
+        if position >= self.leaves() {
+            bail!("Out of bound: position={} end={}", position, self.leaves());
+        }
+        if self.layers[0][position] != E::null() {
+            Ok(Some(self.layers[0][position].clone()))
+        } else {
+            // The leaf hash is unknown.
+            Ok(None)
+        }
+    }
 }
 
 impl<E: HashElement, A: Algorithm<E>> AppendMerkleTree<E, A> {

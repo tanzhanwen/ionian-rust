@@ -1,12 +1,16 @@
 use crate::error::Error;
 use crate::log_store::log_manager::{
     sub_merkle_tree, COL_MISC, COL_TX, COL_TX_COMPLETED, COL_TX_DATA_ROOT_INDEX, ENTRY_SIZE,
+    PORA_CHUNK_SIZE,
 };
 use crate::{try_option, IonianKeyValueDB};
 use anyhow::{anyhow, Result};
+use append_merkle::{AppendMerkleTree, Sha3Algorithm};
 use ethereum_types::H256;
+use merkle_light::merkle::log2_pow2;
 use shared_types::{DataRoot, Transaction};
 use ssz::{Decode, Encode};
+use std::cmp;
 use std::sync::Arc;
 use tracing::instrument;
 
@@ -103,6 +107,88 @@ impl TransactionStore {
                 .get(COL_MISC, LOG_SYNC_PROGRESS_KEY.as_bytes())?))
             .map_err(Error::from)?,
         ))
+    }
+
+    /// Build the merkle tree at `pora_chunk_index` with the data before (including) `tx_seq`.
+    /// This first rebuild the tree with the tx root nodes lists by repeatedly checking previous
+    /// until we reach the start of this chunk.
+    ///
+    /// Note that this can only be called with the last chunk after some transaction is committed,
+    /// otherwise the start of this chunk might be within some tx subtree and this will panic.
+    // TODO(zz): Fill the last chunk with data.
+    pub fn rebuild_last_chunk_merkle(
+        &self,
+        pora_chunk_index: usize,
+        mut tx_seq: u64,
+    ) -> Result<AppendMerkleTree<H256, Sha3Algorithm>> {
+        let last_chunk_start_index = pora_chunk_index as u64 * PORA_CHUNK_SIZE as u64;
+        let mut tx_list = Vec::new();
+        // Find the first tx within the last chunk.
+        loop {
+            let tx = self.get_tx_by_seq_number(tx_seq)?.expect("tx not removed");
+            match tx.start_entry_index.cmp(&last_chunk_start_index) {
+                cmp::Ordering::Greater => {
+                    tx_list.push((tx_seq, tx.merkle_nodes));
+                }
+                cmp::Ordering::Equal => {
+                    tx_list.push((tx_seq, tx.merkle_nodes));
+                    break;
+                }
+                cmp::Ordering::Less => {
+                    // The transaction data crosses a chunk, so we need to find the subtrees
+                    // within the last chunk.
+                    let mut start_index = tx.start_entry_index;
+                    let mut first_index = None;
+                    for (i, (depth, _)) in tx.merkle_nodes.iter().enumerate() {
+                        start_index += 1 << (depth - 1);
+                        if start_index == last_chunk_start_index {
+                            first_index = Some(i + 1);
+                            break;
+                        }
+                    }
+                    // Some means some subtree ends at the chunk boundary.
+                    // None means there are padding data between the tx data and the boundary,
+                    // so no data belongs to the last chunk.
+                    if let Some(first_index) = first_index {
+                        if first_index != tx.merkle_nodes.len() {
+                            tx_list.push((tx_seq, tx.merkle_nodes[first_index..].to_vec()));
+                        } else {
+                            // If the last subtree ends at the chunk boundary, we also do not need
+                            // to add data of this tx to the last chunk.
+                            // This is only possible if the last chunk is empty, because otherwise
+                            // we should have entered the `Equal` condition before and
+                            // have broken the loop.
+                            assert!(tx_list.is_empty());
+                        }
+                    }
+                    break;
+                }
+            }
+            if tx_seq == 0 {
+                break;
+            } else {
+                tx_seq -= 1;
+            }
+        }
+        let mut merkle = if last_chunk_start_index == 0 {
+            // The first entry hash is initialized as zero.
+            AppendMerkleTree::<H256, Sha3Algorithm>::new_with_depth(
+                vec![H256::zero()],
+                log2_pow2(PORA_CHUNK_SIZE) + 1,
+                None,
+            )
+        } else {
+            AppendMerkleTree::<H256, Sha3Algorithm>::new_with_depth(
+                vec![],
+                log2_pow2(PORA_CHUNK_SIZE) + 1,
+                None,
+            )
+        };
+        for (tx_seq, subtree_list) in tx_list.into_iter().rev() {
+            merkle.append_subtree_list(subtree_list)?;
+            merkle.commit(Some(tx_seq));
+        }
+        Ok(merkle)
     }
 }
 

@@ -16,7 +16,6 @@ use shared_types::{
     bytes_to_chunks, Chunk, ChunkArray, ChunkArrayWithProof, ChunkWithProof, DataRoot, FlowProof,
     FlowRangeProof, Transaction,
 };
-use std::cmp;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, instrument};
@@ -272,64 +271,12 @@ impl LogManager {
         };
         let mut pora_chunks_merkle = Merkle::new_with_subtrees(chunk_roots, start_tx_seq)?;
         let last_chunk_merkle = match start_tx_seq {
-            Some(mut tx_seq) => {
-                let last_chunk_start_index =
-                    pora_chunks_merkle.leaves() as u64 * PORA_CHUNK_SIZE as u64;
-                let mut tx_list = Vec::new();
-                // Find the first tx within the last chunk.
-                loop {
-                    let tx = tx_store
-                        .get_tx_by_seq_number(tx_seq)?
-                        .expect("tx not removed");
-                    match tx.start_entry_index.cmp(&last_chunk_start_index) {
-                        cmp::Ordering::Greater => {
-                            tx_list.push(tx.merkle_nodes);
-                        }
-                        cmp::Ordering::Equal => {
-                            tx_list.push(tx.merkle_nodes);
-                            break;
-                        }
-                        cmp::Ordering::Less => {
-                            // The transaction data crosses a chunk, so we need to find the subtrees
-                            // within the last chunk.
-                            let mut start_index = tx.start_entry_index;
-                            let mut first_index = None;
-                            for (i, (depth, _)) in tx.merkle_nodes.iter().enumerate() {
-                                start_index += 1 << (depth - 1);
-                                if start_index == last_chunk_start_index {
-                                    first_index = Some(i + 1);
-                                    break;
-                                }
-                            }
-                            let first_index = first_index.expect("the transaction must have a subtree aligned with the PoRA chunk size");
-                            if first_index != tx.merkle_nodes.len() {
-                                tx_list.push(tx.merkle_nodes[first_index..].to_vec());
-                            }
-                        }
-                    }
-                    if tx_seq == 0 {
-                        break;
-                    } else {
-                        tx_seq -= 1;
-                    }
-                }
-                let mut merkle = if last_chunk_start_index == 0 {
-                    // The first entry hash is initialized as zero.
-                    Merkle::new_with_depth(vec![H256::zero()], log2_pow2(PORA_CHUNK_SIZE) + 1, None)
-                } else {
-                    Merkle::new_with_depth(vec![], log2_pow2(PORA_CHUNK_SIZE) + 1, None)
-                };
-                for subtree_list in tx_list {
-                    merkle.append_subtree_list(subtree_list)?;
-                    merkle.commit(Some(tx_seq));
-                    tx_seq += 1;
-                }
-                merkle
+            Some(tx_seq) => {
+                tx_store.rebuild_last_chunk_merkle(pora_chunks_merkle.leaves(), tx_seq)?
             }
             // Initialize
             None => Merkle::new_with_depth(vec![], log2_pow2(PORA_CHUNK_SIZE) + 1, None),
         };
-        // TODO(zz): Fill the last chunk with data.
 
         debug!(
             "LogManager::new() with chunk_list_len={} start_tx_seq={:?} last_chunk={}",
@@ -584,6 +531,7 @@ impl LogManager {
     }
 
     fn revert_merkle_tree(&mut self, tx_seq: u64) -> Result<()> {
+        // Special case for reverting tx_seq == 0
         if tx_seq == u64::MAX {
             self.pora_chunks_merkle.reset();
             self.last_chunk_merkle.reset();
@@ -595,7 +543,15 @@ impl LogManager {
         if old_leaves == self.pora_chunks_merkle.leaves() {
             self.last_chunk_merkle.revert_to(tx_seq)?;
         } else {
-            todo!("read from db")
+            // We are reverting to a position before the current last_chunk.
+            self.last_chunk_merkle = self
+                .tx_store
+                .rebuild_last_chunk_merkle(self.pora_chunks_merkle.leaves() - 1, tx_seq)?;
+            assert_eq!(
+                Some(*self.last_chunk_merkle.root()),
+                self.pora_chunks_merkle
+                    .leaf_at(self.pora_chunks_merkle.leaves() - 1)?
+            );
         }
         Ok(())
     }
