@@ -1,4 +1,5 @@
-use crate::types::{FileInfo, RpcResult, Segment, SegmentWithProof, Status};
+use crate::types::{FileInfo, Segment, SegmentWithProof, Status};
+use jsonrpsee::core::RpcResult;
 use jsonrpsee::proc_macros::rpc;
 use shared_types::DataRoot;
 

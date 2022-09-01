@@ -1,13 +1,11 @@
 use crate::error;
-use jsonrpsee::core::Error as RpcError;
+use jsonrpsee::core::RpcResult;
 use merkle_light::hash::Algorithm;
 use merkle_light::merkle::MerkleTree;
 use merkle_tree::{RawLeafSha3Algorithm, LEAF};
 use serde::{Deserialize, Serialize};
 use shared_types::{DataRoot, FileProof, Transaction, CHUNK_SIZE};
 use std::hash::Hasher;
-
-pub(crate) type RpcResult<T> = Result<T, RpcError>;
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

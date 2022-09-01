@@ -1,14 +1,11 @@
 use super::api::RpcServer;
 use crate::error;
-use crate::types::{FileInfo, RpcResult, Segment, SegmentWithProof, Status};
+use crate::types::{FileInfo, Segment, SegmentWithProof, Status};
 use crate::Context;
 use jsonrpsee::core::async_trait;
-use network::NetworkGlobals;
-use network::NetworkMessage;
+use jsonrpsee::core::RpcResult;
 use shared_types::DataRoot;
-use std::sync::Arc;
 use storage::try_option;
-use tokio::sync::mpsc::UnboundedSender;
 
 pub struct RpcServerImpl {
     pub ctx: Context,
@@ -21,7 +18,7 @@ impl RpcServer for RpcServerImpl {
         info!("ionian_getStatus()");
 
         Ok(Status {
-            connected_peers: self.network_globals()?.connected_peers(),
+            connected_peers: self.ctx.network_globals.connected_peers(),
         })
     }
 
@@ -117,24 +114,5 @@ impl RpcServer for RpcServerImpl {
             tx,
             finalized: self.ctx.log_store.check_tx_completed(tx_seq).await?,
         }))
-    }
-}
-
-impl RpcServerImpl {
-    fn network_globals(&self) -> Result<&Arc<NetworkGlobals>, jsonrpsee::core::Error> {
-        match &self.ctx.network_globals {
-            Some(globals) => Ok(globals),
-            None => Err(error::internal_error(
-                "Network globals are not initialized.",
-            )),
-        }
-    }
-
-    #[allow(dead_code)]
-    fn network_send(&self) -> Result<&UnboundedSender<NetworkMessage>, jsonrpsee::core::Error> {
-        match &self.ctx.network_send {
-            Some(network_send) => Ok(network_send),
-            None => Err(error::internal_error("Network send is not initialized.")),
-        }
     }
 }

@@ -212,13 +212,13 @@ impl ClientBuilder {
         let network_send = require!("rpc", self, network).send.clone();
 
         let (chunk_pool, chunk_pool_handler) =
-            chunk_pool::unbounded(chunk_pool_config, async_store.clone(), network_send);
+            chunk_pool::unbounded(chunk_pool_config, async_store.clone(), network_send.clone());
 
         let ctx = rpc::Context {
             config: rpc_config,
-            network_globals: self.network.as_ref().map(|network| network.globals.clone()),
-            network_send: self.network.as_ref().map(|network| network.send.clone()),
-            sync_send: self.sync.as_ref().map(|sync| sync.send.clone()),
+            network_globals: require!("rpc", self, network).globals.clone(),
+            network_send,
+            sync_send: require!("rpc", self, sync).send.clone(),
             log_store: async_store,
             chunk_pool,
             shutdown_sender: executor.shutdown_sender(),

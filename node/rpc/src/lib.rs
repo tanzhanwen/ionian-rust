@@ -7,20 +7,20 @@ mod error;
 mod ionian;
 mod types;
 
+use admin::RpcServer as AdminRpcServer;
 use chunk_pool::MemoryChunkPool;
 use futures::channel::mpsc::Sender;
+use ionian::RpcServer as IonianRpcServer;
+use jsonrpsee::core::RpcResult;
 use jsonrpsee::http_server::{HttpServerBuilder, HttpServerHandle};
 use network::NetworkGlobals;
 use network::NetworkMessage;
 use std::error::Error;
 use std::sync::Arc;
 use storage_async::Store;
-use sync::SyncSender;
+use sync::{SyncRequest, SyncResponse, SyncSender};
 use task_executor::ShutdownReason;
 use tokio::sync::mpsc::UnboundedSender;
-
-use admin::RpcServer as AdminRpcServer;
-use ionian::RpcServer as IonianRpcServer;
 
 pub use config::Config as RPCConfig;
 
@@ -30,12 +30,27 @@ pub use config::Config as RPCConfig;
 #[derive(Clone)]
 pub struct Context {
     pub config: RPCConfig,
-    pub network_globals: Option<Arc<NetworkGlobals>>,
-    pub network_send: Option<UnboundedSender<NetworkMessage>>,
-    pub sync_send: Option<SyncSender>,
+    pub network_globals: Arc<NetworkGlobals>,
+    pub network_send: UnboundedSender<NetworkMessage>,
+    pub sync_send: SyncSender,
     pub chunk_pool: Arc<MemoryChunkPool>,
     pub log_store: Store,
     pub shutdown_sender: Sender<ShutdownReason>,
+}
+
+impl Context {
+    pub fn send_network(&self, msg: NetworkMessage) -> RpcResult<()> {
+        self.network_send
+            .send(msg)
+            .map_err(|e| error::internal_error(format!("Failed to send network message: {:?}", e)))
+    }
+
+    pub async fn request_sync(&self, request: SyncRequest) -> RpcResult<SyncResponse> {
+        self.sync_send
+            .request(request)
+            .await
+            .map_err(|e| error::internal_error(format!("Failed to send sync request: {:?}", e)))
+    }
 }
 
 pub async fn run_server(ctx: Context) -> Result<HttpServerHandle, Box<dyn Error>> {
