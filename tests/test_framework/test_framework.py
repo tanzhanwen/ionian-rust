@@ -164,10 +164,13 @@ class TestFramework:
         parser.add_argument(
             "--ionian-binary",
             dest="ionian",
-            default=os.path.join(
-                __file_path__,
-                "../../target/release/ionian_node"
-                + (".exe" if is_windows_platform() else ""),
+            default=os.getenv(
+                "IONIAN",
+                default=os.path.join(
+                    __file_path__,
+                    "../../target/release/ionian_node"
+                    + (".exe" if is_windows_platform() else ""),
+                ),
             ),
             type=str,
         )
