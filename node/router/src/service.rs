@@ -1,3 +1,5 @@
+use crate::peer_manager::PeerManager;
+use crate::Config;
 use file_location_cache::FileLocationCache;
 use futures::{channel::mpsc::Sender, prelude::*};
 use miner::MinerMessage;
@@ -9,12 +11,14 @@ use network::{
     Service as LibP2PService, Swarm,
 };
 use shared_types::timestamp_now;
+use std::time::Duration;
 use std::{ops::Neg, sync::Arc};
 use storage::log_store::Store as LogStore;
 use storage_async::Store;
 use sync::{SyncMessage, SyncSender};
 use task_executor::ShutdownReason;
 use tokio::sync::{mpsc, RwLock};
+use tokio::time::interval;
 
 pub fn peer_id_to_public_key(peer_id: &PeerId) -> Result<PublicKey, String> {
     // A libp2p peer id byte representation should be 2 length bytes + 4 protobuf bytes + compressed pk bytes
@@ -44,6 +48,8 @@ lazy_static::lazy_static! {
 
 /// Service that handles communication between internal services and the libp2p service.
 pub struct RouterService {
+    config: Config,
+
     /// The underlying libp2p service that drives all the network interactions.
     libp2p: LibP2PService<RequestId>,
 
@@ -71,6 +77,9 @@ pub struct RouterService {
 
     /// Node keypair for signing messages.
     local_keypair: Keypair,
+
+    /// All connected peers.
+    peers: PeerManager,
 }
 
 impl RouterService {
@@ -88,9 +97,11 @@ impl RouterService {
         local_keypair: Keypair,
     ) {
         let store = Store::new(store, executor.clone());
+        let config = Config::default();
 
         // create the network service and spawn the task
         let router = RouterService {
+            config: config.clone(),
             libp2p,
             network_globals,
             network_recv,
@@ -100,6 +111,7 @@ impl RouterService {
             store,
             file_location_cache,
             local_keypair,
+            peers: PeerManager::new(config),
         };
 
         // spawn service
@@ -112,6 +124,8 @@ impl RouterService {
     }
 
     async fn main(mut self, mut shutdown_sender: Sender<ShutdownReason>) {
+        let mut heartbeat = interval(Duration::from_secs(self.config.heartbeat_interval_secs));
+
         loop {
             tokio::select! {
                 // handle a message sent to the network
@@ -119,6 +133,9 @@ impl RouterService {
 
                 // handle event coming from the network
                 event = self.libp2p.next_event() => self.on_libp2p_event(event, &mut shutdown_sender).await,
+
+                // heartbeat
+                _ = heartbeat.tick() => self.on_heartbeat(),
             }
         }
     }
@@ -152,11 +169,12 @@ impl RouterService {
         match ev {
             Libp2pEvent::Behaviour(event) => match event {
                 BehaviourEvent::PeerConnectedOutgoing(peer_id) => {
-                    self.on_peer_connected(peer_id);
+                    self.on_peer_connected(peer_id, true);
                 }
-                BehaviourEvent::PeerConnectedIncoming(_)
-                | BehaviourEvent::PeerBanned(_)
-                | BehaviourEvent::PeerUnbanned(_) => {
+                BehaviourEvent::PeerConnectedIncoming(peer_id) => {
+                    self.on_peer_connected(peer_id, false);
+                }
+                BehaviourEvent::PeerBanned(_) | BehaviourEvent::PeerUnbanned(_) => {
                     // No action required for these events.
                 }
                 BehaviourEvent::PeerDisconnected(peer_id) => {
@@ -292,12 +310,17 @@ impl RouterService {
         }
     }
 
-    fn on_peer_connected(&mut self, peer_id: PeerId) {
-        self.send_status(peer_id);
-        self.send_to_sync(SyncMessage::PeerConnected { peer_id });
+    fn on_peer_connected(&mut self, peer_id: PeerId, outgoing: bool) {
+        self.peers.add(peer_id, outgoing);
+
+        if outgoing {
+            self.send_status(peer_id);
+            self.send_to_sync(SyncMessage::PeerConnected { peer_id });
+        }
     }
 
     fn on_peer_disconnected(&mut self, peer_id: PeerId) {
+        self.peers.remove(&peer_id);
         self.send_to_sync(SyncMessage::PeerDisconnected { peer_id });
     }
 
@@ -306,6 +329,8 @@ impl RouterService {
             debug!(%peer_id, ?request, "Dropping request of disconnected peer");
             return;
         }
+
+        self.peers.update(&peer_id);
 
         match request {
             Request::Status(status) => {
@@ -325,6 +350,8 @@ impl RouterService {
     }
 
     fn on_rpc_response(&mut self, peer_id: PeerId, request_id: RequestId, response: Response) {
+        self.peers.update(&peer_id);
+
         match response {
             Response::Status(status_message) => {
                 self.on_status_response(peer_id, status_message);
@@ -348,6 +375,8 @@ impl RouterService {
     }
 
     fn on_rpc_error(&mut self, peer_id: PeerId, request_id: RequestId) {
+        self.peers.update(&peer_id);
+
         // Check if the failed RPC belongs to sync
         if let RequestId::Sync(request_id) = request_id {
             self.send_to_sync(SyncMessage::RpcError {
@@ -525,6 +554,21 @@ impl RouterService {
         self.file_location_cache.insert(msg);
 
         MessageAcceptance::Accept
+    }
+
+    fn on_heartbeat(&mut self) {
+        let expired_peers = self.peers.expired_peers();
+
+        trace!("heartbeat, expired peers = {:?}", expired_peers.len());
+
+        for peer_id in expired_peers {
+            // async operation, once peer disconnected, swarm event `PeerDisconnected`
+            // will be polled to handle in advance.
+            match self.libp2p.swarm.disconnect_peer_id(peer_id) {
+                Ok(_) => debug!(%peer_id, "Peer expired and disconnect it"),
+                Err(_) => error!(%peer_id, "Peer expired but failed to disconnect"),
+            }
+        }
     }
 }
 

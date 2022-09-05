@@ -27,7 +27,7 @@ impl RpcServer for RpcServerImpl {
 
     #[tracing::instrument(skip(self), err)]
     async fn announce_local_file(&self, tx_seq: u64) -> RpcResult<()> {
-        info!("admin_startSyncFile({tx_seq})");
+        info!("admin_announceLocalFile({tx_seq})");
 
         self.ctx
             .send_network(NetworkMessage::AnnounceLocalFile { tx_seq })
