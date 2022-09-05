@@ -56,15 +56,16 @@ impl LogStoreChunkWrite for LogManager {
             .tx_store
             .get_tx_by_seq_number(tx_seq)?
             .ok_or_else(|| anyhow!("put chunks with missing tx: tx_seq={}", tx_seq))?;
-        if chunks.start_index.saturating_mul(ENTRY_SIZE as u64) + chunks.data.len() as u64 > tx.size
-        {
-            bail!(
-                "put chunks with data out of tx range: tx_seq={} start_index={} data_len={}",
-                tx_seq,
-                chunks.start_index,
-                chunks.data.len()
-            );
-        }
+        // TODO(kevin): check length for new split node rule
+        // if chunks.start_index.saturating_mul(ENTRY_SIZE as u64) + chunks.data.len() as u64 > tx.size
+        // {
+        //     bail!(
+        //         "put chunks with data out of tx range: tx_seq={} start_index={} data_len={}",
+        //         tx_seq,
+        //         chunks.start_index,
+        //         chunks.data.len()
+        //     );
+        // }
         // TODO: Use another struct to avoid confusion.
         let mut flow_entry_array = chunks;
         flow_entry_array.start_index += tx.start_entry_index;

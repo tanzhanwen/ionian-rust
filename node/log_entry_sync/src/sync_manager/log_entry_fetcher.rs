@@ -1,8 +1,8 @@
-use crate::contracts::{IonianFlow, SubmissionFilter};
 use crate::rpc_proxy::ContractAddress;
 use crate::sync_manager::{repeat_run_and_log, RETRY_WAIT_MS};
 use anyhow::{anyhow, Result};
 use append_merkle::{Algorithm, Sha3Algorithm};
+use contract_interface::{IonianFlow, SubmissionFilter};
 use ethers::abi::RawLog;
 use ethers::prelude::{BlockNumber, EthLogDecode, Http, Log, Middleware, Provider, U256};
 use ethers::providers::FilterKind;

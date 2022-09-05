@@ -2,7 +2,6 @@
 name = "log_entry_sync"
 version = "0.1.0"
 edition = "2021"
-build = "build.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -19,3 +18,4 @@ tokio = "1.19.2"
 ethers = { git = "https://github.com/k-huetsch/ethers-rs.git", branch="ionian-dev", features = ["ws", "rustls", "abigen"] }
 serde_json = "1.0.82"
 storage = { path = "../storage" }
+contract-interface = { path = "../../common/contract-interface" }

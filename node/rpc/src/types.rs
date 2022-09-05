@@ -81,15 +81,16 @@ impl SegmentWithProof {
             return Err(error::invalid_params("index", "index out of bound"));
         }
 
-        let data_size = if self.index == num_segments - 1 {
+        let _data_size = if self.index == num_segments - 1 {
             last_segment_size
         } else {
             chunks_per_segment * CHUNK_SIZE
         };
 
-        if self.data.len() != data_size {
-            return Err(error::invalid_params("data", "invalid data length"));
-        }
+        // TODO(kevin): check length for new split node rule
+        // if self.data.len() != data_size {
+        //     return Err(error::invalid_params("data", "invalid data length"));
+        // }
 
         Ok(num_segments)
     }

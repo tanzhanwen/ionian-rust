@@ -22,6 +22,8 @@ jobs:
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
+        with:
+          submodules: recursive
 
       - name: Install stable toolchain
         uses: actions-rs/toolchain@v1
@@ -41,6 +43,8 @@ jobs:
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
+        with:
+          submodules: recursive
 
       - name: Cargo cache
         uses: actions/cache@v3
@@ -72,6 +76,8 @@ jobs:
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
+        with:
+          submodules: recursive
 
       - name: Install stable toolchain
         uses: actions-rs/toolchain@v1

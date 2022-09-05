@@ -1,3 +1,6 @@
 [submodule "ionian-client"]
 	path = ionian-client
 	url = https://github.com/Ionian-Web3-Storage/ionian-client.git
+[submodule "ionian-contracts"]
+	path = ionian-contracts
+	url = https://github.com/Ionian-Web3-Storage/ionian-contracts-poc.git

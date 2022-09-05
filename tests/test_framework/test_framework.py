@@ -191,7 +191,7 @@ class TestFramework:
             dest="contract",
             default=os.path.join(
                 __file_path__,
-                "../../node/log_entry_sync/src/contracts/Flow.json",
+                "../../ionian-contracts/artifacts/contracts/dataFlow/Flow.sol/Flow.json",
             ),
             type=str,
         )
