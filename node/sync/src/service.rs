@@ -1,5 +1,7 @@
 use crate::context::SyncNetworkContext;
 use crate::controllers::{SerialSyncController, SyncState};
+use crate::manager::SyncManager;
+use crate::Config;
 use anyhow::{bail, Result};
 use file_location_cache::FileLocationCache;
 use network::{
@@ -91,6 +93,22 @@ impl SyncService {
         store: Arc<RwLock<dyn LogStore>>,
         file_location_cache: Arc<FileLocationCache>,
     ) -> SyncSender {
+        Self::spawn_with_config(
+            Config::default(),
+            executor,
+            network_send,
+            store,
+            file_location_cache,
+        )
+    }
+
+    pub fn spawn_with_config(
+        config: Config,
+        executor: task_executor::TaskExecutor,
+        network_send: mpsc::UnboundedSender<NetworkMessage>,
+        store: Arc<RwLock<dyn LogStore>>,
+        file_location_cache: Arc<FileLocationCache>,
+    ) -> SyncSender {
         let (sync_send, sync_recv) = channel::Channel::unbounded();
 
         let heartbeat =
@@ -101,7 +119,7 @@ impl SyncService {
         let mut sync = SyncService {
             msg_recv: sync_recv,
             ctx: Arc::new(SyncNetworkContext::new(network_send)),
-            store,
+            store: store.clone(),
             file_location_cache,
             controllers: Default::default(),
             heartbeat,
@@ -109,6 +127,14 @@ impl SyncService {
 
         debug!("Starting sync service");
         executor.spawn(async move { Box::pin(sync.main()).await }, "sync");
+
+        if !config.auto_sync_disabled {
+            let mut manager = SyncManager::new(store, sync_send.clone());
+            executor.spawn(
+                async move { Box::pin(manager.start()).await },
+                "auto_sync_file",
+            );
+        }
 
         sync_send
     }
@@ -567,7 +593,8 @@ mod tests {
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
 
-        let sync_send = SyncService::spawn(
+        let sync_send = SyncService::spawn_with_config(
+            Config::default().disable_auto_sync(),
             runtime.task_executor.clone(),
             network_send,
             store.clone(),
@@ -640,7 +667,8 @@ mod tests {
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
 
-        let sync_send = SyncService::spawn(
+        let sync_send = SyncService::spawn_with_config(
+            Config::default().disable_auto_sync(),
             runtime.task_executor.clone(),
             network_send,
             store.clone(),
@@ -705,7 +733,8 @@ mod tests {
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
 
-        let sync_send = SyncService::spawn(
+        let sync_send = SyncService::spawn_with_config(
+            Config::default().disable_auto_sync(),
             runtime.task_executor.clone(),
             network_send,
             store.clone(),
@@ -770,7 +799,8 @@ mod tests {
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
 
-        let sync_send = SyncService::spawn(
+        let sync_send = SyncService::spawn_with_config(
+            Config::default().disable_auto_sync(),
             runtime.task_executor.clone(),
             network_send,
             store.clone(),
@@ -835,7 +865,8 @@ mod tests {
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
 
-        let sync_send = SyncService::spawn(
+        let sync_send = SyncService::spawn_with_config(
+            Config::default().disable_auto_sync(),
             runtime.task_executor.clone(),
             network_send,
             store.clone(),
@@ -921,7 +952,8 @@ mod tests {
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
 
-        let sync_send = SyncService::spawn(
+        let sync_send = SyncService::spawn_with_config(
+            Config::default().disable_auto_sync(),
             runtime.task_executor.clone(),
             network_send,
             store.clone(),
@@ -955,7 +987,8 @@ mod tests {
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
 
-        let sync_send = SyncService::spawn(
+        let sync_send = SyncService::spawn_with_config(
+            Config::default().disable_auto_sync(),
             runtime.task_executor.clone(),
             network_send,
             peer_store.clone(),
@@ -1000,7 +1033,8 @@ mod tests {
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
 
-        let sync_send = SyncService::spawn(
+        let sync_send = SyncService::spawn_with_config(
+            Config::default().disable_auto_sync(),
             runtime.task_executor.clone(),
             network_send,
             store.clone(),
@@ -1088,7 +1122,8 @@ mod tests {
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
 
-        let sync_send = SyncService::spawn(
+        let sync_send = SyncService::spawn_with_config(
+            Config::default().disable_auto_sync(),
             runtime.task_executor.clone(),
             network_send,
             store.clone(),
@@ -1157,7 +1192,8 @@ mod tests {
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
 
-        let sync_send = SyncService::spawn(
+        let sync_send = SyncService::spawn_with_config(
+            Config::default().disable_auto_sync(),
             runtime.task_executor.clone(),
             network_send,
             store.clone(),
@@ -1239,7 +1275,8 @@ mod tests {
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
 
-        let sync_send = SyncService::spawn(
+        let sync_send = SyncService::spawn_with_config(
+            Config::default().disable_auto_sync(),
             runtime.task_executor.clone(),
             network_send,
             store.clone(),
@@ -1269,7 +1306,8 @@ mod tests {
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
 
-        let sync_send = SyncService::spawn(
+        let sync_send = SyncService::spawn_with_config(
+            Config::default().disable_auto_sync(),
             runtime.task_executor.clone(),
             network_send,
             store.clone(),
@@ -1320,7 +1358,8 @@ mod tests {
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
 
-        let sync_send = SyncService::spawn(
+        let sync_send = SyncService::spawn_with_config(
+            Config::default().disable_auto_sync(),
             runtime.task_executor.clone(),
             network_send,
             store.clone(),
@@ -1376,7 +1415,8 @@ mod tests {
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
 
-        let sync_send = SyncService::spawn(
+        let sync_send = SyncService::spawn_with_config(
+            Config::default().disable_auto_sync(),
             runtime.task_executor.clone(),
             network_send,
             peer_store.clone(),
@@ -1463,7 +1503,8 @@ mod tests {
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
 
-        let sync_send = SyncService::spawn(
+        let sync_send = SyncService::spawn_with_config(
+            Config::default().disable_auto_sync(),
             runtime.task_executor.clone(),
             network_send,
             store.clone(),

@@ -16,6 +16,7 @@ storage-async = { path = "../storage-async" }
 task_executor = { path = "../../common/task_executor" }
 tokio = { version = "1.19.2", features = ["full"] }
 tracing = "0.1.35"
+eth2_ssz = "0.4.0"
 
 [dev-dependencies]
 merkle_light = { path = "../../common/merkle_light" }

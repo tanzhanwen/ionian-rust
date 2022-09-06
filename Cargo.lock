@@ -6149,6 +6149,7 @@ dependencies = [
  "anyhow",
  "append_merkle",
  "channel",
+ "eth2_ssz",
  "file_location_cache",
  "libp2p",
  "merkle_light",

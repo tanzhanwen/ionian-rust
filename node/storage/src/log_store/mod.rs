@@ -102,11 +102,16 @@ pub trait LogStoreChunkWrite {
     fn remove_all_chunks(&self, tx_seq: u64) -> Result<()>;
 }
 
+pub trait Configurable {
+    fn get_config(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+    fn set_config(&self, key: &[u8], value: &[u8]) -> Result<()>;
+}
+
 pub trait LogChunkStore: LogStoreChunkRead + LogStoreChunkWrite + Send + Sync + 'static {}
 impl<T: LogStoreChunkRead + LogStoreChunkWrite + Send + Sync + 'static> LogChunkStore for T {}
 
-pub trait Store: LogStoreRead + LogStoreWrite + Send + Sync + 'static {}
-impl<T: LogStoreRead + LogStoreWrite + Send + Sync + 'static> Store for T {}
+pub trait Store: LogStoreRead + LogStoreWrite + Configurable + Send + Sync + 'static {}
+impl<T: LogStoreRead + LogStoreWrite + Configurable + Send + Sync + 'static> Store for T {}
 
 pub trait FlowRead {
     fn get_entries(&self, index_start: u64, index_end: u64) -> Result<Option<ChunkArray>>;

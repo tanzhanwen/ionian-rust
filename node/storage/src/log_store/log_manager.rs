@@ -1,7 +1,8 @@
 use crate::log_store::flow_store::{FlowConfig, FlowStore};
 use crate::log_store::tx_store::TransactionStore;
 use crate::log_store::{
-    FlowRead, FlowWrite, LogStoreChunkRead, LogStoreChunkWrite, LogStoreRead, LogStoreWrite,
+    Configurable, FlowRead, FlowWrite, LogStoreChunkRead, LogStoreChunkWrite, LogStoreRead,
+    LogStoreWrite,
 };
 use crate::{try_option, IonianKeyValueDB};
 use anyhow::{anyhow, bail, Result};
@@ -36,6 +37,7 @@ pub const COL_NUM: u32 = 6;
 type Merkle = AppendMerkleTree<H256, Sha3Algorithm>;
 
 pub struct LogManager {
+    db: Arc<dyn IonianKeyValueDB>,
     tx_store: TransactionStore,
     flow_store: FlowStore,
     // TODO(zz): Refactor the in-memory merkle and in-disk storage together.
@@ -247,6 +249,17 @@ impl LogStoreRead for LogManager {
     }
 }
 
+impl Configurable for LogManager {
+    fn get_config(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        Ok(self.db.get(COL_MISC, key)?)
+    }
+
+    fn set_config(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.db.put(COL_MISC, key, value)?;
+        Ok(())
+    }
+}
+
 impl LogManager {
     pub fn rocksdb(config: LogConfig, path: impl AsRef<Path>) -> Result<Self> {
         let mut db_config = DatabaseConfig::with_columns(COL_NUM);
@@ -262,7 +275,7 @@ impl LogManager {
 
     fn new(db: Arc<dyn IonianKeyValueDB>, config: LogConfig) -> Result<Self> {
         let tx_store = TransactionStore::new(db.clone());
-        let flow_store = FlowStore::new(db, config.flow);
+        let flow_store = FlowStore::new(db.clone(), config.flow);
         let chunk_roots = flow_store.get_chunk_root_list()?;
         let next_tx_seq = tx_store.next_tx_seq()?;
         let start_tx_seq = if next_tx_seq > 0 {
@@ -289,6 +302,7 @@ impl LogManager {
             pora_chunks_merkle.append(*last_chunk_merkle.root());
         }
         let mut log_manager = Self {
+            db,
             tx_store,
             flow_store,
             pora_chunks_merkle,
