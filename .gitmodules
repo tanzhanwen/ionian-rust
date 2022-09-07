@@ -3,4 +3,5 @@
 	url = https://github.com/Ionian-Web3-Storage/ionian-client.git
 [submodule "ionian-contracts"]
 	path = ionian-contracts
+        branch = compiled
 	url = https://github.com/Ionian-Web3-Storage/ionian-contracts-poc.git
