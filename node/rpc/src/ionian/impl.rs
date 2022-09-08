@@ -52,10 +52,14 @@ impl RpcServer for RpcServerImpl {
         segment.validate(tx.size as usize, self.ctx.config.chunks_per_segment)?;
 
         // Chunk pool will validate the data size.
-        let chunk_index = segment.chunk_index(self.ctx.config.chunks_per_segment);
         self.ctx
             .chunk_pool
-            .add_chunks(segment.root, segment.data, chunk_index)
+            .add_chunks(
+                segment.root,
+                segment.data,
+                segment.index as usize,
+                self.ctx.config.chunks_per_segment,
+            )
             .await?;
 
         Ok(())
