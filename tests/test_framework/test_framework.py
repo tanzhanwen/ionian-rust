@@ -127,7 +127,7 @@ class TestFramework:
             self.nodes.append(node)
             node.setup_config()
             # wait firt node start for connection
-            if i == 1:
+            if i > 0:
                 time.sleep(1)
             node.start()
 

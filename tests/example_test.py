@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 
 from test_framework.test_framework import TestFramework
-from utility.utils import create_proof_and_segment, generate_data_root, wait_until
+from utility.submission import create_submission, submit_data
+from utility.utils import wait_until
 
 
 class ExampleTest(TestFramework):
@@ -9,15 +10,13 @@ class ExampleTest(TestFramework):
         client = self.nodes[0]
 
         chunk_data = b"\x00" * 256
-        data_root = generate_data_root(chunk_data)
-        nodes = [[data_root, 0]]
-        self.contract.submit([256, nodes])
+        submissions, data_root = create_submission(chunk_data)
+        self.contract.submit(submissions)
         wait_until(lambda: self.contract.num_submissions() == 1)
         wait_until(lambda: client.ionian_get_file_info(data_root) is not None)
 
-        _, segment = create_proof_and_segment(chunk_data, data_root)
+        segment = submit_data(client, chunk_data)
         self.log.info("segment: %s", segment)
-        self.log.info("ionian_uploadSegment: %s", client.ionian_upload_segment(segment))
         wait_until(lambda: client.ionian_get_file_info(data_root)["finalized"])
 
 

@@ -4,10 +4,9 @@ import tempfile
 
 from config.node_config import GENESIS_ACCOUNT
 from test_framework.test_framework import TestFramework
+from utility.submission import create_submission, submit_data
 from utility.utils import (
     assert_equal,
-    create_proof_and_segment,
-    generate_data_root,
     wait_until,
 )
 
@@ -22,8 +21,8 @@ class RpcTest(TestFramework):
         client2 = self.nodes[1]
 
         chunk_data = b"\x00" * 256
-        data_root = generate_data_root(chunk_data)
-        self.contract.submit([256, [[data_root, 0]]])
+        submissions, data_root = create_submission(chunk_data)
+        self.contract.submit(submissions)
         wait_until(lambda: self.contract.num_submissions() == 1)
         wait_until(lambda: self.contract.num_submissions(1) == 1)
         assert_equal(self.contract.num_submissions(), self.contract.num_submissions(1))
@@ -34,18 +33,21 @@ class RpcTest(TestFramework):
         wait_until(lambda: client2.ionian_get_file_info(data_root) is not None)
         assert_equal(client2.ionian_get_file_info(data_root)["finalized"], False)
 
-        _, segment = create_proof_and_segment(chunk_data, data_root)
+        segment = submit_data(client1, chunk_data)
         self.log.info("segment: %s", segment)
-        client1.ionian_upload_segment(segment)
 
         wait_until(lambda: client1.ionian_get_file_info(data_root)["finalized"])
-        assert_equal(client1.ionian_download_segment(data_root, 0, 1), segment["data"])
+        assert_equal(
+            client1.ionian_download_segment(data_root, 0, 1), segment[0]["data"]
+        )
 
         client2.admin_start_sync_file(0)
         wait_until(lambda: client2.sycn_status_is_completed_or_unknown(0))
 
         wait_until(lambda: client2.ionian_get_file_info(data_root)["finalized"])
-        assert_equal(client2.ionian_download_segment(data_root, 0, 1), segment["data"])
+        assert_equal(
+            client2.ionian_download_segment(data_root, 0, 1), segment[0]["data"]
+        )
 
         self.__test_upload_file_with_cli(client1)
 

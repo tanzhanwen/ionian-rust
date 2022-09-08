@@ -27,7 +27,10 @@ class IonianNode(TestNode):
             if index == 0:
                 libp2p_nodes = []
             else:
-                libp2p_nodes = [f"/ip4/127.0.0.1/tcp/{p2p_port(0)}"]
+                libp2p_nodes = []
+                for i in range(index):
+                    libp2p_nodes.append(f"/ip4/127.0.0.1/tcp/{p2p_port(i)}")
+
         indexed_config = {
             "network_libp2p_port": p2p_port(index),
             "rpc_listen_address": f"127.0.0.1:{rpc_port(index)}",
