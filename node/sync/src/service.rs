@@ -1450,7 +1450,8 @@ mod tests {
 
         let (network_send, _) = mpsc::unbounded_channel::<NetworkMessage>();
 
-        let sync_send = SyncService::spawn(
+        let sync_send = SyncService::spawn_with_config(
+            Config::default().disable_auto_sync(),
             runtime.task_executor.clone(),
             network_send,
             store.clone(),
