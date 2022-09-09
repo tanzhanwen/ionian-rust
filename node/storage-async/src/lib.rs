@@ -43,6 +43,7 @@ impl Store {
     delegate!(fn get_chunks_with_proof_by_tx_and_index_range(tx_seq: u64, index_start: usize, index_end: usize) -> Result<Option<ChunkArrayWithProof>>);
     delegate!(fn get_tx_by_seq_number(seq: u64) -> Result<Option<Transaction>>);
     delegate!(fn put_chunks(tx_seq: u64, chunks: ChunkArray) -> Result<()>);
+    delegate!(fn get_chunk_by_flow_index(index: u64, length: u64) -> Result<Option<ChunkArray>>);
     delegate!(fn finalize_tx(tx_seq: u64) -> Result<()>);
 
     pub async fn get_tx_seq_by_data_root(&self, data_root: &DataRoot) -> Result<Option<u64>> {

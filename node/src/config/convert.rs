@@ -1,7 +1,9 @@
 #![allow(clippy::field_reassign_with_default)]
 
 use crate::IonianConfig;
+use ethereum_types::H256;
 use log_entry_sync::{ContractAddress, LogSyncConfig};
+use miner::MinerConfig;
 use network::NetworkConfig;
 use rpc::RPCConfig;
 use storage::StorageConfig;
@@ -74,6 +76,28 @@ impl IonianConfig {
             self.blockchain_rpc_endpoint.clone(),
             contract_address,
             self.log_sync_start_block_number,
+        ))
+    }
+
+    pub fn mine_config(&self) -> Result<MinerConfig, String> {
+        let flow_address = self
+            .log_contract_address
+            .parse::<ContractAddress>()
+            .map_err(|e| format!("Unable to parse log_contract_address: {:?}", e))?;
+        let mine_address = self
+            .mine_contract_address
+            .parse::<ContractAddress>()
+            .map_err(|e| format!("Unable to parse mine_address: {:?}", e))?;
+
+        let miner_id = self
+            .miner_id
+            .parse::<H256>()
+            .map_err(|e| format!("Unable to parse miner_id: {:?}", e))?;
+        Ok(MinerConfig::new(
+            miner_id,
+            self.blockchain_rpc_endpoint.clone(),
+            mine_address,
+            flow_address,
         ))
     }
 

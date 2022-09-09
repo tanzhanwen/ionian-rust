@@ -27,6 +27,7 @@ class BSCNode(BlockchainNode):
         updated_config,
         contract_path,
         token_contract_path,
+        mine_contract_path,
         log,
         rpc_timeout=10,
     ):
@@ -67,6 +68,7 @@ class BSCNode(BlockchainNode):
             local_conf,
             contract_path,
             token_contract_path,
+            mine_contract_path,
             log,
             BlockChainNodeType.BSC,
             rpc_timeout,

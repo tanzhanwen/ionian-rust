@@ -10,6 +10,8 @@ from enum import Enum, unique
 from config.node_config import (
     GENESIS_PRIV_KEY,
     TX_PARAMS,
+    MINER_ID,
+    NO_MERKLE_PROOF_FLAG, NO_SEAL_FLAG
 )
 from utility.simple_rpc_proxy import SimpleRpcProxy
 from utility.utils import (
@@ -154,7 +156,8 @@ class TestNode:
                 self.log.info("Process is still running")
             else:
                 self.log.info(
-                    "Process has terminated with code {}".format(self.return_code)
+                    "Process has terminated with code {}".format(
+                        self.return_code)
                 )
 
             raise AssertionError(
@@ -203,12 +206,14 @@ class BlockchainNode(TestNode):
         local_conf,
         contract_path,
         token_contract_path,
+        mine_contract_path,
         log,
         blockchain_node_type,
         rpc_timeout=10,
     ):
         self.contract_path = contract_path
         self.token_contract_path = token_contract_path
+        self.mine_contract_path = mine_contract_path
 
         self.blockchain_node_type = blockchain_node_type
 
@@ -227,37 +232,53 @@ class BlockchainNode(TestNode):
         self._wait_for_rpc_connection(lambda rpc: rpc.eth_syncing() is False)
 
     def wait_for_start_mining(self):
-        self._wait_for_rpc_connection(lambda rpc: int(rpc.eth_blockNumber(), 16) > 0)
+        self._wait_for_rpc_connection(
+            lambda rpc: int(rpc.eth_blockNumber(), 16) > 0)
 
     def setup_contract(self):
         w3 = Web3(HTTPProvider(self.rpc_url))
-        contract_interface = json.load(open(self.contract_path, "r"))
-        contract = w3.eth.contract(
-            abi=contract_interface["abi"],
-            bytecode=contract_interface["bytecode"],
-        )
-        token_contract_interface = json.load(open(self.token_contract_path, "r"))
-        token_contract = w3.eth.contract(
-            abi=token_contract_interface["abi"],
-            bytecode=token_contract_interface["bytecode"],
-        )
-        account = w3.eth.account.from_key(GENESIS_PRIV_KEY)
-        w3.middleware_onion.add(construct_sign_and_send_raw_middleware(account))
 
-        tx_hash = token_contract.constructor().transact(TX_PARAMS)
-        tx_receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
-        token_contract = token_contract(tx_receipt.contractAddress)
-        tx_hash = contract.constructor(tx_receipt.contractAddress).transact(TX_PARAMS)
-        flow_contract_hash = tx_hash
-        tx_receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
-        contract = w3.eth.contract(
-            address=tx_receipt.contractAddress, abi=contract_interface["abi"]
-        )
+        account = w3.eth.account.from_key(GENESIS_PRIV_KEY)
+        w3.middleware_onion.add(
+            construct_sign_and_send_raw_middleware(account))
+
+        def deploy_contract(path, args=None):
+            if args is None:
+                args = []
+            contract_interface = json.load(open(path, "r"))
+            contract = w3.eth.contract(
+                abi=contract_interface["abi"],
+                bytecode=contract_interface["bytecode"],
+            )
+            tx_hash = contract.constructor(*args).transact(TX_PARAMS)
+            tx_receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+            contract = w3.eth.contract(
+                address=tx_receipt.contractAddress,
+                abi=contract_interface["abi"],
+            )
+            return contract, tx_hash
+
+        self.log.debug("Start deploy contracts")
+        token_contract, _ = deploy_contract(self.token_contract_path)
+        self.log.debug("ERC20 deployed")
+        flow_contract, flow_contract_hash = deploy_contract(
+            self.contract_path, [token_contract.address])
+        self.log.debug("Flow deployed")
+        mine_contract, _ = deploy_contract(self.mine_contract_path, [
+                                           flow_contract.address, NO_SEAL_FLAG | NO_MERKLE_PROOF_FLAG])
+        self.log.debug("Mine deployed")
+        self.log.info("All contracts deployed")
+
         tx_hash = token_contract.functions.approve(
-            tx_receipt.contractAddress, int(1e9)
+            flow_contract.address, int(1e9)
         ).transact(TX_PARAMS)
         w3.eth.wait_for_transaction_receipt(tx_hash)
-        return contract, flow_contract_hash
+
+        tx_hash = mine_contract.functions.setMiner(
+            MINER_ID).transact(TX_PARAMS)
+        w3.eth.wait_for_transaction_receipt(tx_hash)
+
+        return flow_contract, flow_contract_hash, mine_contract
 
     def get_contract(self, contract_address):
         w3 = Web3(HTTPProvider(self.rpc_url))

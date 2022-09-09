@@ -15,6 +15,7 @@ async fn start_node(context: RuntimeContext, config: IonianConfig) -> Result<Cli
     let storage_config = config.storage_config()?;
     let rpc_config = config.rpc_config()?;
     let log_sync_config = config.log_sync_config()?;
+    let miner_config = config.mine_config()?;
 
     ClientBuilder::new()
         .with_runtime_context(context)
@@ -23,7 +24,8 @@ async fn start_node(context: RuntimeContext, config: IonianConfig) -> Result<Cli
         .with_network(&network_config)
         .await?
         .with_sync()?
-        .with_miner()?
+        .with_miner(miner_config)
+        .await?
         .with_router()?
         .with_rpc(rpc_config, config.chunk_pool_config())
         .await?

@@ -2,6 +2,7 @@ import os
 
 from config.node_config import IONIAN_CONFIG
 from test_framework.blockchain_node import NodeType, TestNode
+from config.node_config import MINER_ID
 from utility.utils import (
     initialize_config,
     p2p_port,
@@ -18,6 +19,7 @@ class IonianNode(TestNode):
         binary,
         updated_config,
         log_contract_address,
+        mine_contract_address,
         log,
         rpc_timeout=10,
         libp2p_nodes=None,
@@ -36,6 +38,8 @@ class IonianNode(TestNode):
             "rpc_listen_address": f"127.0.0.1:{rpc_port(index)}",
             "network_libp2p_nodes": libp2p_nodes,
             "log_contract_address": log_contract_address,
+            "mine_contract_address": mine_contract_address,
+            "miner_id": MINER_ID,
             "blockchain_rpc_endpoint": f"http://127.0.0.1:{blockchain_rpc_port(0)}",
         }
         # Set configs for this specific node.

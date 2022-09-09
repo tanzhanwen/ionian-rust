@@ -57,6 +57,7 @@ class TestFramework:
                     updated_config,
                     self.contract_path,
                     self.token_contract_path,
+                    self.mine_contract_path,
                     self.log,
                     60,
                 )
@@ -100,8 +101,9 @@ class TestFramework:
             for node in self.blockchain_nodes:
                 node.wait_for_start_mining()
 
-        contract, tx_hash = self.blockchain_nodes[0].setup_contract()
+        contract, tx_hash, mine_contract = self.blockchain_nodes[0].setup_contract()
         self.contract = ContractProxy(contract, self.blockchain_nodes)
+        self.mine_contract = ContractProxy(mine_contract, self.blockchain_nodes)
 
         for node in self.blockchain_nodes[1:]:
             node.wait_for_transaction(tx_hash)
@@ -122,6 +124,7 @@ class TestFramework:
                 self.ionian_binary,
                 updated_config,
                 self.contract.address(),
+                self.mine_contract.address(),
                 self.log,
             )
             self.nodes.append(node)
@@ -202,6 +205,16 @@ class TestFramework:
             default=os.path.join(
                 __file_path__,
                 "../config/MockToken.json",
+            ),
+            type=str,
+        )
+
+        parser.add_argument(
+            "--mine-contract-path",
+            dest="mine_contract",
+            default=os.path.join(
+                __file_path__,
+                "../../ionian-contracts/artifacts/contracts/test/IonianMineTest.sol/IonianMineTest.json",
             ),
             type=str,
         )
@@ -366,12 +379,16 @@ class TestFramework:
         self.cli_binary = self.options.cli
         self.contract_path = self.options.contract
         self.token_contract_path = self.options.token_contract
+        self.mine_contract_path = self.options.mine_contract
 
         assert os.path.exists(self.contract_path), (
             "%s should be exist" % self.contract_path
         )
         assert os.path.exists(self.token_contract_path), (
             "%s should be exist" % self.token_contract_path
+        )
+        assert os.path.exists(self.mine_contract_path), (
+            "%s should be exist" % self.mine_contract_path
         )
 
         if self.options.random_seed is not None:

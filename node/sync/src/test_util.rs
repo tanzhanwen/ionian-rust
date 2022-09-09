@@ -29,7 +29,7 @@ pub mod tests {
     ) {
         let config = LogConfig::default();
         let mut store = LogManager::memorydb(config.clone()).unwrap();
-        let mut peer_store = LogManager::memorydb(config.clone()).unwrap();
+        let mut peer_store = LogManager::memorydb(config).unwrap();
 
         let mut offset = 1;
         let mut txs = vec![];
@@ -114,7 +114,7 @@ pub mod tests {
                 .unwrap()
                 .root();
             root_list.push((log2_pow2(next) + 1, submerkle_root.into()));
-            start_index = start_index + next;
+            start_index += next;
         }
         root_list
     }

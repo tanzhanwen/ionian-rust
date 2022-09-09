@@ -9,6 +9,7 @@ anyhow = { version = "=1.0.58", features = ["backtrace"] }
 clap = { version = "3.2.5", features = ["cargo"] }
 ctrlc = "3.2.2"
 error-chain = "0.12.4"
+ethereum-types = "0.13"
 exit-future = "0.2.0"
 futures = "0.3.21"
 file_location_cache = { path = "file_location_cache" }

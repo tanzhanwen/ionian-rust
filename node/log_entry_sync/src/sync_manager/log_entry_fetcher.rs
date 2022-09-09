@@ -40,6 +40,7 @@ impl LogEntryFetcher {
         let provider = self.provider.clone();
         let (recover_tx, recover_rx) = tokio::sync::mpsc::unbounded_channel();
         let contract = IonianFlow::new(self.contract_address, provider.clone());
+
         executor.spawn(
             async move {
                 let mut progress = start_block_number;

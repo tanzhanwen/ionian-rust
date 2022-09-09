@@ -2,7 +2,7 @@ use super::{Client, RuntimeContext};
 use chunk_pool::Config as ChunkPoolConfig;
 use file_location_cache::FileLocationCache;
 use log_entry_sync::{LogSyncConfig, LogSyncManager};
-use miner::{MinerMessage, MinerService};
+use miner::{MinerConfig, MinerMessage, MinerService};
 use network::{
     self, Keypair, NetworkConfig, NetworkGlobals, NetworkMessage, RequestId,
     Service as LibP2PService,
@@ -14,7 +14,7 @@ use storage::log_store::log_manager::LogConfig;
 use storage::log_store::Store;
 use storage::{LogManager, StorageConfig};
 use sync::{SyncSender, SyncService};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock};
 
 macro_rules! require {
     ($component:expr, $self:ident, $e:ident) => {
@@ -42,7 +42,7 @@ struct SyncComponents {
 }
 
 struct MinerComponents {
-    send: mpsc::UnboundedSender<MinerMessage>,
+    send: broadcast::Sender<MinerMessage>,
 }
 
 /// Builds a `Client` instance.
@@ -157,11 +157,12 @@ impl ClientBuilder {
         Ok(self)
     }
 
-    pub fn with_miner(mut self) -> Result<Self, String> {
+    pub async fn with_miner(mut self, config: MinerConfig) -> Result<Self, String> {
         let executor = require!("miner", self, runtime_context).clone().executor;
         let network_send = require!("miner", self, network).send.clone();
+        let loader = Arc::new(self.store.as_ref().unwrap().clone());
 
-        let send = MinerService::spawn(executor, network_send);
+        let send = MinerService::spawn(executor, network_send, config, loader).await?;
         self.miner = Some(MinerComponents { send });
 
         Ok(self)

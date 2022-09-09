@@ -158,7 +158,7 @@ fn tx_subtree_root_list(data: &[u8]) -> Vec<(usize, DataRoot)> {
             .unwrap()
             .root();
         root_list.push((log2_pow2(next) + 1, submerkle_root.into()));
-        start_index = start_index + next;
+        start_index += next;
     }
     root_list
 }
@@ -174,8 +174,8 @@ fn next_subtree_size(tree_size: usize) -> usize {
 
 fn create_store() -> LogManager {
     let config = LogConfig::default();
-    let store = LogManager::memorydb(config).unwrap();
-    store
+
+    LogManager::memorydb(config).unwrap()
 }
 
 fn put_tx(store: &mut LogManager, chunk_count: usize, seq: u64, start_entry_index: u64) {

@@ -17,7 +17,7 @@ use storage::log_store::Store as LogStore;
 use storage_async::Store;
 use sync::{SyncMessage, SyncSender};
 use task_executor::ShutdownReason;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::time::interval;
 
 pub fn peer_id_to_public_key(peer_id: &PeerId) -> Result<PublicKey, String> {
@@ -67,7 +67,7 @@ pub struct RouterService {
 
     /// A channel to the miner service.
     #[allow(dead_code)]
-    miner_send: mpsc::UnboundedSender<MinerMessage>,
+    miner_send: broadcast::Sender<MinerMessage>,
 
     /// Log and transaction storage.
     store: Store,
@@ -91,7 +91,7 @@ impl RouterService {
         network_recv: mpsc::UnboundedReceiver<NetworkMessage>,
         network_send: mpsc::UnboundedSender<NetworkMessage>,
         sync_send: SyncSender,
-        miner_send: mpsc::UnboundedSender<MinerMessage>,
+        miner_send: broadcast::Sender<MinerMessage>,
         store: Arc<RwLock<dyn LogStore>>,
         file_location_cache: Arc<FileLocationCache>,
         local_keypair: Keypair,

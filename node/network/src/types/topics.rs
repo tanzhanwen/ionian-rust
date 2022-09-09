@@ -134,7 +134,8 @@ mod tests {
         let mut topics = Vec::new();
 
         for encoding in [GossipEncoding::SSZSnappy].iter() {
-            for kind in [Example].iter() {
+            {
+                let kind = &Example;
                 topics.push(GossipTopic::new(kind.clone(), encoding.clone()).into());
             }
         }

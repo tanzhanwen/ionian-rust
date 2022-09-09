@@ -271,7 +271,7 @@ mod tests {
             .since = Instant::now() - PEER_DISCONNECT_TIMEOUT;
 
         let peer_id_disconnected = identity::Keypair::generate_ed25519().public().to_peer_id();
-        sync_peers.add_new_peer(peer_id_disconnected, addr.clone());
+        sync_peers.add_new_peer(peer_id_disconnected, addr);
         sync_peers.update_state_force(&peer_id_disconnected, PeerState::Disconnected);
 
         assert_eq!(sync_peers.peer_state(&peer_id), Some(PeerState::Found));

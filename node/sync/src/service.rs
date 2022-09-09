@@ -678,7 +678,7 @@ mod tests {
         let request = GetChunksRequest {
             tx_seq: 0,
             index_start: 0,
-            index_end: 0 as u64,
+            index_end: 0_u64,
         };
 
         sync_send
@@ -1279,7 +1279,7 @@ mod tests {
             Config::default().disable_auto_sync(),
             runtime.task_executor.clone(),
             network_send,
-            store.clone(),
+            store,
             file_location_cache,
         );
 
@@ -1419,7 +1419,7 @@ mod tests {
             Config::default().disable_auto_sync(),
             runtime.task_executor.clone(),
             network_send,
-            peer_store.clone(),
+            peer_store,
             file_location_cache,
         );
 

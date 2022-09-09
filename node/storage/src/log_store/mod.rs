@@ -69,6 +69,9 @@ pub trait LogStoreChunkRead {
     ) -> Result<Option<ChunkArray>>;
 
     fn get_chunk_index_list(&self, tx_seq: u64) -> Result<Vec<usize>>;
+
+    /// Accessing chunks by absolute flow index
+    fn get_chunk_by_flow_index(&self, index: u64, length: u64) -> Result<Option<ChunkArray>>;
 }
 
 pub trait LogStoreWrite: LogStoreChunkWrite {

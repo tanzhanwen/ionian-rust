@@ -1,63 +1,54 @@
-use crate::MinerNetworkContext;
+use crate::submitter::Submitter;
+use crate::{
+    config::MinerConfig, mine::PoraService, watcher::MineContextWatcher, CustomMineRange,
+    PoraLoader,
+};
 use network::NetworkMessage;
+use std::sync::Arc;
+use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 
-const HEARTBEAT_INTERVAL_SEC: u64 = 10;
-
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum MinerMessage {
-    Test,
+    /// Enable / Disable Mining
+    ToggleMining(bool),
+
+    /// Change mining range
+    ChangeMiningRange(CustomMineRange),
 }
 
-pub struct MinerService {
-    /// A receiving channel sent by the message processor thread.
-    msg_recv: mpsc::UnboundedReceiver<MinerMessage>,
-
-    /// A network context to contact the network service.
-    #[allow(dead_code)]
-    network: MinerNetworkContext,
-
-    /// Heartbeat interval for periodically checking on-chain data.
-    heartbeat: tokio::time::Interval,
-}
+pub struct MinerService;
 
 impl MinerService {
-    pub fn spawn(
+    pub async fn spawn(
         executor: task_executor::TaskExecutor,
-        network_send: mpsc::UnboundedSender<NetworkMessage>,
-    ) -> mpsc::UnboundedSender<MinerMessage> {
-        let (miner_send, miner_recv) = mpsc::unbounded_channel::<MinerMessage>();
+        _network_send: mpsc::UnboundedSender<NetworkMessage>,
+        config: MinerConfig,
+        loader: Arc<dyn PoraLoader>,
+    ) -> Result<broadcast::Sender<MinerMessage>, String> {
+        let provider = Arc::new(config.make_provider()?);
 
-        let heartbeat =
-            tokio::time::interval(tokio::time::Duration::from_secs(HEARTBEAT_INTERVAL_SEC));
+        let (msg_send, msg_recv) = broadcast::channel(1024);
 
-        let mut miner = MinerService {
-            msg_recv: miner_recv,
-            network: MinerNetworkContext::new(network_send),
-            heartbeat,
-        };
+        let mine_context_receiver = MineContextWatcher::spawn(
+            executor.clone(),
+            msg_recv.resubscribe(),
+            provider.clone(),
+            &config,
+        );
+
+        let mine_answer_receiver = PoraService::spawn(
+            executor.clone(),
+            msg_recv.resubscribe(),
+            mine_context_receiver,
+            loader,
+            &config,
+        );
+
+        Submitter::spawn(executor, mine_answer_receiver, provider, &config);
 
         debug!("Starting miner service");
-        executor.spawn(async move { Box::pin(miner.main()).await }, "miner");
 
-        miner_send
-    }
-
-    async fn main(&mut self) {
-        loop {
-            tokio::select! {
-                // handle a message from the network
-                maybe_msg = self.msg_recv.recv() => {
-                    if let Some(msg) = maybe_msg {
-                        warn!("Miner received message {:?}", msg);
-                    }
-                }
-
-                // periodic checks
-                _ = self.heartbeat.tick() => {
-                    // EMPTY
-                }
-            }
-        }
+        Ok(msg_send)
     }
 }

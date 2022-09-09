@@ -758,7 +758,7 @@ mod tests {
         let (mut controller, _) = create_default_controller(task_executor, Some(new_peer_id));
 
         let addr: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
-        controller.peers.add_new_peer(new_peer_id, addr.clone());
+        controller.peers.add_new_peer(new_peer_id, addr);
 
         controller.on_peer_connected(new_peer_id);
         assert_eq!(
@@ -784,7 +784,7 @@ mod tests {
         let (mut controller, _) = create_default_controller(task_executor, Some(new_peer_id));
 
         let addr: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
-        controller.peers.add_new_peer(new_peer_id, addr.clone());
+        controller.peers.add_new_peer(new_peer_id, addr);
 
         controller
             .peers
@@ -1391,7 +1391,7 @@ mod tests {
         let ctx = Arc::new(SyncNetworkContext::new(network_send));
 
         let config = LogConfig::default();
-        let store = Arc::new(RwLock::new(LogManager::memorydb(config.clone()).unwrap()));
+        let store = Arc::new(RwLock::new(LogManager::memorydb(config).unwrap()));
 
         let peer_id = match peer_id {
             Some(v) => v,
@@ -1407,7 +1407,7 @@ mod tests {
             num_chunks,
             ctx,
             Store::new(store, task_executor),
-            file_location_cache.clone(),
+            file_location_cache,
         );
 
         (controller, network_recv)
@@ -1438,7 +1438,7 @@ mod tests {
             num_chunks as u64,
             ctx,
             Store::new(store, task_executor),
-            file_location_cache.clone(),
+            file_location_cache,
         );
 
         (controller, network_recv)

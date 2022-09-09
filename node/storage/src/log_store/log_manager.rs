@@ -176,6 +176,17 @@ impl LogStoreChunkRead for LogManager {
     fn get_chunk_index_list(&self, _tx_seq: u64) -> crate::error::Result<Vec<usize>> {
         todo!()
     }
+
+    fn get_chunk_by_flow_index(
+        &self,
+        index: u64,
+        length: u64,
+    ) -> crate::error::Result<Option<ChunkArray>> {
+        let start_flow_index = index;
+        let end_flow_index = index + length;
+        self.flow_store
+            .get_entries(start_flow_index, end_flow_index)
+    }
 }
 
 impl LogStoreRead for LogManager {

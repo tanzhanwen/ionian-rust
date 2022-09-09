@@ -1,6 +1,6 @@
 .DS_Store
 /target
-src/config.rs
+# src/config.rs
 /.idea
 tests/**/__pycache__
 tests/utility/geth
