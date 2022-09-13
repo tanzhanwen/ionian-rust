@@ -1,6 +1,7 @@
 use crate::context::SyncNetworkContext;
 use crate::controllers::peers::{PeerState, SyncPeers};
 use file_location_cache::FileLocationCache;
+use libp2p::swarm::DialError;
 use network::{
     multiaddr::Protocol, rpc::GetChunksRequest, types::FindFile, Multiaddr, NetworkMessage,
     PeerAction, PeerId, PubsubMessage, SyncId as RequestId,
@@ -16,6 +17,7 @@ const MAX_CHUNKS_TO_REQUEST: u64 = 2 * 1024;
 const MAX_REQUEST_FAILURES: usize = 3;
 const PEER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5);
+const WAIT_OUTGOING_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SyncState {
@@ -25,6 +27,9 @@ pub enum SyncState {
     },
     FoundPeers,
     ConnectingPeers,
+    AwaitingOutgoingConnection {
+        since: Instant,
+    },
     AwaitingDownload,
     Downloading {
         peer_id: PeerId,
@@ -213,19 +218,30 @@ impl SerialSyncController {
         }
     }
 
-    pub fn on_dail_failed(&mut self, peer_id: PeerId) {
-        if let Some(true) =
-            self.peers
-                .update_state(&peer_id, PeerState::Connecting, PeerState::Disconnected)
-        {
-            info!(%self.tx_seq, %peer_id, "Failed to dail peer");
-            self.state = SyncState::Idle;
+    pub fn on_dail_failed(&mut self, peer_id: PeerId, err: &DialError) {
+        match err {
+            DialError::ConnectionLimit(_) => {
+                if let Some(true) =
+                    self.peers
+                        .update_state(&peer_id, PeerState::Connecting, PeerState::Found)
+                {
+                    info!(%self.tx_seq, %peer_id, "Failed to dail peer due to outgoing connection limitation");
+                    self.state = SyncState::AwaitingOutgoingConnection {
+                        since: Instant::now(),
+                    };
+                }
+            }
+            _ => {
+                if let Some(true) = self.peers.update_state(
+                    &peer_id,
+                    PeerState::Connecting,
+                    PeerState::Disconnected,
+                ) {
+                    info!(%self.tx_seq, %peer_id, "Failed to dail peer");
+                    self.state = SyncState::Idle;
+                }
+            }
         }
-
-        // TODO(qhz): handle different kinds of DailError.
-        //
-        // In case that outgoing connections limitation reached,
-        // could explicitly disconnect some idle peers and try again.
     }
 
     pub fn on_peer_connected(&mut self, peer_id: PeerId) {
@@ -443,6 +459,14 @@ impl SerialSyncController {
                         // peers.transition() will handle the case that peer connecting timeout
                         return;
                     }
+                }
+
+                SyncState::AwaitingOutgoingConnection { since } => {
+                    if since.elapsed() < WAIT_OUTGOING_CONNECTION_TIMEOUT {
+                        return;
+                    }
+
+                    self.state = SyncState::Idle;
                 }
 
                 SyncState::AwaitingDownload => {

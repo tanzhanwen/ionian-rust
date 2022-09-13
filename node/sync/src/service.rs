@@ -4,6 +4,7 @@ use crate::manager::SyncManager;
 use crate::Config;
 use anyhow::{bail, Result};
 use file_location_cache::FileLocationCache;
+use libp2p::swarm::DialError;
 use network::{
     rpc::GetChunksRequest, rpc::RPCResponseErrorCode, Multiaddr, NetworkMessage, PeerAction,
     PeerId, PeerRequestId, SyncId as RequestId,
@@ -26,6 +27,7 @@ pub type SyncSender = channel::Sender<SyncMessage, SyncRequest, SyncResponse>;
 pub enum SyncMessage {
     DailFailed {
         peer_id: PeerId,
+        err: DialError,
     },
     PeerConnected {
         peer_id: PeerId,
@@ -67,6 +69,8 @@ pub enum SyncResponse {
 }
 
 pub struct SyncService {
+    config: Config,
+
     /// A receiving channel sent by the message processor thread.
     msg_recv: channel::Receiver<SyncMessage, SyncRequest, SyncResponse>,
 
@@ -116,10 +120,19 @@ impl SyncService {
 
         let store = Store::new(store, executor.clone());
 
+        if !config.auto_sync_disabled {
+            let mut manager = SyncManager::new(store.clone(), sync_send.clone());
+            executor.spawn(
+                async move { Box::pin(manager.start()).await },
+                "auto_sync_file",
+            );
+        }
+
         let mut sync = SyncService {
+            config,
             msg_recv: sync_recv,
             ctx: Arc::new(SyncNetworkContext::new(network_send)),
-            store: store.clone(),
+            store,
             file_location_cache,
             controllers: Default::default(),
             heartbeat,
@@ -127,14 +140,6 @@ impl SyncService {
 
         debug!("Starting sync service");
         executor.spawn(async move { Box::pin(sync.main()).await }, "sync");
-
-        if !config.auto_sync_disabled {
-            let mut manager = SyncManager::new(store, sync_send.clone());
-            executor.spawn(
-                async move { Box::pin(manager.start()).await },
-                "auto_sync_file",
-            );
-        }
 
         sync_send
     }
@@ -160,8 +165,8 @@ impl SyncService {
         debug!("Sync received message {:?}", msg);
 
         match msg {
-            SyncMessage::DailFailed { peer_id } => {
-                self.on_dail_failed(peer_id);
+            SyncMessage::DailFailed { peer_id, err } => {
+                self.on_dail_failed(peer_id, err);
             }
             SyncMessage::PeerConnected { peer_id } => {
                 self.on_peer_connected(peer_id);
@@ -221,6 +226,18 @@ impl SyncService {
             }
 
             SyncRequest::SyncFile { tx_seq } => {
+                if !self.controllers.contains_key(&tx_seq)
+                    && self.controllers.len() >= self.config.max_sync_files
+                {
+                    let _ = sender.send(SyncResponse::SyncFile {
+                        err: format!(
+                            "max sync file limitation reached: {:?}",
+                            self.config.max_sync_files
+                        ),
+                    });
+                    return;
+                }
+
                 let err = match self.on_start_sync_file(tx_seq, None).await {
                     Ok(()) => "".into(),
                     Err(err) => err.to_string(),
@@ -231,11 +248,11 @@ impl SyncService {
         }
     }
 
-    fn on_dail_failed(&mut self, peer_id: PeerId) {
+    fn on_dail_failed(&mut self, peer_id: PeerId, err: DialError) {
         info!(%peer_id, "Dail to peer failed");
 
         for controller in self.controllers.values_mut() {
-            controller.on_dail_failed(peer_id);
+            controller.on_dail_failed(peer_id, &err);
             controller.transition();
         }
     }
@@ -490,11 +507,6 @@ impl SyncService {
         for tx_seq in completed {
             self.controllers.remove(&tx_seq);
         }
-
-        // TODO(qhz): serial controller removed, but the peers are not disconnected.
-        // If there are enough peers, the outgoing connections limitation will be reached
-        // over time. So, sync service requires to say goodbye to some peers after file sync
-        // completed. On the other hand, a few peers should be retained pub-sub messages.
     }
 }
 
@@ -537,6 +549,7 @@ mod tests {
         let heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SEC));
 
         let mut sync = SyncService {
+            config: Config::default().disable_auto_sync(),
             msg_recv: sync_recv,
             ctx: Arc::new(SyncNetworkContext::new(network_send)),
             store,
@@ -567,6 +580,7 @@ mod tests {
         let heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SEC));
 
         let mut sync = SyncService {
+            config: Config::default().disable_auto_sync(),
             msg_recv: sync_recv,
             ctx: Arc::new(SyncNetworkContext::new(network_send)),
             store,

@@ -297,7 +297,7 @@ impl RouterService {
                         Ok(()) => debug!(%address, "Dialing libp2p peer"),
                         Err(err) => {
                             info!(%address, error = ?err, "Failed to dial peer");
-                            self.send_to_sync(SyncMessage::DailFailed { peer_id });
+                            self.send_to_sync(SyncMessage::DailFailed { peer_id, err });
                         }
                     };
                 }
