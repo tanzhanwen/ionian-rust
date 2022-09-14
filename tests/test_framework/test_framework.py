@@ -13,7 +13,7 @@ import traceback
 
 from eth_utils import encode_hex
 from test_framework.bsc_node import BSCNode
-from test_framework.contract_proxy import ContractProxy
+from test_framework.contract_proxy import FlowContractProxy, MineContractProxy
 from test_framework.ionian_node import IonianNode
 from test_framework.blockchain_node import BlockChainNodeType
 
@@ -102,8 +102,8 @@ class TestFramework:
                 node.wait_for_start_mining()
 
         contract, tx_hash, mine_contract = self.blockchain_nodes[0].setup_contract()
-        self.contract = ContractProxy(contract, self.blockchain_nodes)
-        self.mine_contract = ContractProxy(mine_contract, self.blockchain_nodes)
+        self.contract = FlowContractProxy(contract, self.blockchain_nodes)
+        self.mine_contract = MineContractProxy(mine_contract, self.blockchain_nodes)
 
         for node in self.blockchain_nodes[1:]:
             node.wait_for_transaction(tx_hash)

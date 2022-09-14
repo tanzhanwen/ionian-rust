@@ -24,5 +24,7 @@ fn main() {
             .status()
             .expect(COMPILE_ERROR_MESSAGE);
         assert!(output.success(), "{}", COMPILE_ERROR_MESSAGE);
+    } else {
+        println!("cargo:rerun-if-changed=../../ionian-contracts/artifacts/");
     }
 }

@@ -39,7 +39,6 @@ class IonianNode(TestNode):
             "network_libp2p_nodes": libp2p_nodes,
             "log_contract_address": log_contract_address,
             "mine_contract_address": mine_contract_address,
-            "miner_id": MINER_ID,
             "blockchain_rpc_endpoint": f"http://127.0.0.1:{blockchain_rpc_port(0)}",
         }
         # Set configs for this specific node.

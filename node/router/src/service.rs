@@ -67,7 +67,7 @@ pub struct RouterService {
 
     /// A channel to the miner service.
     #[allow(dead_code)]
-    miner_send: broadcast::Sender<MinerMessage>,
+    miner_send: Option<broadcast::Sender<MinerMessage>>,
 
     /// Log and transaction storage.
     store: Store,
@@ -91,7 +91,7 @@ impl RouterService {
         network_recv: mpsc::UnboundedReceiver<NetworkMessage>,
         network_send: mpsc::UnboundedSender<NetworkMessage>,
         sync_send: SyncSender,
-        miner_send: broadcast::Sender<MinerMessage>,
+        miner_send: Option<broadcast::Sender<MinerMessage>>,
         store: Arc<RwLock<dyn LogStore>>,
         file_location_cache: Arc<FileLocationCache>,
         local_keypair: Keypair,

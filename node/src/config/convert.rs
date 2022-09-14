@@ -79,7 +79,7 @@ impl IonianConfig {
         ))
     }
 
-    pub fn mine_config(&self) -> Result<MinerConfig, String> {
+    pub fn mine_config(&self) -> Result<Option<MinerConfig>, String> {
         let flow_address = self
             .log_contract_address
             .parse::<ContractAddress>()
@@ -89,12 +89,27 @@ impl IonianConfig {
             .parse::<ContractAddress>()
             .map_err(|e| format!("Unable to parse mine_address: {:?}", e))?;
 
-        let miner_id = self
-            .miner_id
-            .parse::<H256>()
-            .map_err(|e| format!("Unable to parse miner_id: {:?}", e))?;
+        let miner_id = if let Some(ref miner_id) = self.miner_id {
+            Some(
+                miner_id
+                    .parse::<H256>()
+                    .map_err(|e| format!("Unable to parse miner_id: {:?}", e))?,
+            )
+        } else {
+            None
+        };
+        let miner_key = if let Some(ref miner_key) = self.miner_key {
+            Some(
+                miner_key
+                    .parse::<H256>()
+                    .map_err(|e| format!("Unable to parse miner_key: {:?}", e))?,
+            )
+        } else {
+            None
+        };
         Ok(MinerConfig::new(
             miner_id,
+            miner_key,
             self.blockchain_rpc_endpoint.clone(),
             mine_address,
             flow_address,

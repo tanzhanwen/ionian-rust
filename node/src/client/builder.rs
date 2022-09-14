@@ -2,7 +2,7 @@ use super::{Client, RuntimeContext};
 use chunk_pool::Config as ChunkPoolConfig;
 use file_location_cache::FileLocationCache;
 use log_entry_sync::{LogSyncConfig, LogSyncManager};
-use miner::{MinerConfig, MinerMessage, MinerService};
+use miner::{MineService, MinerConfig, MinerMessage};
 use network::{
     self, Keypair, NetworkConfig, NetworkGlobals, NetworkMessage, RequestId,
     Service as LibP2PService,
@@ -157,13 +157,15 @@ impl ClientBuilder {
         Ok(self)
     }
 
-    pub async fn with_miner(mut self, config: MinerConfig) -> Result<Self, String> {
-        let executor = require!("miner", self, runtime_context).clone().executor;
-        let network_send = require!("miner", self, network).send.clone();
-        let loader = Arc::new(self.store.as_ref().unwrap().clone());
+    pub async fn with_miner(mut self, config: Option<MinerConfig>) -> Result<Self, String> {
+        if let Some(config) = config {
+            let executor = require!("miner", self, runtime_context).clone().executor;
+            let network_send = require!("miner", self, network).send.clone();
+            let loader = Arc::new(self.store.as_ref().unwrap().clone());
 
-        let send = MinerService::spawn(executor, network_send, config, loader).await?;
-        self.miner = Some(MinerComponents { send });
+            let send = MineService::spawn(executor, network_send, config, loader).await?;
+            self.miner = Some(MinerComponents { send });
+        }
 
         Ok(self)
     }
@@ -172,7 +174,7 @@ impl ClientBuilder {
     pub fn with_router(mut self) -> Result<Self, String> {
         let executor = require!("router", self, runtime_context).clone().executor;
         let sync_send = require!("router", self, sync).send.clone(); // note: we can make this optional in the future
-        let miner_send = require!("router", self, miner).send.clone(); // note: we can make this optional in the future
+        let miner_send = self.miner.as_ref().map(|x| x.send.clone());
         let store = require!("router", self, store).clone();
         let file_location_cache = require!("router", self, file_location_cache).clone();
 
@@ -211,6 +213,7 @@ impl ClientBuilder {
         let executor = require!("rpc", self, runtime_context).clone().executor;
         let async_store = require!("rpc", self, async_store).clone();
         let network_send = require!("rpc", self, network).send.clone();
+        let mine_send = self.miner.as_ref().map(|x| x.send.clone());
 
         let (chunk_pool, chunk_pool_handler) =
             chunk_pool::unbounded(chunk_pool_config, async_store.clone(), network_send.clone());
@@ -223,6 +226,7 @@ impl ClientBuilder {
             log_store: async_store,
             chunk_pool,
             shutdown_sender: executor.shutdown_sender(),
+            mine_service_sender: mine_send,
         };
 
         let rpc_handle = rpc::run_server(ctx)

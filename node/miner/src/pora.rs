@@ -67,6 +67,7 @@ impl<'a> Miner<'a> {
         if !self
             .custom_mine_range
             .is_covered(self.start_position + recall_offset * SECTORS_PER_LOADING as u64)
+            .unwrap()
         {
             return None;
         }
@@ -96,6 +97,11 @@ impl<'a> Miner<'a> {
 
             let quality = self.pora(idx, &nonce, &sealed_data);
             if &quality <= self.target_quality {
+                debug!("Find a PoRA valid answer, quality: {}", quality);
+                // Undo mix data when find a valid solition
+                for (x, y) in sealed_data.iter_mut().zip(scratch_pad.iter()) {
+                    *x ^= y;
+                }
                 return Some(AnswerWithoutProof {
                     context_digest: H256::from(self.context.digest),
                     nonce,

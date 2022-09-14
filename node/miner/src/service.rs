@@ -1,8 +1,5 @@
 use crate::submitter::Submitter;
-use crate::{
-    config::MinerConfig, mine::PoraService, watcher::MineContextWatcher, CustomMineRange,
-    PoraLoader,
-};
+use crate::{config::MinerConfig, mine::PoraService, watcher::MineContextWatcher, PoraLoader};
 use network::NetworkMessage;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -14,19 +11,20 @@ pub enum MinerMessage {
     ToggleMining(bool),
 
     /// Change mining range
-    ChangeMiningRange(CustomMineRange),
+    SetStartPosition(Option<u64>),
+    SetEndPosition(Option<u64>),
 }
 
-pub struct MinerService;
+pub struct MineService;
 
-impl MinerService {
+impl MineService {
     pub async fn spawn(
         executor: task_executor::TaskExecutor,
         _network_send: mpsc::UnboundedSender<NetworkMessage>,
         config: MinerConfig,
         loader: Arc<dyn PoraLoader>,
     ) -> Result<broadcast::Sender<MinerMessage>, String> {
-        let provider = Arc::new(config.make_provider()?);
+        let provider = Arc::new(config.make_provider().await?);
 
         let (msg_send, msg_recv) = broadcast::channel(1024);
 

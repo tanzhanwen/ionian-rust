@@ -15,4 +15,4 @@ mod watcher;
 pub use config::MinerConfig;
 pub use loader::PoraLoader;
 pub use mine::CustomMineRange;
-pub use service::{MinerMessage, MinerService};
+pub use service::{MineService, MinerMessage};

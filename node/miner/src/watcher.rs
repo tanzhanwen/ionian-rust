@@ -10,15 +10,16 @@ use ethers::{
 use task_executor::TaskExecutor;
 use tokio::{
     sync::{broadcast, mpsc},
+    time::{sleep, Instant, Sleep},
     try_join,
 };
 
-use std::str::FromStr;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::thread::sleep;
 use std::time::Duration;
+use std::{ops::DerefMut, str::FromStr};
 
-use crate::{MinerConfig, MinerMessage};
+use crate::{config::MineServiceMiddleware, MinerConfig, MinerMessage};
 
 pub type MineContextMessage = Option<(MineContext, U256)>;
 
@@ -27,21 +28,22 @@ lazy_static! {
         H256::from_str("c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470").unwrap();
 }
 
-pub struct MineContextWatcher<P: JsonRpcClient + 'static> {
-    provider: Arc<Provider<P>>,
-    flow_contract: IonianFlow<Provider<P>>,
-    mine_contract: IonianMine<Provider<P>>,
+pub struct MineContextWatcher {
+    provider: Arc<MineServiceMiddleware>,
+    flow_contract: IonianFlow<MineServiceMiddleware>,
+    mine_contract: IonianMine<MineServiceMiddleware>,
 
     mine_context_sender: mpsc::UnboundedSender<MineContextMessage>,
+    last_report: MineContextMessage,
 
     msg_recv: broadcast::Receiver<MinerMessage>,
 }
 
-impl<P: JsonRpcClient + 'static> MineContextWatcher<P> {
+impl MineContextWatcher {
     pub fn spawn(
         executor: TaskExecutor,
         msg_recv: broadcast::Receiver<MinerMessage>,
-        provider: Arc<Provider<P>>,
+        provider: Arc<MineServiceMiddleware>,
         config: &MinerConfig,
     ) -> mpsc::UnboundedReceiver<MineContextMessage> {
         let provider = provider;
@@ -57,6 +59,7 @@ impl<P: JsonRpcClient + 'static> MineContextWatcher<P> {
             mine_contract,
             mine_context_sender,
             msg_recv,
+            last_report: None,
         };
         executor.spawn(
             async move { Box::pin(watcher.start()).await },
@@ -68,6 +71,9 @@ impl<P: JsonRpcClient + 'static> MineContextWatcher<P> {
     async fn start(mut self) {
         let mut mining_enabled = true;
         let mut channel_opened = true;
+
+        let mut mining_throttle = sleep(Duration::from_secs(0));
+        tokio::pin!(mining_throttle);
 
         loop {
             tokio::select! {
@@ -85,8 +91,12 @@ impl<P: JsonRpcClient + 'static> MineContextWatcher<P> {
                     }
                 }
 
-                _ = async {}, if mining_enabled => {
-                    if let Err(err) = self.query_recent_context().await{
+                () = &mut mining_throttle, if !mining_throttle.is_elapsed() => {
+                }
+
+                _ = async {}, if mining_enabled && mining_throttle.is_elapsed() => {
+                    mining_throttle.as_mut().reset(Instant::now() + Duration::from_secs(1));
+                    if let Err(err) = self.query_recent_context().await {
                         warn!(err);
                     }
                 }
@@ -94,7 +104,7 @@ impl<P: JsonRpcClient + 'static> MineContextWatcher<P> {
         }
     }
 
-    async fn query_recent_context(&self) -> Result<(), String> {
+    async fn query_recent_context(&mut self) -> Result<(), String> {
         // let mut watcher = self
         //     .provider
         //     .watch_blocks()
@@ -109,15 +119,19 @@ impl<P: JsonRpcClient + 'static> MineContextWatcher<P> {
         let (context, epoch, quality) =
             try_join!(context_call.call(), epoch_call.call(), quality_call.call())
                 .map_err(|e| format!("Failed to query mining context: {:?}", e))?;
-        if context.epoch > epoch && context.digest != EMPTY_HASH.0 {
-            self.mine_context_sender
-                .send(Some((context, quality)))
-                .map_err(|e| format!("Failed to send out the most recent mine context: {:?}", e))?;
+        let report = if context.epoch > epoch && context.digest != EMPTY_HASH.0 {
+            Some((context, quality))
         } else {
+            None
+        };
+
+        if report != self.last_report {
             self.mine_context_sender
-                .send(None)
+                .send(report.clone())
                 .map_err(|e| format!("Failed to send out the most recent mine context: {:?}", e))?;
         }
+        self.last_report = report;
+
         Ok(())
     }
 }

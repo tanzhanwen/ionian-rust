@@ -9,5 +9,5 @@ abigen!(
 
 abigen!(
     IonianMine,
-    "../../ionian-contracts/artifacts/contracts/miner/IonianMine.sol/IonianMine.json"
+    "../../ionian-contracts/artifacts/contracts/test/IonianMineTest.sol/IonianMineTest.json"
 );

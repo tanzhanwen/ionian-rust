@@ -39,7 +39,8 @@ build_config! {
 
     // mine
     (mine_contract_address, (String), "".to_string())
-    (miner_id, (String), "".to_string())
+    (miner_id, (Option<String>), None)
+    (miner_key, (Option<String>), None)
 
 }
 

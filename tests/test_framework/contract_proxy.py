@@ -1,3 +1,4 @@
+from gettext import npgettext
 from config.node_config import TX_PARAMS
 from utility.utils import assert_equal
 
@@ -15,9 +16,23 @@ class ContractProxy:
             else self.blockchain_nodes[node_idx].get_contract(self.contract_address)
         )
 
+    def _call(self, fn_name, node_idx, **args):
+        assert node_idx < len(self.blockchain_nodes)
+
+        contract = self._get_contract(node_idx)
+        return getattr(contract.functions, fn_name)(**args).call()
+
+    def _send(self, fn_name, node_idx, **args):
+        assert node_idx < len(self.blockchain_nodes)
+
+        contract = self._get_contract(node_idx)
+        return getattr(contract.functions, fn_name)(**args).transact(TX_PARAMS)
+
     def address(self):
         return self.contract_address
 
+
+class FlowContractProxy(ContractProxy):
     def submit(self, submission_nodes, node_idx=0):
         assert node_idx < len(self.blockchain_nodes)
 
@@ -27,7 +42,17 @@ class ContractProxy:
         assert_equal(receipt["status"], 1)
 
     def num_submissions(self, node_idx=0):
-        assert node_idx < len(self.blockchain_nodes)
+        return self._call("numSubmissions", node_idx)
 
-        contract = self._get_contract(node_idx)
-        return contract.functions.numSubmissions().call()
+    def first_block(self, node_idx=0):
+        return self._call("firstBlock", node_idx)
+
+    def epoch(self, node_idx=0):
+        return self._call("epoch", node_idx)
+
+class MineContractProxy(ContractProxy):
+    def last_mined_epoch(self, node_idx=0):
+        return self._call("lastMinedEpoch", node_idx)
+
+    def set_quality(self, quality, node_idx=0):
+        return self._send("setQuality", node_idx, _targetQuality=quality)

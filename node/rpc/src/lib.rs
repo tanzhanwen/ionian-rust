@@ -1,16 +1,21 @@
 #[macro_use]
 extern crate tracing;
 
+extern crate miner as ionian_miner;
+
 mod admin;
 mod config;
 mod error;
 mod ionian;
+mod miner;
 mod types;
 
+use crate::miner::RpcServer as MinerRpcServer;
 use admin::RpcServer as AdminRpcServer;
 use chunk_pool::MemoryChunkPool;
 use futures::channel::mpsc::Sender;
 use ionian::RpcServer as IonianRpcServer;
+use ionian_miner::MinerMessage;
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::http_server::{HttpServerBuilder, HttpServerHandle};
 use network::NetworkGlobals;
@@ -20,6 +25,7 @@ use std::sync::Arc;
 use storage_async::Store;
 use sync::{SyncRequest, SyncResponse, SyncSender};
 use task_executor::ShutdownReason;
+use tokio::sync::broadcast;
 use tokio::sync::mpsc::UnboundedSender;
 
 pub use config::Config as RPCConfig;
@@ -36,6 +42,7 @@ pub struct Context {
     pub chunk_pool: Arc<MemoryChunkPool>,
     pub log_store: Store,
     pub shutdown_sender: Sender<ShutdownReason>,
+    pub mine_service_sender: Option<broadcast::Sender<MinerMessage>>,
 }
 
 impl Context {
@@ -59,8 +66,13 @@ pub async fn run_server(ctx: Context) -> Result<HttpServerHandle, Box<dyn Error>
         .await?;
 
     let mut ionian = (ionian::RpcServerImpl { ctx: ctx.clone() }).into_rpc();
-    let admin = (admin::RpcServerImpl { ctx }).into_rpc();
+    let admin = (admin::RpcServerImpl { ctx: ctx.clone() }).into_rpc();
     ionian.merge(admin)?;
+
+    if ctx.mine_service_sender.is_some() {
+        let mine = (miner::RpcServerImpl { ctx }).into_rpc();
+        ionian.merge(mine)?;
+    }
 
     let addr = server.local_addr()?;
     let handle = server.start(ionian)?;
