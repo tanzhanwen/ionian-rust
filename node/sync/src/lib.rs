@@ -7,6 +7,7 @@ mod manager;
 mod service;
 mod test_util;
 
+pub use controllers::FileSyncInfo;
 pub use service::{SyncMessage, SyncRequest, SyncResponse, SyncSender, SyncService};
 
 pub struct Config {

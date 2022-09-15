@@ -1,5 +1,5 @@
 use crate::context::SyncNetworkContext;
-use crate::controllers::{SerialSyncController, SyncState};
+use crate::controllers::{FileSyncInfo, SerialSyncController, SyncState};
 use crate::manager::SyncManager;
 use crate::Config;
 use anyhow::{bail, Result};
@@ -60,12 +60,14 @@ pub enum SyncMessage {
 pub enum SyncRequest {
     SyncStatus { tx_seq: u64 },
     SyncFile { tx_seq: u64 },
+    FileSyncInfo { tx_seq: Option<u64> },
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum SyncResponse {
     SyncStatus { status: String },
     SyncFile { err: String },
+    FileSyncInfo { result: HashMap<u64, FileSyncInfo> },
 }
 
 pub struct SyncService {
@@ -244,6 +246,25 @@ impl SyncService {
                 };
 
                 let _ = sender.send(SyncResponse::SyncFile { err });
+            }
+
+            SyncRequest::FileSyncInfo { tx_seq } => {
+                let mut result = HashMap::default();
+
+                match tx_seq {
+                    Some(seq) => {
+                        if let Some(controller) = self.controllers.get(&seq) {
+                            result.insert(seq, controller.get_sync_info());
+                        }
+                    }
+                    None => {
+                        for (seq, controller) in self.controllers.iter() {
+                            result.insert(*seq, controller.get_sync_info());
+                        }
+                    }
+                }
+
+                let _ = sender.send(SyncResponse::FileSyncInfo { result });
             }
         }
     }
@@ -1068,15 +1089,13 @@ mod tests {
             false
         );
 
-        assert_ne!(
+        assert!(!matches!(
             sync_send
                 .request(SyncRequest::SyncStatus { tx_seq })
                 .await
                 .unwrap(),
-            SyncResponse::SyncStatus {
-                status: "Completed".to_string()
-            }
-        );
+            SyncResponse::SyncStatus { status } if status == "Completed".to_string()
+        ));
 
         receive_chunk_request(
             &mut network_recv,
@@ -1093,14 +1112,12 @@ mod tests {
 
         // test heartbeat
         let deadline = Instant::now() + Duration::from_secs(HEARTBEAT_INTERVAL_SEC + 1);
-        while sync_send
+        while !matches!(sync_send
             .request(SyncRequest::SyncStatus { tx_seq })
             .await
-            .unwrap()
-            != (SyncResponse::SyncStatus {
-                status: "unknown".to_string(),
-            })
-        {
+            .unwrap(),
+            SyncResponse::SyncStatus {status} if status == "unknown".to_string()
+        ) {
             if Instant::now() >= deadline {
                 panic!("Failed to wait heartbeat");
             }
@@ -1168,15 +1185,13 @@ mod tests {
         )
         .await;
 
-        assert_ne!(
+        assert!(!matches!(
             sync_send
                 .request(SyncRequest::SyncStatus { tx_seq })
                 .await
                 .unwrap(),
-            SyncResponse::SyncStatus {
-                status: "Completed".to_string()
-            }
-        );
+            SyncResponse::SyncStatus { status } if status == "Completed".to_string()
+        ));
 
         // next batch
         receive_chunk_request(
@@ -1472,15 +1487,13 @@ mod tests {
             file_location_cache,
         );
 
-        assert_eq!(
+        assert!(matches!(
             sync_send
                 .request(SyncRequest::SyncStatus { tx_seq: 0 })
                 .await
                 .unwrap(),
-            SyncResponse::SyncStatus {
-                status: "unknown".to_string()
-            }
-        );
+            SyncResponse::SyncStatus { status } if status == "unknown".to_string()
+        ));
     }
 
     async fn receive_dial(
@@ -1539,15 +1552,12 @@ mod tests {
             false
         );
 
-        assert_ne!(
+        assert!(!matches!(
             sync_send
                 .request(SyncRequest::SyncStatus { tx_seq })
                 .await
                 .unwrap(),
-            SyncResponse::SyncStatus {
-                status: "Completed".to_string()
-            }
-        );
+            SyncResponse::SyncStatus { status } if status == "Completed".to_string()));
 
         receive_chunk_request(
             &mut network_recv,

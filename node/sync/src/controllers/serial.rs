@@ -1,5 +1,6 @@
 use crate::context::SyncNetworkContext;
 use crate::controllers::peers::{PeerState, SyncPeers};
+use crate::controllers::FileSyncInfo;
 use file_location_cache::FileLocationCache;
 use libp2p::swarm::DialError;
 use network::{
@@ -47,6 +48,8 @@ pub struct SerialSyncController {
     /// The transaction sequence number.
     tx_seq: u64,
 
+    since: Instant,
+
     #[allow(unused)]
     /// The transaction data root.
     data_root: DataRoot,
@@ -87,6 +90,7 @@ impl SerialSyncController {
     ) -> Self {
         SerialSyncController {
             tx_seq,
+            since: Instant::now(),
             data_root,
             num_chunks,
             next_chunk: 0,
@@ -96,6 +100,16 @@ impl SerialSyncController {
             ctx,
             store,
             file_location_cache,
+        }
+    }
+
+    pub fn get_sync_info(&self) -> FileSyncInfo {
+        FileSyncInfo {
+            elapsed_secs: self.since.elapsed().as_secs(),
+            peers: self.peers.count(&[PeerState::Connected]),
+            num_chunks: self.num_chunks,
+            next_chunks: self.next_chunk,
+            state: format!("{:?}", self.state),
         }
     }
 

@@ -1,5 +1,8 @@
+use crate::types::NetworkInfo;
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::proc_macros::rpc;
+use std::collections::HashMap;
+use sync::FileSyncInfo;
 
 #[rpc(server, client, namespace = "admin")]
 pub trait Rpc {
@@ -14,4 +17,10 @@ pub trait Rpc {
 
     #[method(name = "getSyncStatus")]
     async fn get_sync_status(&self, tx_seq: u64) -> RpcResult<String>;
+
+    #[method(name = "getSyncInfo")]
+    async fn get_sync_info(&self, tx_seq: Option<u64>) -> RpcResult<HashMap<u64, FileSyncInfo>>;
+
+    #[method(name = "getNetworkInfo")]
+    async fn get_network_info(&self) -> RpcResult<NetworkInfo>;
 }

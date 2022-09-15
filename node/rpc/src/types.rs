@@ -13,6 +13,18 @@ pub struct Status {
     pub connected_peers: usize,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkInfo {
+    pub peer_id: String,
+    pub total_peers: usize,
+    pub banned_peers: usize,
+    pub disconnected_peers: usize,
+    pub connected_peers: usize,
+    pub connected_outgoing_peers: usize,
+    pub connected_incoming_peers: usize,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileInfo {
