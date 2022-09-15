@@ -55,7 +55,7 @@ def run():
     parser.add_argument(
         "--max-workers",
         dest="max_workers",
-        default=8,
+        default=5,
         type=int,
     )
     parser.add_argument(

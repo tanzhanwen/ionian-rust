@@ -50,6 +50,7 @@ class FlowContractProxy(ContractProxy):
     def epoch(self, node_idx=0):
         return self._call("epoch", node_idx)
 
+
 class MineContractProxy(ContractProxy):
     def last_mined_epoch(self, node_idx=0):
         return self._call("lastMinedEpoch", node_idx)

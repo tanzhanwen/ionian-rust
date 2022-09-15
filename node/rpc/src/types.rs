@@ -4,8 +4,15 @@ use merkle_light::hash::Algorithm;
 use merkle_light::merkle::MerkleTree;
 use merkle_tree::{RawLeafSha3Algorithm, LEAF};
 use serde::{Deserialize, Serialize};
-use shared_types::{DataRoot, FileProof, Transaction, CHUNK_SIZE};
+use shared_types::{
+    compute_padded_chunk_size, compute_segment_size, DataRoot, FileProof, Transaction, CHUNK_SIZE,
+};
 use std::hash::Hasher;
+
+const ZERO_HASH: [u8; 32] = [
+    0x7a, 0x9e, 0xfb, 0x4f, 0x2d, 0x5f, 0xc9, 0x95, 0xfb, 0x0c, 0x79, 0x8b, 0xd5, 0x42, 0x67, 0x24,
+    0xa5, 0x8a, 0xa7, 0xb0, 0x5b, 0x62, 0xf6, 0x46, 0xb6, 0xba, 0xed, 0x96, 0xf5, 0xdb, 0xfc, 0x87,
+];
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,21 +100,20 @@ impl SegmentWithProof {
             return Err(error::invalid_params("index", "index out of bound"));
         }
 
-        let _data_size = if self.index == num_segments - 1 {
+        let data_size = if self.index == num_segments - 1 {
             last_segment_size
         } else {
             chunks_per_segment * CHUNK_SIZE
         };
 
-        // TODO(kevin): check length for new split node rule
-        // if self.data.len() != data_size {
-        //     return Err(error::invalid_params("data", "invalid data length"));
-        // }
+        if self.data.len() != data_size {
+            return Err(error::invalid_params("data", "invalid data length"));
+        }
 
         Ok(num_segments)
     }
 
-    fn calculate_segment_merkle_root(&self) -> [u8; 32] {
+    fn calculate_segment_merkle_root(&self, extend_chunk_length: usize) -> [u8; 32] {
         let mut a = RawLeafSha3Algorithm::default();
         let hashes = self.data.chunks_exact(CHUNK_SIZE).map(|x| {
             a.reset();
@@ -115,10 +121,13 @@ impl SegmentWithProof {
             a.write(x);
             a.hash()
         });
-        MerkleTree::<_, RawLeafSha3Algorithm>::new(hashes).root()
+        let mut hash_data = hashes.collect::<Vec<_>>();
+        hash_data.append(&mut vec![ZERO_HASH; extend_chunk_length]);
+
+        MerkleTree::<_, RawLeafSha3Algorithm>::new(hash_data).root()
     }
 
-    fn validate_proof(&self, num_segments: usize) -> RpcResult<()> {
+    fn validate_proof(&self, num_segments: usize, expected_data_length: usize) -> RpcResult<()> {
         // Validate proof data format at first.
         if self.proof.path.is_empty() {
             if self.proof.lemma.len() != 1 {
@@ -129,7 +138,18 @@ impl SegmentWithProof {
         }
 
         // Calculate segment merkle root to verify proof.
-        let segment_root = self.calculate_segment_merkle_root();
+        let extend_chunk_length = if expected_data_length > self.data.len() {
+            let extend_data_length = expected_data_length - self.data.len();
+            if extend_data_length % CHUNK_SIZE != 0 {
+                return Err(error::invalid_params("proof", "invalid data len"));
+            }
+
+            extend_data_length / CHUNK_SIZE
+        } else {
+            0
+        };
+
+        let segment_root = self.calculate_segment_merkle_root(extend_chunk_length);
         if !self
             .proof
             .validate(&segment_root, &self.root, self.index as usize, num_segments)?
@@ -142,8 +162,25 @@ impl SegmentWithProof {
 
     /// Validates the segment data size and proof.
     pub fn validate(&self, file_size: usize, chunks_per_segment: usize) -> RpcResult<()> {
-        let num_segments = self.validate_data_size_and_index(file_size, chunks_per_segment)?;
-        self.validate_proof(num_segments as usize)?;
+        self.validate_data_size_and_index(file_size, chunks_per_segment)?;
+
+        let (chunks, _) = compute_padded_chunk_size(file_size);
+        let (segments_for_proof, last_segment_size) =
+            compute_segment_size(chunks, chunks_per_segment);
+
+        let expected_data_length = if self.index as usize == segments_for_proof - 1 {
+            last_segment_size * CHUNK_SIZE
+        } else {
+            chunks_per_segment * CHUNK_SIZE
+        };
+
+        debug!(
+            "data len: {}, expected len: {}",
+            self.data.len(),
+            expected_data_length
+        );
+
+        self.validate_proof(segments_for_proof, expected_data_length)?;
         Ok(())
     }
 

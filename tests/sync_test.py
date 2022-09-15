@@ -35,7 +35,9 @@ class SyncTest(TestFramework):
         assert_equal(client1.ionian_get_file_info(data_root)["finalized"], False)
 
         segments = submit_data(client1, chunk_data)
-        self.log.info("segments: %s", [(s["root"], s["index"], s["proof"]) for s in segments])
+        self.log.info(
+            "segments: %s", [(s["root"], s["index"], s["proof"]) for s in segments]
+        )
 
         wait_until(lambda: client1.ionian_get_file_info(data_root)["finalized"])
 

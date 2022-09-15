@@ -99,9 +99,11 @@ def create_segment_node(data, offset, batch, size):
     n = len(data)
     while i < offset + size:
         start = i
-        end = i + batch
+        end = min(offset + size, i + batch)
 
-        if end > n:
+        if start >= n:
+            tree.add_leaf(Leaf(segment_root(b"\x00" * (end - start))))
+        elif end > n:
             tree.add_leaf(Leaf(segment_root(data[start:] + b"\x00" * (end - n))))
         else:
             tree.add_leaf(Leaf(segment_root(data[start:end])))
@@ -147,14 +149,24 @@ def generate_merkle_tree_by_batch(data):
 
     tree = MerkleTree()
     for i in range(0, padded_chunks, PORA_CHUNK_SIZE):
-        if i * ENTRY_SIZE > len(data):
-            raise IndexError
+        if i * ENTRY_SIZE >= len(data):
+            tree.add_leaf(
+                Leaf(
+                    segment_root(
+                        b"\x00" * ENTRY_SIZE * min(PORA_CHUNK_SIZE, padded_chunks - i)
+                    )
+                )
+            )
         elif (i + PORA_CHUNK_SIZE) * ENTRY_SIZE > len(data):
             tree.add_leaf(
                 Leaf(
                     segment_root(
                         data[i * ENTRY_SIZE :]
-                        + b"\x00" * (padded_chunks * ENTRY_SIZE - len(data))
+                        + b"\x00"
+                        * (
+                            min(padded_chunks, i + PORA_CHUNK_SIZE) * ENTRY_SIZE
+                            - len(data)
+                        )
                     )
                 )
             )
@@ -172,13 +184,11 @@ def generate_merkle_tree_by_batch(data):
 
 def submit_data(client, data):
     tree, root_hash = generate_merkle_tree_by_batch(data)
-
     chunks = bytes_to_entries(len(data))
-    padded_chunks, _ = compute_padded_size(chunks)
 
     segments = []
     idx = 0
-    while idx * PORA_CHUNK_SIZE < padded_chunks:
+    while idx * PORA_CHUNK_SIZE < chunks:
         proof = tree.proof_at(idx)
 
         tmp = (
@@ -189,9 +199,9 @@ def submit_data(client, data):
                 * ENTRY_SIZE
                 * PORA_CHUNK_SIZE
             ]
-            if padded_chunks > (idx + 1) * PORA_CHUNK_SIZE
+            if len(data) >= (idx + 1) * PORA_CHUNK_SIZE * ENTRY_SIZE
             else data[idx * ENTRY_SIZE * PORA_CHUNK_SIZE :]
-            + b"\x00" * (padded_chunks * ENTRY_SIZE - len(data))
+            + b"\x00" * (chunks * ENTRY_SIZE - len(data))
         )
 
         segment = {

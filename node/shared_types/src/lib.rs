@@ -30,6 +30,34 @@ pub fn bytes_to_chunks(size_bytes: usize) -> usize {
     }
 }
 
+pub fn compute_padded_chunk_size(size_bytes: usize) -> (usize, usize) {
+    let chunk_len = bytes_to_chunks(size_bytes);
+    let chunks_next_pow2 = next_pow2(chunk_len);
+
+    if chunks_next_pow2 == chunk_len {
+        return (chunks_next_pow2, chunks_next_pow2);
+    }
+
+    let min_chunk = if chunks_next_pow2 < 16 {
+        1
+    } else {
+        chunks_next_pow2 >> 4
+    };
+
+    // chunk_len will be always greater than 0, size_byte comes from tx.size which is file size, the flow contract doesn't allowy upload 0-size file
+    let padded_chunks = ((chunk_len - 1) / min_chunk + 1) * min_chunk;
+
+    (padded_chunks, chunks_next_pow2)
+}
+
+pub fn compute_segment_size(chunks: usize, chunks_per_segment: usize) -> (usize, usize) {
+    if chunks % chunks_per_segment == 0 {
+        (chunks / chunks_per_segment, chunks_per_segment)
+    } else {
+        (chunks / chunks_per_segment + 1, chunks % chunks_per_segment)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Chunk(pub [u8; CHUNK_SIZE]);
 

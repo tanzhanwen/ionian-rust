@@ -84,7 +84,7 @@ pub trait LogStoreWrite: LogStoreChunkWrite {
     ///
     /// This will return error if not all chunks are stored. But since this check can be expensive,
     /// the caller is supposed to track chunk statuses and call this after storing all the chunks.
-    fn finalize_tx(&self, tx_seq: u64) -> Result<()>;
+    fn finalize_tx(&mut self, tx_seq: u64) -> Result<()>;
 
     /// Store the progress of synced block number and its hash.
     fn put_sync_progress(&self, progress: (u64, H256)) -> Result<()>;

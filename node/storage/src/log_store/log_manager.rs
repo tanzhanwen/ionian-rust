@@ -14,8 +14,8 @@ use merkle_tree::RawLeafSha3Algorithm;
 use rayon::iter::ParallelIterator;
 use rayon::prelude::ParallelSlice;
 use shared_types::{
-    bytes_to_chunks, Chunk, ChunkArray, ChunkArrayWithProof, ChunkWithProof, DataRoot, FlowProof,
-    FlowRangeProof, Transaction,
+    bytes_to_chunks, compute_padded_chunk_size, compute_segment_size, Chunk, ChunkArray,
+    ChunkArrayWithProof, ChunkWithProof, DataRoot, FlowProof, FlowRangeProof, Transaction,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -58,16 +58,17 @@ impl LogStoreChunkWrite for LogManager {
             .tx_store
             .get_tx_by_seq_number(tx_seq)?
             .ok_or_else(|| anyhow!("put chunks with missing tx: tx_seq={}", tx_seq))?;
-        // TODO(kevin): check length for new split node rule
-        // if chunks.start_index.saturating_mul(ENTRY_SIZE as u64) + chunks.data.len() as u64 > tx.size
-        // {
-        //     bail!(
-        //         "put chunks with data out of tx range: tx_seq={} start_index={} data_len={}",
-        //         tx_seq,
-        //         chunks.start_index,
-        //         chunks.data.len()
-        //     );
-        // }
+        let (chunks_for_proof, _) = compute_padded_chunk_size(tx.size as usize);
+        if chunks.start_index.saturating_mul(ENTRY_SIZE as u64) + chunks.data.len() as u64
+            > (chunks_for_proof * ENTRY_SIZE) as u64
+        {
+            bail!(
+                "put chunks with data out of tx range: tx_seq={} start_index={} data_len={}",
+                tx_seq,
+                chunks.start_index,
+                chunks.data.len()
+            );
+        }
         // TODO: Use another struct to avoid confusion.
         let mut flow_entry_array = chunks;
         flow_entry_array.start_index += tx.start_entry_index;
@@ -92,11 +93,14 @@ impl LogStoreWrite for LogManager {
         Ok(())
     }
 
-    fn finalize_tx(&self, tx_seq: u64) -> Result<()> {
+    fn finalize_tx(&mut self, tx_seq: u64) -> Result<()> {
         let tx = self
             .tx_store
             .get_tx_by_seq_number(tx_seq)?
             .ok_or_else(|| anyhow!("finalize_tx with tx missing: tx_seq={}", tx_seq))?;
+
+        self.padding_rear_data(&tx, tx_seq)?;
+
         let tx_end_index = tx.start_entry_index + bytes_to_entries(tx.size);
         // TODO: Check completeness without loading all data in memory.
         // TODO: Should we double check the tx merkle root?
@@ -586,6 +590,50 @@ impl LogManager {
     pub fn flow_store(&self) -> &FlowStore {
         &self.flow_store
     }
+
+    fn padding_rear_data(&mut self, tx: &Transaction, tx_seq: u64) -> Result<()> {
+        let (chunks, _) = compute_padded_chunk_size(tx.size as usize);
+        let (segments_for_proof, last_segment_size_for_proof) =
+            compute_segment_size(chunks, PORA_CHUNK_SIZE);
+        debug!(
+            "segments_for_proof: {}, last_segment_size_for_proof: {}",
+            segments_for_proof, last_segment_size_for_proof
+        );
+
+        let chunks_for_file = bytes_to_entries(tx.size) as usize;
+        let (mut segments_for_file, mut last_segment_size_for_file) =
+            compute_segment_size(chunks_for_file, PORA_CHUNK_SIZE);
+        debug!(
+            "segments_for_file: {}, last_segment_size_for_file: {}",
+            segments_for_file, last_segment_size_for_file
+        );
+
+        while segments_for_file <= segments_for_proof {
+            let padding_size = if segments_for_file == segments_for_proof {
+                (last_segment_size_for_proof - last_segment_size_for_file) * ENTRY_SIZE
+            } else {
+                (PORA_CHUNK_SIZE - last_segment_size_for_file) * ENTRY_SIZE
+            };
+
+            debug!("Padding size: {}", padding_size);
+            if padding_size > 0 {
+                self.put_chunks(
+                    tx_seq,
+                    ChunkArray {
+                        data: vec![0u8; padding_size],
+                        start_index: ((segments_for_file - 1) * PORA_CHUNK_SIZE
+                            + last_segment_size_for_file)
+                            as u64,
+                    },
+                )?;
+            }
+
+            last_segment_size_for_file = 0;
+            segments_for_file += 1;
+        }
+
+        Ok(())
+    }
 }
 
 /// This represents the subtree of a chunk or the whole data merkle tree.
@@ -649,4 +697,48 @@ fn entry_proof(top_proof: &FlowProof, sub_proof: &FlowProof) -> Result<FlowProof
     lemma.extend_from_slice(&top_proof.lemma()[1..]);
     path.extend_from_slice(top_proof.path());
     Ok(FlowProof::new(lemma, path))
+}
+
+pub fn split_nodes(data_size: usize) -> Vec<usize> {
+    let (mut padded_chunks, chunks_next_pow2) = compute_padded_chunk_size(data_size);
+    let mut next_chunk_size = chunks_next_pow2;
+
+    let mut nodes = vec![];
+    while padded_chunks > 0 {
+        if padded_chunks >= next_chunk_size {
+            padded_chunks -= next_chunk_size;
+            nodes.push(next_chunk_size);
+        }
+
+        next_chunk_size >>= 1;
+    }
+
+    nodes
+}
+
+pub fn tx_subtree_root_list_padded(data: &[u8]) -> Vec<(usize, DataRoot)> {
+    let mut root_list = Vec::new();
+    let mut start_index = 0;
+    let nodes = split_nodes(data.len());
+
+    for &tree_size in nodes.iter() {
+        let end = start_index + tree_size * ENTRY_SIZE;
+
+        let submerkle_root = if start_index >= data.len() {
+            sub_merkle_tree(&vec![0u8; tree_size * ENTRY_SIZE])
+                .unwrap()
+                .root()
+        } else if end > data.len() {
+            let mut pad_data = data[start_index..].to_vec();
+            pad_data.append(&mut vec![0u8; end - data.len()]);
+            sub_merkle_tree(&pad_data).unwrap().root()
+        } else {
+            sub_merkle_tree(&data[start_index..end]).unwrap().root()
+        };
+
+        root_list.push((log2_pow2(tree_size) + 1, submerkle_root.into()));
+        start_index += end;
+    }
+
+    root_list
 }

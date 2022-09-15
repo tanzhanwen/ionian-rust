@@ -13,7 +13,9 @@ class MineTest(TestFramework):
         self.num_blockchain_nodes = 1
         self.num_nodes = 1
         self.ionian_node_configs[0] = {
-            "miner_id": MINER_ID, "miner_key": GENESIS_PRIV_KEY}
+            "miner_id": MINER_ID,
+            "miner_key": GENESIS_PRIV_KEY,
+        }
 
     def submit_data(self, item):
         submissions_before = self.contract.num_submissions()
@@ -40,13 +42,13 @@ class MineTest(TestFramework):
         self.submit_data(b"\x11")
 
         self.log.info("Wait for the first mine context release")
-        wait_until(lambda: int(blockchain.eth_blockNumber(),16) > 100, timeout=120)
+        wait_until(lambda: int(blockchain.eth_blockNumber(), 16) > 100, timeout=180)
 
         self.log.info("Wait for the first mine answer")
         wait_until(lambda: self.mine_contract.last_mined_epoch() == 1)
 
         self.log.info("Wait for the second mine context release")
-        wait_until(lambda: int(blockchain.eth_blockNumber(),16) > 200, timeout=120)
+        wait_until(lambda: int(blockchain.eth_blockNumber(), 16) > 200, timeout=180)
 
         self.log.info("Wait for the second mine answer")
         wait_until(lambda: self.mine_contract.last_mined_epoch() == 2)
@@ -55,11 +57,10 @@ class MineTest(TestFramework):
         self.submit_data(b"\x22")
 
         self.log.info("Wait for the third mine context release")
-        wait_until(lambda: int(blockchain.eth_blockNumber(),16) > 300, timeout=120)
+        wait_until(lambda: int(blockchain.eth_blockNumber(), 16) > 300, timeout=180)
 
         self.log.info("Wait for the third mine answer")
         wait_until(lambda: self.mine_contract.last_mined_epoch() == 3)
-
 
 
 if __name__ == "__main__":

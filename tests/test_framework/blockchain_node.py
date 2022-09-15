@@ -11,7 +11,8 @@ from config.node_config import (
     GENESIS_PRIV_KEY,
     TX_PARAMS,
     MINER_ID,
-    NO_MERKLE_PROOF_FLAG, NO_SEAL_FLAG
+    NO_MERKLE_PROOF_FLAG,
+    NO_SEAL_FLAG,
 )
 from utility.simple_rpc_proxy import SimpleRpcProxy
 from utility.utils import (
@@ -156,8 +157,7 @@ class TestNode:
                 self.log.info("Process is still running")
             else:
                 self.log.info(
-                    "Process has terminated with code {}".format(
-                        self.return_code)
+                    "Process has terminated with code {}".format(self.return_code)
                 )
 
             raise AssertionError(
@@ -232,15 +232,13 @@ class BlockchainNode(TestNode):
         self._wait_for_rpc_connection(lambda rpc: rpc.eth_syncing() is False)
 
     def wait_for_start_mining(self):
-        self._wait_for_rpc_connection(
-            lambda rpc: int(rpc.eth_blockNumber(), 16) > 0)
+        self._wait_for_rpc_connection(lambda rpc: int(rpc.eth_blockNumber(), 16) > 0)
 
     def setup_contract(self):
         w3 = Web3(HTTPProvider(self.rpc_url))
 
         account = w3.eth.account.from_key(GENESIS_PRIV_KEY)
-        w3.middleware_onion.add(
-            construct_sign_and_send_raw_middleware(account))
+        w3.middleware_onion.add(construct_sign_and_send_raw_middleware(account))
 
         def deploy_contract(path, args=None):
             if args is None:
@@ -262,10 +260,13 @@ class BlockchainNode(TestNode):
         token_contract, _ = deploy_contract(self.token_contract_path)
         self.log.debug("ERC20 deployed")
         flow_contract, flow_contract_hash = deploy_contract(
-            self.contract_path, [token_contract.address])
+            self.contract_path, [token_contract.address]
+        )
         self.log.debug("Flow deployed")
-        mine_contract, _ = deploy_contract(self.mine_contract_path, [
-                                           flow_contract.address, NO_SEAL_FLAG | NO_MERKLE_PROOF_FLAG])
+        mine_contract, _ = deploy_contract(
+            self.mine_contract_path,
+            [flow_contract.address, NO_SEAL_FLAG | NO_MERKLE_PROOF_FLAG],
+        )
         self.log.debug("Mine deployed")
         self.log.info("All contracts deployed")
 
@@ -274,8 +275,7 @@ class BlockchainNode(TestNode):
         ).transact(TX_PARAMS)
         w3.eth.wait_for_transaction_receipt(tx_hash)
 
-        tx_hash = mine_contract.functions.setMiner(
-            MINER_ID).transact(TX_PARAMS)
+        tx_hash = mine_contract.functions.setMiner(MINER_ID).transact(TX_PARAMS)
         w3.eth.wait_for_transaction_receipt(tx_hash)
 
         return flow_contract, flow_contract_hash, mine_contract

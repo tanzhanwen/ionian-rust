@@ -4,14 +4,13 @@ pub mod tests {
 
     use file_location_cache::FileLocationCache;
     use libp2p::{identity, Multiaddr, PeerId};
-    use merkle_light::merkle::{log2_pow2, next_pow2};
     use network::types::AnnounceFile;
     use rand::random;
-    use shared_types::{timestamp_now, ChunkArray, DataRoot, Transaction, CHUNK_SIZE};
+    use shared_types::{timestamp_now, ChunkArray, Transaction, CHUNK_SIZE};
     use storage::{
         log_store::{
             log_manager::{
-                bytes_to_entries, sub_merkle_tree, LogConfig, ENTRY_SIZE, PORA_CHUNK_SIZE,
+                sub_merkle_tree, tx_subtree_root_list_padded, LogConfig, PORA_CHUNK_SIZE,
             },
             LogStoreChunkWrite, LogStoreWrite,
         },
@@ -70,7 +69,7 @@ pub mod tests {
             data[i * CHUNK_SIZE] = random();
         }
 
-        let merkel_nodes = tx_subtree_root_list(&data);
+        let merkel_nodes = tx_subtree_root_list_padded(&data);
         let first_tree_size = 1 << (merkel_nodes[0].0 - 1);
         let start_offset = if offset % first_tree_size == 0 {
             offset
@@ -101,31 +100,6 @@ pub mod tests {
         peer_store.finalize_tx(tx.seq).unwrap();
 
         (tx, data, start_offset + chunk_count as u64)
-    }
-
-    fn tx_subtree_root_list(data: &[u8]) -> Vec<(usize, DataRoot)> {
-        let mut root_list = Vec::new();
-        let mut start_index = 0;
-        let data_entry_len = bytes_to_entries(data.len() as u64) as usize;
-        while start_index != data_entry_len {
-            let next = next_subtree_size(data_entry_len - start_index);
-            let end = cmp::min((start_index + next) * ENTRY_SIZE, data.len());
-            let submerkle_root = sub_merkle_tree(&data[start_index * ENTRY_SIZE..end])
-                .unwrap()
-                .root();
-            root_list.push((log2_pow2(next) + 1, submerkle_root.into()));
-            start_index += next;
-        }
-        root_list
-    }
-
-    fn next_subtree_size(tree_size: usize) -> usize {
-        let next = next_pow2(tree_size);
-        if next == tree_size {
-            tree_size
-        } else {
-            next >> 1
-        }
     }
 
     pub fn create_file_location_cache(peer_id: PeerId, seq_size: usize) -> Arc<FileLocationCache> {

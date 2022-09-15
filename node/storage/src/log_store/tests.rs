@@ -1,13 +1,12 @@
 use crate::log_store::log_manager::{
-    bytes_to_entries, data_to_merkle_leaves, sub_merkle_tree, LogConfig, LogManager, ENTRY_SIZE,
+    data_to_merkle_leaves, sub_merkle_tree, tx_subtree_root_list_padded, LogConfig, LogManager,
     PORA_CHUNK_SIZE,
 };
 use crate::log_store::{LogStoreChunkRead, LogStoreChunkWrite, LogStoreRead, LogStoreWrite};
 use append_merkle::{Algorithm, AppendMerkleTree, Sha3Algorithm};
 use ethereum_types::H256;
-use merkle_light::merkle::{log2_pow2, next_pow2};
 use rand::random;
-use shared_types::{ChunkArray, DataRoot, Transaction, CHUNK_SIZE};
+use shared_types::{compute_padded_chunk_size, ChunkArray, Transaction, CHUNK_SIZE};
 use std::cmp;
 
 #[test]
@@ -22,9 +21,12 @@ fn test_put_get() {
     for i in 0..chunk_count {
         data[i * CHUNK_SIZE] = random();
     }
+    let (padded_chunks, _) = compute_padded_chunk_size(data_size);
     let mut merkle = AppendMerkleTree::<H256, Sha3Algorithm>::new(vec![H256::zero()], None);
     merkle.append_list(data_to_merkle_leaves(&LogManager::padding(start_offset - 1)).unwrap());
-    merkle.append_list(data_to_merkle_leaves(&data).unwrap());
+    let mut data_padded = data.clone();
+    data_padded.append(&mut vec![0u8; CHUNK_SIZE]);
+    merkle.append_list(data_to_merkle_leaves(&data_padded).unwrap());
     merkle.commit(Some(0));
     let tx_merkle = sub_merkle_tree(&data).unwrap();
     let tx = Transaction {
@@ -35,7 +37,7 @@ fn test_put_get() {
         data: vec![],
         start_entry_index: start_offset as u64,
         // TODO: This can come from `tx_merkle`.
-        merkle_nodes: tx_subtree_root_list(&data),
+        merkle_nodes: tx_subtree_root_list_padded(&data),
     };
     store.put_tx(tx.clone()).unwrap();
     for start_index in (0..chunk_count).step_by(PORA_CHUNK_SIZE) {
@@ -61,7 +63,7 @@ fn test_put_get() {
     }
     assert_eq!(
         store
-            .get_chunk_by_tx_and_index(tx.seq, chunk_count)
+            .get_chunk_by_tx_and_index(tx.seq, padded_chunks)
             .unwrap(),
         None
     );
@@ -147,31 +149,6 @@ fn test_revert() {
     put_tx(&mut store, 1, 1, 2);
 }
 
-fn tx_subtree_root_list(data: &[u8]) -> Vec<(usize, DataRoot)> {
-    let mut root_list = Vec::new();
-    let mut start_index = 0;
-    let data_entry_len = bytes_to_entries(data.len() as u64) as usize;
-    while start_index != data_entry_len {
-        let next = next_subtree_size(data_entry_len - start_index);
-        let end = cmp::min((start_index + next) * ENTRY_SIZE, data.len());
-        let submerkle_root = sub_merkle_tree(&data[start_index * ENTRY_SIZE..end])
-            .unwrap()
-            .root();
-        root_list.push((log2_pow2(next) + 1, submerkle_root.into()));
-        start_index += next;
-    }
-    root_list
-}
-
-fn next_subtree_size(tree_size: usize) -> usize {
-    let next = next_pow2(tree_size);
-    if next == tree_size {
-        tree_size
-    } else {
-        next >> 1
-    }
-}
-
 fn create_store() -> LogManager {
     let config = LogConfig::default();
 
@@ -193,7 +170,7 @@ fn put_tx(store: &mut LogManager, chunk_count: usize, seq: u64, start_entry_inde
         data: vec![],
         start_entry_index,
         // TODO: This can come from `tx_merkle`.
-        merkle_nodes: tx_subtree_root_list(&data),
+        merkle_nodes: tx_subtree_root_list_padded(&data),
     };
     store.put_tx(tx.clone()).unwrap();
     for start_index in (0..chunk_count).step_by(PORA_CHUNK_SIZE) {

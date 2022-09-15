@@ -24,15 +24,16 @@ class SubmissionTest(TestFramework):
             257,
             1023,
             1024,
-            # 1025,
-            # 256 * 1023,
-            # 256 * 1023 + 1,
-            # 256 * 1024,
-            # 256 * 1024 + 1,
-            # 256 * 1025,
-            # 256 * 2048 - 1,
-            # 256 * 2048,
-            # 256 * 1024 * 256,
+            1025,
+            256 * 1023,
+            256 * 1023 + 1,
+            256 * 1024,
+            256 * 1024 + 1,
+            256 * 1025,
+            256 * 2048 - 1,
+            256 * 2048,
+            256 * 16385,
+            256 * 1024 * 256,
         ]
 
         for i, v in enumerate(data_size):
@@ -54,7 +55,9 @@ class SubmissionTest(TestFramework):
         assert_equal(client.ionian_get_file_info(data_root)["finalized"], False)
 
         segments = submit_data(client, chunk_data)
-        self.log.info("segments: %s", [(s["root"], s["index"], s["proof"]) for s in segments])
+        self.log.info(
+            "segments: %s", [(s["root"], s["index"], s["proof"]) for s in segments]
+        )
 
         wait_until(lambda: client.ionian_get_file_info(data_root)["finalized"])
 
@@ -80,7 +83,9 @@ class SubmissionTest(TestFramework):
                 )
             )
 
-            wait_until(lambda: self.nodes[i].ionian_get_file_info(data_root) is not None)
+            wait_until(
+                lambda: self.nodes[i].ionian_get_file_info(data_root) is not None
+            )
             wait_until(
                 lambda: self.nodes[i].ionian_get_file_info(data_root)["finalized"]
             )
