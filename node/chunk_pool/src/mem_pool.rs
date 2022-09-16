@@ -15,24 +15,26 @@ use tokio::sync::mpsc::UnboundedSender;
 
 /// The segment status in sliding window
 #[derive(PartialEq, Eq, Debug)]
-pub enum SlotStatus {
-    Empty,
+enum SlotStatus {
     Writing,
     Finished,
 }
 
+/// Sliding window is used to control the concurrent uploading process of a file.
+/// Bounded window allows segments to be uploaded concurrenly, while having a capacity limit on writing threads per file
+/// Meanwhile, the left_boundary field records how many segments have been uploaded
 pub struct CtrlWindow {
     size: usize,
     left_boundary: usize,
-    window: HashMap<usize, SlotStatus>,
+    slots: HashMap<usize, SlotStatus>,
 }
 
 impl CtrlWindow {
-    fn new(size: usize, left_boundary: usize, window: HashMap<usize, SlotStatus>) -> Self {
+    fn new(size: usize) -> Self {
         CtrlWindow {
             size,
-            left_boundary,
-            window,
+            left_boundary: 0,
+            slots: HashMap::default(),
         }
     }
 
@@ -41,23 +43,17 @@ impl CtrlWindow {
             return true;
         }
 
-        if let Some(status) = self.window.get(&index) {
-            if status != &SlotStatus::Empty {
-                return true;
-            }
+        if self.slots.contains_key(&index) {
+            return true;
         }
 
         false
     }
 
+    //Should call check_duplicate and handle the duplicated case before calling this function
+    //This function assumes that there are no duplicate slots in the window
     fn start_writing(&mut self, index: usize) -> Result<()> {
-        if index < self.left_boundary {
-            bail!(
-                "index is smaller than left boundary, index = {}, left_boundary = {}",
-                index,
-                self.left_boundary
-            );
-        }
+        assert!(index >= self.left_boundary);
 
         if index >= self.left_boundary + self.size {
             bail!(
@@ -68,49 +64,30 @@ impl CtrlWindow {
             );
         }
 
-        let slot_status = self
-            .window
-            .entry(index)
-            .or_insert_with(|| SlotStatus::Empty);
-
-        if slot_status != &SlotStatus::Empty {
-            bail!("duplicate element, index = {}", index);
-        }
-
-        self.window.insert(index, SlotStatus::Writing);
+        assert!(!self.slots.contains_key(&index));
+        self.slots.insert(index, SlotStatus::Writing);
 
         Ok(())
     }
 
     fn rollback_writing(&mut self, index: usize) {
-        if let Some(slot_status) = self.window.get_mut(&index) {
-            if slot_status == &SlotStatus::Writing {
-                *slot_status = SlotStatus::Empty;
-            }
-        }
+        let slot_status = self.slots.remove(&index).unwrap();
+        assert_eq!(slot_status, SlotStatus::Writing);
     }
 
-    fn finish_writing(&mut self, index: usize) -> Result<()> {
-        if let Some(slot_status) = self.window.get_mut(&index) {
-            assert_eq!(slot_status, &SlotStatus::Writing);
-            *slot_status = SlotStatus::Finished;
+    fn finish_writing(&mut self, index: usize) {
+        let slot_status = self.slots.get_mut(&index).unwrap();
+        assert_eq!(slot_status, &SlotStatus::Writing);
+        *slot_status = SlotStatus::Finished;
 
-            //Check whether left boundary should move forward
-            let mut left_boundary = self.left_boundary;
-            while let Some(slot_status) = self.window.get(&left_boundary) {
-                if slot_status == &SlotStatus::Finished {
-                    left_boundary += 1;
-                } else {
-                    break;
-                }
-            }
-
-            self.left_boundary = left_boundary;
-        } else {
-            bail!("element does not exist, index = {}", index);
+        //Check whether left boundary should move forward
+        let mut left_boundary = self.left_boundary;
+        while let Some(&SlotStatus::Finished) = self.slots.get(&left_boundary) {
+            self.slots.remove(&left_boundary);
+            left_boundary += 1;
         }
 
-        Ok(())
+        self.left_boundary = left_boundary;
     }
 }
 
@@ -131,7 +108,7 @@ pub struct MemoryCachedFile {
 impl MemoryCachedFile {
     fn new(timeout: Duration, window_size: usize) -> Self {
         MemoryCachedFile {
-            window: CtrlWindow::new(window_size, 0, HashMap::default()),
+            window: CtrlWindow::new(window_size),
             segments: None,
             total_chunks: 0,
             tx_seq: 0,
@@ -219,13 +196,6 @@ impl Inner {
             MemoryCachedFile::new(self.expiration_timeout, self.config.window_size)
         });
 
-        // Segment already uploaded.
-        if file.window.check_duplicate(seg_index) {
-            return Ok(None);
-        }
-
-        file.window.start_writing(seg_index)?;
-
         // Update transaction in case that log entry already retrieved from blockchain
         // before any segment uploaded to storage node. In this case, segment will not
         // be cached in memory pool.
@@ -237,6 +207,21 @@ impl Inner {
 
         // Prepare segments to write into store when log entry already retrieved.
         if file.total_chunks > 0 {
+            //Check whether the segment is within the file_size limit
+            if (seg_index + 1) * chunks_per_segment > file.total_chunks {
+                bail!(anyhow!(
+                    "seg index exceeds file size limit. seg_index: {}, chunks_per_segment:{}, file total chunks:{}",
+                    seg_index,
+                    chunks_per_segment,
+                    file.total_chunks
+                ));
+            }
+
+            // Segment already uploaded.
+            if file.window.check_duplicate(seg_index) {
+                return Ok(None);
+            }
+
             // Limits the number of writing threads.
             if self.total_writings >= self.config.max_writings {
                 bail!(anyhow!(
@@ -244,6 +229,8 @@ impl Inner {
                     self.config.max_writings
                 ));
             }
+
+            file.window.start_writing(seg_index)?;
 
             // Note, do not update the counter of cached chunks in this case.
             self.total_writings += 1;
@@ -291,7 +278,7 @@ impl Inner {
             None => return false,
         };
 
-        let _ = file.window.finish_writing(seg_index);
+        file.window.finish_writing(seg_index);
 
         assert!(self.total_chunks >= cached_segs_chunks);
         self.total_chunks -= cached_segs_chunks;
@@ -505,6 +492,7 @@ impl MemoryChunkPool {
         // Update the file info with transaction.
         file.update_with_tx(tx);
 
+        // TODO(zhanwen): Add the following logic back in the pr of caching samll file
         // File partially uploaded and it's up to user thread
         // to write chunks into store and finalize transaction.
         //if file.next_index < file.total_chunks {
