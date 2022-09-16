@@ -205,14 +205,17 @@ impl Inner {
             }
         }
 
+        let num_chunks = segment.len() / CHUNK_SIZE;
+
         // Prepare segments to write into store when log entry already retrieved.
         if file.total_chunks > 0 {
             //Check whether the segment is within the file_size limit
-            if (seg_index + 1) * chunks_per_segment > file.total_chunks {
+            if seg_index * chunks_per_segment + num_chunks > file.total_chunks {
                 bail!(anyhow!(
-                    "seg index exceeds file size limit. seg_index: {}, chunks_per_segment:{}, file total chunks:{}",
+                    "seg index exceeds file size limit. seg_index: {}, chunks_per_segment:{}, num_chunks:{}, file total chunks:{}",
                     seg_index,
                     chunks_per_segment,
+                    num_chunks,
                     file.total_chunks
                 ));
             }
@@ -244,8 +247,6 @@ impl Inner {
         }
 
         // Otherwise, just cache segment in memory
-        let num_chunks = segment.len() / CHUNK_SIZE;
-
         // Limits the cached chunks in the memory pool.
         if self.total_chunks + num_chunks > self.config.max_cached_chunks_all {
             bail!(anyhow!(
