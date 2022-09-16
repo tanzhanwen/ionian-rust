@@ -26,7 +26,7 @@ build_config! {
     (rpc_chunks_per_segment, (usize), 1024)
 
     // chunk pool
-    (chunk_pool_max_cached_chunks_per_file, (usize), 4*1024)    // 1M
+    (chunk_pool_window_size, (usize), 4)
     (chunk_pool_max_cached_chunks_all, (usize), 4*1024*1024)    // 1G
     (chunk_pool_max_writings, (usize), 16)
     (chunk_pool_expiration_time_secs, (u64), 300)   // 5 minutes

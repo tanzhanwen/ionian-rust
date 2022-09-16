@@ -185,6 +185,7 @@ impl SegmentWithProof {
     }
 
     /// Returns the index of first chunk in the segment.
+    #[allow(dead_code)]
     pub fn chunk_index(&self, chunks_per_segment: usize) -> usize {
         self.index as usize * chunks_per_segment
     }
