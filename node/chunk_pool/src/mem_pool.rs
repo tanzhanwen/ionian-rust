@@ -529,3 +529,110 @@ impl MemoryChunkPool {
         Some(file)
     }
 }
+
+#[cfg(test)]
+pub mod tests {
+    use std::{cmp, sync::Arc};
+    use rand::random;
+    use merkle_light::merkle::{log2_pow2, next_pow2};
+    use storage::log_store::LogStoreWrite;
+    use crate::MemoryChunkPool;
+    use tokio::sync::RwLock;
+    use shared_types::{timestamp_now, ChunkArray, DataRoot, Transaction, CHUNK_SIZE};
+    use storage::log_store::log_manager::{LogConfig, sub_merkle_tree, bytes_to_entries, ENTRY_SIZE};
+    use storage::log_store::log_manager::LogManager;
+    use task_executor::test_utils::TestRuntime;
+    use super::*;
+
+    const TX_SEGMENT_NUM: usize = 5;
+    const CHUNKS_PER_SEGMENT: usize = 1024;
+    
+    fn next_subtree_size(tree_size: usize) -> usize {
+        let next = next_pow2(tree_size);
+        if next == tree_size {
+            tree_size
+        } else {
+            next >> 1
+        }
+    }
+
+    fn tx_subtree_root_list(data: &[u8]) -> Vec<(usize, DataRoot)> {
+        let mut root_list = Vec::new();
+        let mut start_index = 0;
+        let data_entry_len = bytes_to_entries(data.len() as u64) as usize;
+        while start_index != data_entry_len {
+            let next = next_subtree_size(data_entry_len - start_index);
+            let end = cmp::min((start_index + next) * ENTRY_SIZE, data.len());
+            let submerkle_root = sub_merkle_tree(&data[start_index * ENTRY_SIZE..end])
+                .unwrap()
+                .root();
+            root_list.push((log2_pow2(next) + 1, submerkle_root.into()));
+            start_index = start_index + next;
+        }
+        root_list
+    }
+
+    fn test_initiate_tx(store: &mut LogManager) {
+        let offset: u64 = 1;
+        let chunk_count = CHUNKS_PER_SEGMENT * TX_SEGMENT_NUM;
+        let data_size = CHUNK_SIZE * chunk_count;
+        let mut data = vec![0u8; data_size];
+
+        for i in 0..chunk_count {
+            data[i * CHUNK_SIZE] = random();
+        }
+
+        let merkel_nodes = tx_subtree_root_list(&data);
+        let first_tree_size = 1 << (merkel_nodes[0].0 - 1);
+        let start_offset = if offset % first_tree_size == 0 {
+            offset
+        } else {
+            (offset / first_tree_size + 1) * first_tree_size
+        };
+
+        let merkle = sub_merkle_tree(&data).unwrap();
+        let tx = Transaction {
+            stream_ids: vec![],
+            size: data_size as u64,
+            data_merkle_root: merkle.root().into(),
+            seq: 0,
+            data: vec![],
+            start_entry_index: start_offset,
+            merkle_nodes: merkel_nodes,
+        };
+
+        store.put_tx(tx.clone()).unwrap();
+    }
+
+    fn test_initiate_chunk_pool() -> (Arc<MemoryChunkPool>, Arc<RwLock<LogManager>>) {
+        let pool_config = Config {
+            window_size: 4,
+            max_cached_chunks_all: 4*1024*1024,
+            max_writings: 16,
+            expiration_time_secs: 300,
+        };
+
+        let runtime = TestRuntime::default();
+        let log_config = LogConfig::default();
+        let mut store = LogManager::memorydb(log_config).unwrap();
+        //test_initiate_tx(&mut store);
+        let store = Arc::new(RwLock::new(store));
+        let async_store = Some(storage_async::Store::new(store.clone(), runtime.task_executor.clone()));
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let chunk_pool = Arc::new(MemoryChunkPool::new(pool_config, async_store.unwrap(), sender));
+
+        (chunk_pool, store)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_file_concurrent_upload_exceed_window_limit() {
+        let (chunk_pool, store) = test_initiate_chunk_pool();
+        let mut store = store.write().await;
+        let my_store = &mut *store;
+        test_initiate_tx(my_store);
+        drop(store);
+        
+        //chunk_pool.add_chunks_inner(root, segment, seg_index, chunks_per_segment)
+        //.await?;
+    }
+}

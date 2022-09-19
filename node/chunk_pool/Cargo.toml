@@ -12,3 +12,10 @@ tokio = { version = "1.19.2", features = ["sync"] }
 async-lock = "2.5.0"
 hashlink = "0.8.0"
 tracing = "0.1.35"
+
+[dev-dependencies]
+rand = "0.8.5"
+storage = { path = "../storage" }
+storage-async = { path = "../storage-async" }
+task_executor = { path = "../../common/task_executor" }
+merkle_light = { path = "../../common/merkle_light" }
