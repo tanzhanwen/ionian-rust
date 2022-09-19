@@ -7,6 +7,7 @@ use jsonrpsee::core::RpcResult;
 use shared_types::DataRoot;
 use storage::try_option;
 
+const CACHE_FILE_MAX_SIZE: u64 = 10*1024*1024;
 pub struct RpcServerImpl {
     pub ctx: Context,
 }
@@ -25,31 +26,45 @@ impl RpcServer for RpcServerImpl {
     async fn upload_segment(&self, segment: SegmentWithProof) -> RpcResult<()> {
         debug!("ionian_uploadSegment()");
 
-        // TODO(qhz): allow to cache small files before log entry retrieved from blockchain.
-        let tx_seq = match self
+        let seq = self
             .ctx
             .log_store
             .get_tx_seq_by_data_root(&segment.root)
-            .await?
-        {
-            Some(seq) => seq,
-            None => return Err(error::invalid_params("root", "data root not found")),
-        };
+            .await?;
 
-        // Transaction already finalized for the specified file data root.
-        if self.ctx.log_store.check_tx_completed(tx_seq).await? {
-            return Err(error::invalid_params(
-                "root",
-                "already uploaded and finalized",
-            ));
+        let mut need_cache = false;
+
+        if let Some(tx_seq) = seq {
+            // Transaction already finalized for the specified file data root.
+            if self.ctx.log_store.check_tx_completed(tx_seq).await? {
+                return Err(error::invalid_params(
+                    "root",
+                    "already uploaded and finalized",
+                ));
+            }
+
+            let tx = match self.ctx.log_store.get_tx_by_seq_number(tx_seq).await? {
+                Some(tx) => tx,
+                None => return Err(error::invalid_params("root", "data root not found")),
+            };
+
+            if tx.size != segment.file_size {
+                return Err(error::invalid_params("file_size", "segment file size not matched with tx file size"));
+            }
+        } else {
+            //Check whether file is small enough to cache in the system
+            if segment.file_size > CACHE_FILE_MAX_SIZE {
+                return Err(error::invalid_params("file_size", "caching of large file when tx is unavailable is not supported"));
+            }
+
+            need_cache = true;
         }
 
-        let tx = match self.ctx.log_store.get_tx_by_seq_number(tx_seq).await? {
-            Some(tx) => tx,
-            None => return Err(error::invalid_params("root", "data root not found")),
-        };
+        if self.ctx.chunk_pool.check_already_has_cache(&segment.root).await {
+            need_cache = true;
+        }
 
-        segment.validate(tx.size as usize, self.ctx.config.chunks_per_segment)?;
+        segment.validate(self.ctx.config.chunks_per_segment)?;
 
         // Chunk pool will validate the data size.
         self.ctx
@@ -59,6 +74,9 @@ impl RpcServer for RpcServerImpl {
                 segment.data,
                 segment.index as usize,
                 self.ctx.config.chunks_per_segment,
+                need_cache,
+                seq,
+                segment.file_size as usize,
             )
             .await?;
 

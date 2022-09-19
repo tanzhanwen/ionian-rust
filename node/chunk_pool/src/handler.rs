@@ -1,7 +1,7 @@
 use super::mem_pool::MemoryChunkPool;
 use anyhow::Result;
 use network::NetworkMessage;
-use shared_types::DataRoot;
+use shared_types::{DataRoot, ChunkArray};
 use std::sync::Arc;
 use storage_async::Store;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -42,30 +42,30 @@ impl ChunkPoolHandler {
 
         // TODO(qhz): remove from memory pool after transaction finalized,
         // when store support to write chunks with reference.
-        let file = match self.mem_pool.remove_file(&root).await {
+        let mut file = match self.mem_pool.remove_file(&root).await {
             Some(file) => file,
             None => return Ok(false),
         };
 
-        if let Some(mut segments) = file.segments {
-            // When failed to write chunks or finalize transaction in rare case,
-            // client need to upload the whole file again.
-            while let Some(segment) = segments.pop_front() {
-                self.log_store.put_chunks(file.tx_seq, segment).await?;
-            }
+        let tx_seq = file.tx_seq;
+        let segments = file.segments.take().unwrap();
+        let mut segments: Vec<ChunkArray> = segments.into_iter().map(|(_k, v)| v).collect();
+
+        while let Some(seg) = segments.pop() {
+            self.log_store.put_chunks(tx_seq, seg).await?;
         }
 
-        self.log_store.finalize_tx(file.tx_seq).await?;
+        self.log_store.finalize_tx(tx_seq).await?;
 
-        debug!("Transaction finalized for seq {}", file.tx_seq);
+        debug!("Transaction finalized for seq {}", tx_seq);
 
         let msg = NetworkMessage::AnnounceLocalFile {
-            tx_seq: file.tx_seq,
+            tx_seq,
         };
         if let Err(e) = self.sender.send(msg) {
             error!(
                 "Failed to send NetworkMessage::AnnounceLocalFile message, tx_seq={}, err={}",
-                file.tx_seq, e
+                tx_seq, e
             );
         }
 
