@@ -1,7 +1,7 @@
 use super::mem_pool::MemoryChunkPool;
 use anyhow::Result;
 use network::NetworkMessage;
-use shared_types::{DataRoot, ChunkArray};
+use shared_types::{ChunkArray, DataRoot};
 use std::sync::Arc;
 use storage_async::Store;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -59,9 +59,7 @@ impl ChunkPoolHandler {
 
         debug!("Transaction finalized for seq {}", tx_seq);
 
-        let msg = NetworkMessage::AnnounceLocalFile {
-            tx_seq,
-        };
+        let msg = NetworkMessage::AnnounceLocalFile { tx_seq };
         if let Err(e) = self.sender.send(msg) {
             error!(
                 "Failed to send NetworkMessage::AnnounceLocalFile message, tx_seq={}, err={}",

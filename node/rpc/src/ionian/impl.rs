@@ -7,7 +7,7 @@ use jsonrpsee::core::RpcResult;
 use shared_types::DataRoot;
 use storage::try_option;
 
-const CACHE_FILE_MAX_SIZE: u64 = 10*1024*1024;
+const CACHE_FILE_MAX_SIZE: u64 = 10 * 1024 * 1024;
 pub struct RpcServerImpl {
     pub ctx: Context,
 }
@@ -49,18 +49,29 @@ impl RpcServer for RpcServerImpl {
             };
 
             if tx.size != segment.file_size {
-                return Err(error::invalid_params("file_size", "segment file size not matched with tx file size"));
+                return Err(error::invalid_params(
+                    "file_size",
+                    "segment file size not matched with tx file size",
+                ));
             }
         } else {
             //Check whether file is small enough to cache in the system
             if segment.file_size > CACHE_FILE_MAX_SIZE {
-                return Err(error::invalid_params("file_size", "caching of large file when tx is unavailable is not supported"));
+                return Err(error::invalid_params(
+                    "file_size",
+                    "caching of large file when tx is unavailable is not supported",
+                ));
             }
 
             need_cache = true;
         }
 
-        if self.ctx.chunk_pool.check_already_has_cache(&segment.root).await {
+        if self
+            .ctx
+            .chunk_pool
+            .check_already_has_cache(&segment.root)
+            .await
+        {
             need_cache = true;
         }
 

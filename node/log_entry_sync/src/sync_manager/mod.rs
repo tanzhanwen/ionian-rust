@@ -1,6 +1,7 @@
 use crate::sync_manager::config::LogSyncConfig;
 use crate::sync_manager::log_entry_fetcher::{LogEntryFetcher, LogFetchProgress};
 use anyhow::{bail, Result};
+use chunk_pool::MemoryChunkPool;
 use ethers::prelude::Middleware;
 use futures::FutureExt;
 use jsonrpsee::tracing::{debug, error, trace};
@@ -14,7 +15,6 @@ use storage::log_store::Store;
 use task_executor::{ShutdownReason, TaskExecutor};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::RwLock;
-use chunk_pool::MemoryChunkPool;
 
 const RETRY_WAIT_MS: u64 = 500;
 
@@ -163,7 +163,7 @@ impl LogSyncManager {
                         error!("log sync write error");
                         break;
                     }
-                    
+
                     let _ = self.chunk_pool.update_file_info(&tx);
                 }
             }
