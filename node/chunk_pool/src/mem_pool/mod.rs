@@ -64,7 +64,7 @@ impl Inner {
             ));
         }
 
-        let file = self.segment_cache.get_file_mut(root).unwrap();
+        let mut file = self.segment_cache.remove_file(root).unwrap();
         let tx_seq = file.tx_seq;
         let segs = file.segments.take().unwrap();
         let segs = segs.into_iter().map(|(_k, v)| v).collect();
@@ -184,6 +184,7 @@ impl MemoryChunkPool {
         let max_writings = inner.config.max_writings;
         inner.write_control.write_segment(
             root,
+            tx_seq,
             seg_index,
             file_total_chunk_num,
             write_window_size,
@@ -256,7 +257,7 @@ impl MemoryChunkPool {
         Ok(true)
     }
 
-    pub(crate) async fn remove_file(&self, root: &DataRoot) -> Option<MemoryCachedFile> {
+    pub(crate) async fn remove_cached_file(&self, root: &DataRoot) -> Option<MemoryCachedFile> {
         let mut inner = self.inner.lock().await;
 
         let file = inner.segment_cache.remove_file(root)?;
@@ -302,6 +303,17 @@ impl MemoryChunkPool {
         }
 
         Ok(())
+    }
+
+    pub async fn get_tx_seq(&self, root: &DataRoot) -> u64 {
+        let mut inner = self.inner.lock().await;
+        let tx_seq = if inner.segment_cache.has_cache(root) {
+            inner.segment_cache.get_file_mut(root).unwrap().tx_seq
+        } else {
+            inner.write_control.get_tx_seq(root)
+        };
+
+        tx_seq
     }
 }
 

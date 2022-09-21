@@ -81,13 +81,15 @@ impl CtrlWindow {
 }
 
 struct FileWriteCtrl {
+    tx_seq: u64,
     total_chunks: usize,
     window: CtrlWindow,
 }
 
 impl FileWriteCtrl {
-    fn new(total_chunks: usize, window_size: usize) -> Self {
+    fn new(tx_seq: u64, total_chunks: usize, window_size: usize) -> Self {
         FileWriteCtrl {
+            tx_seq,
             total_chunks,
             window: CtrlWindow::new(window_size),
         }
@@ -114,6 +116,7 @@ impl ChunkPoolWriteCtrl {
     pub fn write_segment(
         &mut self,
         root: DataRoot,
+        tx_seq: u64,
         seg_index: usize,
         file_total_chunk_num: usize,
         write_window_size: usize,
@@ -122,7 +125,7 @@ impl ChunkPoolWriteCtrl {
         let file_ctrl = self
             .files
             .entry(root)
-            .or_insert_with(|| FileWriteCtrl::new(file_total_chunk_num, write_window_size));
+            .or_insert_with(|| FileWriteCtrl::new(tx_seq, file_total_chunk_num, write_window_size));
 
         if file_ctrl.total_chunks != file_total_chunk_num {
             bail!(anyhow!(
@@ -190,5 +193,10 @@ impl ChunkPoolWriteCtrl {
 
         assert!(self.total_writings > 0);
         self.total_writings -= 1;
+    }
+
+    pub fn get_tx_seq(&self, root: &DataRoot) -> u64 {
+        let file_ctrl = self.files.get(root).unwrap();
+        file_ctrl.tx_seq
     }
 }
