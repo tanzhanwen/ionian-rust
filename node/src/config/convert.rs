@@ -64,6 +64,7 @@ impl IonianConfig {
             enabled: self.rpc_enabled,
             listen_address,
             chunks_per_segment: self.rpc_chunks_per_segment,
+            max_cache_file_size: self.rpc_max_cache_file_size,
         })
     }
 

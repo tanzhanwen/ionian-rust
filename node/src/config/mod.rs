@@ -24,6 +24,7 @@ build_config! {
     (rpc_enabled, (bool), true)
     (rpc_listen_address, (String), "127.0.0.1:5678".to_string())
     (rpc_chunks_per_segment, (usize), 1024)
+    (rpc_max_cache_file_size, (usize), 10*1024*1024) //10MB
 
     // chunk pool
     (chunk_pool_write_window_size, (usize), 4)

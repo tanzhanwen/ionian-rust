@@ -209,6 +209,7 @@ def submit_data(client, data):
             "data": base64.b64encode(tmp).decode("utf-8"),
             "index": idx,
             "proof": proof,
+            "fileSize": len(data),
         }
 
         client.ionian_upload_segment(segment)

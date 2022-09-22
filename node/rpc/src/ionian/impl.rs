@@ -2,12 +2,12 @@ use super::api::RpcServer;
 use crate::error;
 use crate::types::{FileInfo, Segment, SegmentWithProof, Status};
 use crate::Context;
+use chunk_pool::SegmentMetaInfo;
 use jsonrpsee::core::async_trait;
 use jsonrpsee::core::RpcResult;
 use shared_types::DataRoot;
 use storage::try_option;
 
-const CACHE_FILE_MAX_SIZE: u64 = 10 * 1024 * 1024;
 pub struct RpcServerImpl {
     pub ctx: Context,
 }
@@ -25,6 +25,8 @@ impl RpcServer for RpcServerImpl {
 
     async fn upload_segment(&self, segment: SegmentWithProof) -> RpcResult<()> {
         debug!("ionian_uploadSegment()");
+
+        let _ = self.ctx.chunk_pool.validate_segment_size(&segment.data)?;
 
         let seq = self
             .ctx
@@ -56,7 +58,7 @@ impl RpcServer for RpcServerImpl {
             }
         } else {
             //Check whether file is small enough to cache in the system
-            if segment.file_size > CACHE_FILE_MAX_SIZE {
+            if segment.file_size as usize > self.ctx.config.max_cache_file_size {
                 return Err(error::invalid_params(
                     "file_size",
                     "caching of large file when tx is unavailable is not supported",
@@ -77,18 +79,17 @@ impl RpcServer for RpcServerImpl {
 
         segment.validate(self.ctx.config.chunks_per_segment)?;
 
+        let info = SegmentMetaInfo {
+            chunks_per_segment: self.ctx.config.chunks_per_segment,
+            need_cache,
+            tx_seq: seq,
+            file_size: segment.file_size as usize,
+        };
+
         // Chunk pool will validate the data size.
         self.ctx
             .chunk_pool
-            .add_chunks(
-                segment.root,
-                segment.data,
-                segment.index as usize,
-                self.ctx.config.chunks_per_segment,
-                need_cache,
-                seq,
-                segment.file_size as usize,
-            )
+            .add_chunks(segment.root, segment.data, segment.index as usize, info)
             .await?;
 
         Ok(())
