@@ -1,4 +1,4 @@
-use super::chunk_pool::file_size_to_chunk_num;
+use super::chunk_pool_inner::file_size_to_chunk_num;
 use anyhow::{anyhow, bail, Result};
 use hashlink::LinkedHashMap;
 use shared_types::{ChunkArray, DataRoot, Transaction, CHUNK_SIZE};
