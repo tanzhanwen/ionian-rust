@@ -129,8 +129,10 @@ dependencies = [
  "eth2_ssz",
  "eth2_ssz_derive",
  "ethereum-types 0.13.1",
+ "lazy_static",
  "serde",
  "tiny-keccak",
+ "tracing",
 ]
 
 [[package]]
@@ -4025,6 +4027,7 @@ dependencies = [
  "lazy_static",
  "network",
  "rand 0.8.5",
+ "shared_types",
  "storage",
  "task_executor",
  "tiny-keccak",

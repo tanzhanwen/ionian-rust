@@ -97,14 +97,6 @@ def initialize_ionian_config(data_dir, config_parameters):
         f.write("trace")
 
 
-def generate_data_root(chunk_data):
-    keccak = sha3.keccak_256()
-    keccak.update(b"\x00")
-    keccak.update(chunk_data)
-    data_root = encode_hex(keccak.digest())
-    return data_root
-
-
 def create_proof_and_segment(chunk_data, data_root, index=0):
     proof = {
         "lemma": [data_root],
