@@ -2,6 +2,7 @@ use super::api::RpcServer;
 use crate::error;
 use crate::types::{FileInfo, Segment, SegmentWithProof, Status};
 use crate::Context;
+use chunk_pool::SegmentMetaInfo;
 use jsonrpsee::core::async_trait;
 use jsonrpsee::core::RpcResult;
 use shared_types::DataRoot;
@@ -25,41 +26,42 @@ impl RpcServer for RpcServerImpl {
     async fn upload_segment(&self, segment: SegmentWithProof) -> RpcResult<()> {
         debug!("ionian_uploadSegment()");
 
-        // TODO(qhz): allow to cache small files before log entry retrieved from blockchain.
-        let tx_seq = match self
+        let _ = self.ctx.chunk_pool.validate_segment_size(&segment.data)?;
+
+        let seq = self
             .ctx
             .log_store
             .get_tx_seq_by_data_root(&segment.root)
-            .await?
-        {
-            Some(seq) => seq,
-            None => return Err(error::invalid_params("root", "data root not found")),
-        };
+            .await?;
 
-        // Transaction already finalized for the specified file data root.
-        if self.ctx.log_store.check_tx_completed(tx_seq).await? {
-            return Err(error::invalid_params(
-                "root",
-                "already uploaded and finalized",
-            ));
+        let mut need_cache = false;
+
+        if self
+            .ctx
+            .chunk_pool
+            .check_already_has_cache(&segment.root)
+            .await
+        {
+            need_cache = true;
         }
 
-        let tx = match self.ctx.log_store.get_tx_by_seq_number(tx_seq).await? {
-            Some(tx) => tx,
-            None => return Err(error::invalid_params("root", "data root not found")),
-        };
+        if !need_cache {
+            need_cache = self.check_need_cache(seq).await?;
+        }
 
-        segment.validate(tx.size as usize, self.ctx.config.chunks_per_segment)?;
+        segment.validate(self.ctx.config.chunks_per_segment)?;
+
+        let info = SegmentMetaInfo {
+            chunks_per_segment: self.ctx.config.chunks_per_segment,
+            need_cache,
+            tx_seq: seq,
+            file_size: segment.file_size as usize,
+        };
 
         // Chunk pool will validate the data size.
         self.ctx
             .chunk_pool
-            .add_chunks(
-                segment.root,
-                segment.data,
-                segment.index as usize,
-                self.ctx.config.chunks_per_segment,
-            )
+            .add_chunks(segment.root, segment.data, segment.index as usize, info)
             .await?;
 
         Ok(())
@@ -118,5 +120,47 @@ impl RpcServer for RpcServerImpl {
             tx,
             finalized: self.ctx.log_store.check_tx_completed(tx_seq).await?,
         }))
+    }
+}
+
+impl RpcServerImpl {
+    async fn check_need_cache(&self, seq: Option<u64>) -> RpcResult<bool> {
+        let mut need_cache = false;
+
+        if let Some(tx_seq) = seq {
+            // Transaction already finalized for the specified file data root.
+            if self.ctx.log_store.check_tx_completed(tx_seq).await? {
+                return Err(error::invalid_params(
+                    "root",
+                    "already uploaded and finalized",
+                ));
+            }
+
+            let tx = match self.ctx.log_store.get_tx_by_seq_number(tx_seq).await? {
+                Some(tx) => tx,
+                None => return Err(error::invalid_params("root", "data root not found")),
+            };
+
+            if tx.size != segment.file_size {
+                return Err(error::invalid_params(
+                    "file_size",
+                    "segment file size not matched with tx file size",
+                ));
+            }
+
+            need_cache = false;
+        } else {
+            //Check whether file is small enough to cache in the system
+            if segment.file_size as usize > self.ctx.config.max_cache_file_size {
+                return Err(error::invalid_params(
+                    "file_size",
+                    "caching of large file when tx is unavailable is not supported",
+                ));
+            }
+
+            need_cache = true;
+        }
+
+        Ok(need_cache)
     }
 }

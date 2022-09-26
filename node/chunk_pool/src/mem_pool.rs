@@ -91,75 +91,185 @@ impl CtrlWindow {
     }
 }
 
+struct FileWriteCtrl {
+    tx_seq: u64,
+    total_chunks: usize,
+    window: CtrlWindow,
+}
+
+impl FileWriteCtrl {
+    fn new(tx_seq: u64, total_chunks: usize, window_size: usize) -> Self {
+        FileWriteCtrl {
+            tx_seq,
+            total_chunks,
+            window: CtrlWindow::new(window_size),
+        }
+    }
+}
+
+pub struct ChunkPoolWriteCtrl {
+    /// Total number of threads that are writing chunks into store.
+    pub total_writings: usize,
+    /// Windows to control writing processes of files
+    files: HashMap<DataRoot, FileWriteCtrl>,
+}
+
+impl ChunkPoolWriteCtrl {
+    pub fn new() -> Self {
+        ChunkPoolWriteCtrl {
+            total_writings: 0,
+            files: HashMap::default(),
+        }
+    }
+
+    /// Try to cache the segment into memory pool if log entry not retrieved from blockchain yet.
+    /// Otherwise, return segments to write into store asynchronously for different files.
+    pub fn write_segment(
+        &mut self,
+        root: DataRoot,
+        tx_seq: u64,
+        seg_index: usize,
+        file_total_chunk_num: usize,
+        write_window_size: usize,
+        max_writings: usize,
+    ) -> Result<()> {
+        let file_ctrl = self
+            .files
+            .entry(root)
+            .or_insert_with(|| FileWriteCtrl::new(tx_seq, file_total_chunk_num, write_window_size));
+
+        if file_ctrl.total_chunks != file_total_chunk_num {
+            bail!(anyhow!(
+                "file size in segment doesn't match with file size declared in previous segment. Previous total chunk:{}, current total chunk:{}s",
+                file_ctrl.total_chunks,
+                file_total_chunk_num
+            ));
+        }
+
+        let window = &mut file_ctrl.window;
+
+        // Segment already uploaded.
+        if window.check_duplicate(seg_index) {
+            return Ok(());
+        }
+
+        // Limits the number of writing threads.
+        if self.total_writings >= max_writings {
+            bail!(anyhow!("too many data writing: {}", max_writings));
+        }
+
+        window.start_writing(seg_index)?;
+
+        self.total_writings += 1;
+
+        Ok(())
+    }
+
+    pub fn on_write_succeeded(
+        &mut self,
+        root: &DataRoot,
+        seg_index: usize,
+        chunks_per_segment: usize,
+        file_total_chunk_num: usize,
+    ) -> bool {
+        let file_ctrl = match self.files.get_mut(root) {
+            Some(w) => w,
+            None => return false,
+        };
+
+        let window = &mut file_ctrl.window;
+
+        window.finish_writing(seg_index);
+
+        assert!(self.total_writings > 0);
+        self.total_writings -= 1;
+
+        debug!("Succeeded to write segment, root={}, seg_index={}, file_total_chunk_num={}, total_writings={}",
+            root, seg_index, file_total_chunk_num, self.total_writings);
+
+        // All chunks of file written into store.
+        window.left_boundary * chunks_per_segment >= file_total_chunk_num
+    }
+
+    pub fn on_write_failed(&mut self, root: &DataRoot, seg_index: usize) {
+        let file_ctrl = match self.files.get_mut(root) {
+            Some(w) => w,
+            None => return,
+        };
+
+        let window = &mut file_ctrl.window;
+
+        //Rollback the segment status if failed
+        window.rollback_writing(seg_index);
+
+        assert!(self.total_writings > 0);
+        self.total_writings -= 1;
+    }
+
+    pub fn get_tx_seq(&self, root: &DataRoot) -> u64 {
+        let file_ctrl = self.files.get(root).unwrap();
+        file_ctrl.tx_seq
+    }
+}
+
 /// Used to cache chunks in memory pool and persist into db once log entry
 /// retrieved from blockchain.
 pub struct MemoryCachedFile {
-    pub window: CtrlWindow,
-    /// Memory cached segments before log entry retrieved from blockchain.
-    pub segments: Option<VecDeque<ChunkArray>>,
+    /// Window to control the cache of each file
+    pub segments: Option<HashMap<usize, ChunkArray>>,
     /// Total number of chunks for the cache file, which is updated from log entry.
-    total_chunks: usize,
+    pub total_chunks: usize,
     /// Transaction seq that used to write chunks into store.
     pub tx_seq: u64,
     /// Used for garbage collection.
     expired_at: Instant,
+    /// Number of chunks that's currently cached for this file
+    pub cached_chunk_num: usize,
 }
 
 impl MemoryCachedFile {
-    fn new(timeout: Duration, window_size: usize) -> Self {
+    fn new(timeout: Duration) -> Self {
         MemoryCachedFile {
-            window: CtrlWindow::new(window_size),
-            segments: None,
+            segments: Some(HashMap::default()),
             total_chunks: 0,
             tx_seq: 0,
             expired_at: Instant::now().add(timeout),
+            cached_chunk_num: 0,
         }
     }
-}
 
-impl MemoryCachedFile {
     /// Updates file with transaction once log entry retrieved from blockchain.
     /// So that, write memory cached segments into database.
-    fn update_with_tx(&mut self, tx: &Transaction) {
-        self.total_chunks = tx.size as usize / CHUNK_SIZE;
-        if tx.size as usize % CHUNK_SIZE > 0 {
-            self.total_chunks += 1;
-        }
-
+    pub fn update_with_tx(&mut self, tx: &Transaction) {
+        self.total_chunks = file_size_to_chunk_num(tx.size as usize);
         self.tx_seq = tx.seq;
     }
 }
 
-struct Inner {
-    config: Config,
+pub struct ChunkPoolCache {
     expiration_timeout: Duration,
     /// All cached files.
     files: LinkedHashMap<DataRoot, MemoryCachedFile>,
     /// Total number of chunks that cached in the memory pool.
-    total_chunks: usize,
-    /// Total number of threads that are writing chunks into store.
-    total_writings: usize,
+    pub total_chunks: usize,
 }
 
-impl Inner {
-    fn new(config: Config) -> Self {
-        let expiration_timeout = Duration::from_secs(config.expiration_time_secs);
-        Inner {
-            config,
+impl ChunkPoolCache {
+    pub fn new(expiration_timeout: Duration) -> Self {
+        ChunkPoolCache {
             expiration_timeout,
-            files: Default::default(),
+            files: LinkedHashMap::default(),
             total_chunks: 0,
-            total_writings: 0,
         }
     }
 
-    fn update_expiration_time(&mut self, root: &DataRoot) {
+    pub fn update_expiration_time(&mut self, root: &DataRoot) {
         if let Some(file) = self.files.to_back(root) {
             file.expired_at = Instant::now().add(self.expiration_timeout);
         }
     }
 
-    fn garbage_collect(&mut self) {
+    pub fn garbage_collect(&mut self) {
         while let Some((_, file)) = self.files.front() {
             if file.expired_at > Instant::now() {
                 return;
@@ -172,169 +282,139 @@ impl Inner {
         }
     }
 
-    fn update_total_chunks_when_remove_file(&mut self, file: &MemoryCachedFile) {
-        if let Some(ref segments) = file.segments {
-            for seg in segments.iter() {
-                let seg_chunks = seg.data.len() / CHUNK_SIZE;
-                assert!(self.total_chunks >= seg_chunks);
-                self.total_chunks -= seg_chunks;
-            }
-        }
+    pub fn update_total_chunks_when_remove_file(&mut self, file: &MemoryCachedFile) {
+        assert!(self.total_chunks >= file.cached_chunk_num);
+        self.total_chunks -= file.cached_chunk_num;
     }
 
-    /// Try to cache the segment into memory pool if log entry not retrieved from blockchain yet.
-    /// Otherwise, return segments to write into store asynchronously for different files.
-    fn cache_or_write_segment(
+    pub fn cache_segment(
         &mut self,
         root: DataRoot,
         segment: Vec<u8>,
         seg_index: usize,
         chunks_per_segment: usize,
-        maybe_tx: Option<Transaction>,
-    ) -> Result<Option<(u64, VecDeque<ChunkArray>)>> {
-        let file = self.files.entry(root).or_insert_with(|| {
-            MemoryCachedFile::new(self.expiration_timeout, self.config.window_size)
-        });
+        max_cached_chunks_all: usize,
+    ) -> Result<bool> {
+        let file = self
+            .files
+            .entry(root)
+            .or_insert_with(|| MemoryCachedFile::new(self.expiration_timeout));
 
-        // Update transaction in case that log entry already retrieved from blockchain
-        // before any segment uploaded to storage node. In this case, segment will not
-        // be cached in memory pool.
-        if file.total_chunks == 0 {
-            if let Some(tx) = maybe_tx {
-                file.update_with_tx(&tx);
-            }
-        }
+        let mut file_complete = false;
 
-        let num_chunks = segment.len() / CHUNK_SIZE;
-
-        // Prepare segments to write into store when log entry already retrieved.
-        if file.total_chunks > 0 {
-            //Check whether the segment is within the file_size limit
-            if seg_index * chunks_per_segment + num_chunks > file.total_chunks {
-                bail!(anyhow!(
-                    "seg index exceeds file size limit. seg_index: {}, chunks_per_segment:{}, num_chunks:{}, file total chunks:{}",
-                    seg_index,
-                    chunks_per_segment,
-                    num_chunks,
-                    file.total_chunks
-                ));
-            }
-
-            // Segment already uploaded.
-            if file.window.check_duplicate(seg_index) {
-                return Ok(None);
-            }
-
-            // Limits the number of writing threads.
-            if self.total_writings >= self.config.max_writings {
-                bail!(anyhow!(
-                    "too many data writing: {}",
-                    self.config.max_writings
-                ));
-            }
-
-            file.window.start_writing(seg_index)?;
-
-            // Note, do not update the counter of cached chunks in this case.
-            self.total_writings += 1;
-            file.segments
-                .get_or_insert_with(Default::default)
-                .push_back(ChunkArray {
-                    data: segment,
-                    start_index: (seg_index * chunks_per_segment) as u64,
-                });
-            return Ok(Some((file.tx_seq, file.segments.take().unwrap())));
+        //Segment already cached in memory. Directly return OK
+        let segments = file.segments.get_or_insert(HashMap::default());
+        if segments.contains_key(&seg_index) {
+            return Ok(file_complete);
         }
 
         // Otherwise, just cache segment in memory
+        let num_chunks = segment.len() / CHUNK_SIZE;
+
         // Limits the cached chunks in the memory pool.
-        if self.total_chunks + num_chunks > self.config.max_cached_chunks_all {
+        if self.total_chunks + num_chunks > max_cached_chunks_all {
             bail!(anyhow!(
                 "exceeds the maximum cached chunks of whole pool: {}",
-                self.config.max_cached_chunks_all
+                max_cached_chunks_all
             ));
         }
 
         // Cache segment and update the counter for cached chunks.
         self.total_chunks += num_chunks;
-        file.segments
-            .get_or_insert_with(Default::default)
-            .push_back(ChunkArray {
+        file.cached_chunk_num += num_chunks;
+        segments.insert(
+            seg_index,
+            ChunkArray {
                 data: segment,
                 start_index: (seg_index * chunks_per_segment) as u64,
-            });
+            },
+        );
 
-        Ok(None)
+        if file.total_chunks > 0 {
+            file_complete = file.cached_chunk_num >= file.total_chunks;
+        }
+
+        Ok(file_complete)
     }
 
-    fn on_write_succeeded(
+    pub fn has_cache(&self, root: &DataRoot) -> bool {
+        self.files.contains_key(root)
+    }
+
+    pub fn get_file_mut(&mut self, root: &DataRoot) -> Option<&mut MemoryCachedFile> {
+        self.files.get_mut(root)
+    }
+
+    pub fn remove_file(&mut self, root: &DataRoot) -> Option<MemoryCachedFile> {
+        self.files.remove(root)
+    }
+}
+
+struct Inner {
+    config: Config,
+    segment_cache: ChunkPoolCache,
+    write_control: ChunkPoolWriteCtrl,
+}
+
+impl Inner {
+    fn new(config: Config) -> Self {
+        let expiration_timeout = Duration::from_secs(config.expiration_time_secs);
+        Inner {
+            config,
+            segment_cache: ChunkPoolCache::new(expiration_timeout),
+            write_control: ChunkPoolWriteCtrl::new(),
+        }
+    }
+
+    fn on_write_cache_succeeded(&mut self, root: &DataRoot, cached_segs_chunks: usize) {
+        assert!(self.write_control.total_writings > 0);
+        self.write_control.total_writings -= 1;
+        assert!(self.segment_cache.total_chunks >= cached_segs_chunks);
+        self.segment_cache.total_chunks -= cached_segs_chunks;
+
+        let file = self.segment_cache.get_file_mut(root).unwrap();
+        file.cached_chunk_num -= cached_segs_chunks;
+    }
+
+    fn on_write_cache_failed(&mut self, root: &DataRoot, cached_segs_chunks: usize) {
+        assert!(self.write_control.total_writings > 0);
+        self.write_control.total_writings -= 1;
+        assert!(self.segment_cache.total_chunks >= cached_segs_chunks);
+        self.segment_cache.total_chunks -= cached_segs_chunks;
+
+        let file = self.segment_cache.get_file_mut(root).unwrap();
+        file.cached_chunk_num -= cached_segs_chunks;
+    }
+
+    /// Return the tx seq and all segments that belong to the root.
+    fn get_all_cached_segments_to_write(
         &mut self,
         root: &DataRoot,
-        cached_segs_chunks: usize,
-        seg_index: usize,
-        chunks_per_segment: usize,
-    ) -> bool {
-        let file = match self.files.get_mut(root) {
-            Some(f) => f,
-            None => return false,
-        };
+    ) -> Result<(u64, usize, Vec<ChunkArray>)> {
+        // Limits the number of writing threads.
+        if self.write_control.total_writings >= self.config.max_writings {
+            bail!(anyhow!(
+                "too many data writing: {}",
+                self.config.max_writings
+            ));
+        }
 
-        file.window.finish_writing(seg_index);
+        let mut file = self.segment_cache.remove_file(root).unwrap();
+        let tx_seq = file.tx_seq;
+        let segs = file.segments.take().unwrap();
+        let segs = segs.into_iter().map(|(_k, v)| v).collect();
 
-        assert!(self.total_chunks >= cached_segs_chunks);
-        self.total_chunks -= cached_segs_chunks;
-        assert!(self.total_writings > 0);
-        self.total_writings -= 1;
+        self.write_control.total_writings += 1;
 
-        debug!("Succeeded to write segment, root={}, seg_index={}({}), pool_total_chunks={}, total_writings={}",
-            root, seg_index, file.total_chunks, self.total_chunks, self.total_writings);
-
-        // All chunks of file written into store.
-        file.total_chunks > 0 && file.window.left_boundary * chunks_per_segment >= file.total_chunks
+        Ok((tx_seq, file.cached_chunk_num, segs))
     }
+}
 
-    fn on_write_failed(&mut self, root: &DataRoot, cached_segs_chunks: usize, seg_index: usize) {
-        let file = match self.files.get_mut(root) {
-            Some(f) => f,
-            None => return,
-        };
-
-        //Rollback the segment status if failed
-        file.window.rollback_writing(seg_index);
-
-        assert!(self.total_chunks >= cached_segs_chunks);
-        self.total_chunks -= cached_segs_chunks;
-        assert!(self.total_writings > 0);
-        self.total_writings -= 1;
-    }
-
-    /// If log entry retrieved timely, we should update the transaction for the first 2 segments.
-    fn requires_to_update_tx_before_cache(&self, root: &DataRoot, seg_index: usize) -> bool {
-        if seg_index == 0 {
-            return true;
-        }
-
-        // Must be updated by `update_file_info` by log entry poller.
-        if seg_index > 1 {
-            return false;
-        }
-
-        let file = match self.files.get(root) {
-            Some(f) => f,
-            None => return false,
-        };
-
-        // Already updated
-        if file.total_chunks > 0 {
-            return false;
-        }
-
-        // Only required for the 2nd segment.
-        match &file.segments {
-            Some(segs) => segs.len() == 1,
-            None => false,
-        }
-    }
+pub struct SegmentMetaInfo {
+    pub chunks_per_segment: usize,
+    pub need_cache: bool,
+    pub tx_seq: Option<u64>,
+    pub file_size: usize,
 }
 
 /// Caches data chunks in memory before the entire file uploaded to storage node
@@ -354,7 +434,7 @@ impl MemoryChunkPool {
         }
     }
 
-    fn validate_segment_size(&self, segment: &Vec<u8>) -> Result<usize> {
+    pub fn validate_segment_size(&self, segment: &Vec<u8>) -> Result<()> {
         if segment.is_empty() {
             bail!(anyhow!("data is empty"));
         }
@@ -363,16 +443,7 @@ impl MemoryChunkPool {
             bail!(anyhow!("invalid data length"))
         }
 
-        let num_chunks = segment.len() / CHUNK_SIZE;
-
-        Ok(num_chunks)
-    }
-
-    async fn get_tx_by_root(&self, root: &DataRoot) -> Result<Option<Transaction>> {
-        match self.log_store.get_tx_seq_by_data_root(root).await? {
-            Some(tx_seq) => self.log_store.get_tx_by_seq_number(tx_seq).await,
-            None => Ok(None),
-        }
+        Ok(())
     }
 
     /// Adds chunks into memory pool if log entry not retrieved from blockchain yet. Otherwise, write
@@ -382,90 +453,98 @@ impl MemoryChunkPool {
         root: DataRoot,
         segment: Vec<u8>,
         seg_index: usize,
-        chunks_per_segment: usize,
+        info: SegmentMetaInfo,
     ) -> Result<()> {
         // Lazy GC when new chunks added.
-        self.inner.lock().await.garbage_collect();
+        self.inner.lock().await.segment_cache.garbage_collect();
 
-        self.add_chunks_inner(root, segment, seg_index, chunks_per_segment)
+        if info.need_cache {
+            let mut inner = self.inner.lock().await;
+            let max_cached_chunks_all = inner.config.max_cached_chunks_all;
+            let file_complete = inner.segment_cache.cache_segment(
+                root,
+                segment,
+                seg_index,
+                info.chunks_per_segment,
+                max_cached_chunks_all,
+            )?;
+            inner.segment_cache.update_expiration_time(&root);
+            drop(inner);
+
+            if file_complete {
+                //Trigger writing the cached file into store and finalize when all chunks of a file are cached
+                self.write_all_cached_chunks_and_finalize(root).await?;
+            }
+        } else {
+            self.write_chunks_inner(
+                root,
+                segment,
+                seg_index,
+                info.chunks_per_segment,
+                info.tx_seq.unwrap(),
+                info.file_size,
+            )
             .await?;
-
-        // Update expiration time when succeeded.
-        self.inner.lock().await.update_expiration_time(&root);
+        }
 
         Ok(())
     }
 
-    async fn add_chunks_inner(
+    async fn write_chunks_inner(
         &self,
         root: DataRoot,
         segment: Vec<u8>,
         seg_index: usize,
         chunks_per_segment: usize,
+        tx_seq: u64,
+        file_size: usize,
     ) -> Result<()> {
-        let num_chunks = self.validate_segment_size(&segment)?;
-
-        // Try to update file with transaction for the first 2 segments,
-        // in case that log entry already retrieved from blockchain.
-        //
-        // Note, the log entry may be retrieved immediately before the mutex acquired to `cache_or_write_segment`.
-        // So, the `maybe_tx` below may be `None` for the 1st segment. When the 2nd segment arrived, try again to
-        // update the log entry info from db.
-        let mut maybe_tx = None;
-        if self
-            .inner
-            .lock()
-            .await
-            .requires_to_update_tx_before_cache(&root, seg_index)
-        {
-            maybe_tx = self.get_tx_by_root(&root).await?;
-        }
+        let file_total_chunk_num = file_size_to_chunk_num(file_size);
 
         debug!(
-            "Begin to cache or write segment, root={}, segment_size={}, segment_index={}, tx={:?}",
+            "Begin to write segment, root={}, segment_size={}, segment_index={}",
             root,
             segment.len(),
             seg_index,
-            maybe_tx
         );
 
-        // Cache segment in memory if log entry not retrieved yet, or write into store directly.
-        let (tx_seq, mut segments) = match self.inner.lock().await.cache_or_write_segment(
+        //Write the segment in window
+        let mut inner = self.inner.lock().await;
+        let write_window_size = inner.config.write_window_size;
+        let max_writings = inner.config.max_writings;
+        inner.write_control.write_segment(
             root,
-            segment,
+            tx_seq,
             seg_index,
-            chunks_per_segment,
-            maybe_tx,
-        )? {
-            Some(tuple) => tuple,
-            None => return Ok(()),
-        };
-
-        let mut total_chunks_to_write = 0;
-        for seg in segments.iter() {
-            total_chunks_to_write += seg.data.len() / CHUNK_SIZE;
-        }
-        let pending_seg_chunks = total_chunks_to_write - num_chunks;
+            file_total_chunk_num,
+            write_window_size,
+            max_writings,
+        )?;
+        drop(inner);
 
         // Write memory cached segments into store.
-        while let Some(seg) = segments.pop_front() {
-            // TODO(qhz): error handling
-            // 1. Push the failed segment back to front. (enhance store to return Err(ChunkArray))
-            // 2. Put the incompleted segments back to memory pool.
-            if let Err(e) = self.log_store.put_chunks(tx_seq, seg).await {
-                self.inner
-                    .lock()
-                    .await
-                    .on_write_failed(&root, pending_seg_chunks, seg_index);
-                return Err(e);
-            }
+        // TODO(qhz): error handling
+        // 1. Push the failed segment back to front. (enhance store to return Err(ChunkArray))
+        // 2. Put the incompleted segments back to memory pool.
+        let seg = ChunkArray {
+            data: segment,
+            start_index: (seg_index * chunks_per_segment) as u64,
+        };
+
+        if let Err(e) = self.log_store.put_chunks(tx_seq, seg).await {
+            self.inner
+                .lock()
+                .await
+                .write_control
+                .on_write_failed(&root, seg_index);
+            return Err(e);
         }
 
-        let all_uploaded = self.inner.lock().await.on_write_succeeded(
+        let all_uploaded = self.inner.lock().await.write_control.on_write_succeeded(
             &root,
-            pending_seg_chunks,
             seg_index,
             chunks_per_segment,
+            file_total_chunk_num,
         );
 
         // Notify to finalize transaction asynchronously.
@@ -485,7 +564,7 @@ impl MemoryChunkPool {
         let mut inner = self.inner.lock().await;
 
         // Do nothing if file not uploaded yet.
-        let file = match inner.files.get_mut(&tx.data_merkle_root) {
+        let file = match inner.segment_cache.get_file_mut(&tx.data_merkle_root) {
             Some(f) => f,
             None => return Ok(false),
         };
@@ -493,12 +572,11 @@ impl MemoryChunkPool {
         // Update the file info with transaction.
         file.update_with_tx(tx);
 
-        // TODO(zhanwen): Add the following logic back in the pr of caching samll file
         // File partially uploaded and it's up to user thread
         // to write chunks into store and finalize transaction.
-        //if file.next_index < file.total_chunks {
-        //    return Ok(true);
-        //}
+        if file.cached_chunk_num < file.total_chunks {
+            return Ok(true);
+        }
 
         // Otherwise, notify to write all memory cached chunks and finalize transaction.
         if let Err(e) = self.sender.send(tx.data_merkle_root) {
@@ -509,12 +587,71 @@ impl MemoryChunkPool {
         Ok(true)
     }
 
-    pub(crate) async fn remove_file(&self, root: &DataRoot) -> Option<MemoryCachedFile> {
+    pub(crate) async fn remove_cached_file(&self, root: &DataRoot) -> Option<MemoryCachedFile> {
         let mut inner = self.inner.lock().await;
 
-        let file = inner.files.remove(root)?;
-        inner.update_total_chunks_when_remove_file(&file);
+        let file = inner.segment_cache.remove_file(root)?;
+        inner
+            .segment_cache
+            .update_total_chunks_when_remove_file(&file);
 
         Some(file)
     }
+
+    pub async fn check_already_has_cache(&self, root: &DataRoot) -> bool {
+        self.inner.lock().await.segment_cache.has_cache(root)
+    }
+
+    async fn write_all_cached_chunks_and_finalize(&self, root: DataRoot) -> Result<()> {
+        let (tx_seq, cache_chunk_num, mut segments) = self
+            .inner
+            .lock()
+            .await
+            .get_all_cached_segments_to_write(&root)?;
+
+        while let Some(seg) = segments.pop() {
+            // TODO(qhz): error handling
+            // 1. Push the failed segment back to front. (enhance store to return Err(ChunkArray))
+            // 2. Put the incompleted segments back to memory pool.
+            if let Err(e) = self.log_store.put_chunks(tx_seq, seg).await {
+                self.inner
+                    .lock()
+                    .await
+                    .on_write_cache_failed(&root, cache_chunk_num);
+                return Err(e);
+            }
+        }
+
+        self.inner
+            .lock()
+            .await
+            .on_write_cache_succeeded(&root, cache_chunk_num);
+
+        if let Err(e) = self.sender.send(root) {
+            // Channel receiver will not be dropped until program exit.
+            bail!(anyhow!("channel send error: {}", e));
+        }
+
+        Ok(())
+    }
+
+    pub async fn get_tx_seq(&self, root: &DataRoot) -> u64 {
+        let mut inner = self.inner.lock().await;
+        let tx_seq = if inner.segment_cache.has_cache(root) {
+            inner.segment_cache.get_file_mut(root).unwrap().tx_seq
+        } else {
+            inner.write_control.get_tx_seq(root)
+        };
+
+        tx_seq
+    }
+}
+
+pub fn file_size_to_chunk_num(file_size: usize) -> usize {
+    let mut chunk_num = file_size as usize / CHUNK_SIZE;
+    if file_size as usize % CHUNK_SIZE > 0 {
+        chunk_num += 1;
+    }
+
+    chunk_num
 }

@@ -1,6 +1,7 @@
 use crate::sync_manager::config::LogSyncConfig;
 use crate::sync_manager::log_entry_fetcher::{LogEntryFetcher, LogFetchProgress};
 use anyhow::{bail, Result};
+use chunk_pool::MemoryChunkPool;
 use ethers::prelude::Middleware;
 use futures::FutureExt;
 use jsonrpsee::tracing::{debug, error, trace};
@@ -22,7 +23,7 @@ pub struct LogSyncManager {
     config: LogSyncConfig,
     log_fetcher: LogEntryFetcher,
     store: Arc<RwLock<dyn Store>>,
-
+    chunk_pool: Arc<MemoryChunkPool>,
     next_tx_seq: u64,
 }
 
@@ -31,6 +32,7 @@ impl LogSyncManager {
         config: LogSyncConfig,
         executor: TaskExecutor,
         store: Arc<RwLock<dyn Store>>,
+        chunk_pool: Arc<MemoryChunkPool>,
     ) -> Result<()> {
         let next_tx_seq = store.read().await.next_tx_seq()?;
 
@@ -53,6 +55,7 @@ impl LogSyncManager {
                         log_fetcher,
                         next_tx_seq,
                         store,
+                        chunk_pool,
                     };
 
                     // Load previous progress from db and check if chain reorg happens after restart.
@@ -155,11 +158,13 @@ impl LogSyncManager {
                     self.store.write().await.put_sync_progress(progress)?;
                 }
                 LogFetchProgress::Transaction(tx) => {
-                    if !self.put_tx(tx).await {
+                    if !self.put_tx(tx.clone()).await {
                         // Unexpected error.
                         error!("log sync write error");
                         break;
                     }
+
+                    let _ = self.chunk_pool.update_file_info(&tx);
                 }
             }
         }
