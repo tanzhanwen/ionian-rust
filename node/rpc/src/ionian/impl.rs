@@ -46,7 +46,7 @@ impl RpcServer for RpcServerImpl {
         }
 
         if !need_cache {
-            need_cache = self.check_need_cache(seq).await?;
+            need_cache = self.check_need_cache(seq, segment.file_size).await?;
         }
 
         segment.validate(self.ctx.config.chunks_per_segment)?;
@@ -124,7 +124,7 @@ impl RpcServer for RpcServerImpl {
 }
 
 impl RpcServerImpl {
-    async fn check_need_cache(&self, seq: Option<u64>) -> RpcResult<bool> {
+    async fn check_need_cache(&self, seq: Option<u64>, file_size: u64) -> RpcResult<bool> {
         let mut need_cache = false;
 
         if let Some(tx_seq) = seq {
@@ -141,17 +141,15 @@ impl RpcServerImpl {
                 None => return Err(error::invalid_params("root", "data root not found")),
             };
 
-            if tx.size != segment.file_size {
+            if tx.size != file_size {
                 return Err(error::invalid_params(
                     "file_size",
                     "segment file size not matched with tx file size",
                 ));
             }
-
-            need_cache = false;
         } else {
             //Check whether file is small enough to cache in the system
-            if segment.file_size as usize > self.ctx.config.max_cache_file_size {
+            if file_size as usize > self.ctx.config.max_cache_file_size {
                 return Err(error::invalid_params(
                     "file_size",
                     "caching of large file when tx is unavailable is not supported",
