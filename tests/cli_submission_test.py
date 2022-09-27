@@ -34,8 +34,6 @@ class CliSubmissionTest(TestFramework):
             256 * 16385,
             256 * 1024 * 64,
         ]
-        # FIXME: Enable after cli fixed.
-        return
 
         for i, v in enumerate(data_size):
             self.__test_upload_file_with_cli(

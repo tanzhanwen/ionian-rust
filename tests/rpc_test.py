@@ -48,8 +48,7 @@ class RpcTest(TestFramework):
         assert_equal(
             client2.ionian_download_segment(data_root, 0, 1), segment[0]["data"]
         )
-        # FIXME: Enable after cli fixed.
-        return
+
         self.__test_upload_file_with_cli(client1)
 
         client2.shutdown()
