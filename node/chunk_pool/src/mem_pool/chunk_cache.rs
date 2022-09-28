@@ -1,4 +1,4 @@
-use super::chunk_pool_inner::file_size_to_chunk_num;
+use super::chunk_pool_inner::{file_size_to_chunk_num, SegmentInfo};
 use anyhow::{anyhow, bail, Result};
 use hashlink::LinkedHashMap;
 use shared_types::{ChunkArray, DataRoot, Transaction, CHUNK_SIZE};
@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 /// retrieved from blockchain.
 pub struct MemoryCachedFile {
     /// Window to control the cache of each file
-    pub segments: Option<HashMap<usize, ChunkArray>>,
+    pub segments: HashMap<usize, ChunkArray>,
     /// Total number of chunks for the cache file, which is updated from log entry.
     pub total_chunks: usize,
     /// Transaction seq that used to write chunks into store.
@@ -24,7 +24,7 @@ pub struct MemoryCachedFile {
 impl MemoryCachedFile {
     fn new(timeout: Duration) -> Self {
         MemoryCachedFile {
-            segments: Some(HashMap::default()),
+            segments: HashMap::default(),
             total_chunks: 0,
             tx_seq: 0,
             expired_at: Instant::now().add(timeout),
@@ -83,27 +83,23 @@ impl ChunkPoolCache {
 
     pub fn cache_segment(
         &mut self,
-        root: DataRoot,
-        segment: Vec<u8>,
-        seg_index: usize,
-        chunks_per_segment: usize,
+        seg_info: SegmentInfo,
         max_cached_chunks_all: usize,
     ) -> Result<bool> {
         let file = self
             .files
-            .entry(root)
+            .entry(seg_info.root)
             .or_insert_with(|| MemoryCachedFile::new(self.expiration_timeout));
 
         let mut file_complete = false;
 
         //Segment already cached in memory. Directly return OK
-        let segments = file.segments.get_or_insert(HashMap::default());
-        if segments.contains_key(&seg_index) {
+        if file.segments.contains_key(&seg_info.seg_index) {
             return Ok(file_complete);
         }
 
         // Otherwise, just cache segment in memory
-        let num_chunks = segment.len() / CHUNK_SIZE;
+        let num_chunks = seg_info.seg_data.len() / CHUNK_SIZE;
 
         // Limits the cached chunks in the memory pool.
         if self.total_chunks + num_chunks > max_cached_chunks_all {
@@ -116,11 +112,11 @@ impl ChunkPoolCache {
         // Cache segment and update the counter for cached chunks.
         self.total_chunks += num_chunks;
         file.cached_chunk_num += num_chunks;
-        segments.insert(
-            seg_index,
+        file.segments.insert(
+            seg_info.seg_index,
             ChunkArray {
-                data: segment,
-                start_index: (seg_index * chunks_per_segment) as u64,
+                data: seg_info.seg_data,
+                start_index: (seg_info.seg_index * seg_info.chunks_per_segment) as u64,
             },
         );
 

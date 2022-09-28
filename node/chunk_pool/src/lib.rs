@@ -6,7 +6,7 @@ mod mem_pool;
 
 pub use handler::ChunkPoolHandler;
 pub use mem_pool::MemoryChunkPool;
-pub use mem_pool::SegmentMetaInfo;
+pub use mem_pool::SegmentInfo;
 
 use std::sync::Arc;
 

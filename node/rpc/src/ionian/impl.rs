@@ -2,7 +2,7 @@ use super::api::RpcServer;
 use crate::error;
 use crate::types::{FileInfo, Segment, SegmentWithProof, Status};
 use crate::Context;
-use chunk_pool::SegmentMetaInfo;
+use chunk_pool::SegmentInfo;
 use jsonrpsee::core::async_trait;
 use jsonrpsee::core::RpcResult;
 use shared_types::DataRoot;
@@ -51,18 +51,21 @@ impl RpcServer for RpcServerImpl {
 
         segment.validate(self.ctx.config.chunks_per_segment)?;
 
-        let info = SegmentMetaInfo {
+        let seg_info = SegmentInfo {
+            root: segment.root,
+            seg_data: segment.data,
+            seg_index: segment.index as usize,
             chunks_per_segment: self.ctx.config.chunks_per_segment,
-            need_cache,
-            tx_seq: seq,
-            file_size: segment.file_size as usize,
         };
 
-        // Chunk pool will validate the data size.
-        self.ctx
-            .chunk_pool
-            .add_chunks(segment.root, segment.data, segment.index as usize, info)
-            .await?;
+        if need_cache {
+            self.ctx.chunk_pool.cache_chunks(seg_info).await?;
+        } else {
+            self.ctx
+                .chunk_pool
+                .write_chunks(seg_info, seq.unwrap(), segment.file_size as usize)
+                .await?;
+        }
 
         Ok(())
     }

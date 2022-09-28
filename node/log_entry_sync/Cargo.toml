@@ -19,4 +19,3 @@ ethers = { git = "https://github.com/k-huetsch/ethers-rs.git", branch="ionian-de
 serde_json = "1.0.82"
 storage = { path = "../storage" }
 contract-interface = { path = "../../common/contract-interface" }
-chunk_pool = { path = "../chunk_pool" }

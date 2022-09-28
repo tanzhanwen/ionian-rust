@@ -1,6 +1,5 @@
 use super::{Client, RuntimeContext};
 use chunk_pool::Config as ChunkPoolConfig;
-use chunk_pool::MemoryChunkPool;
 use file_location_cache::FileLocationCache;
 use log_entry_sync::{LogSyncConfig, LogSyncManager};
 use miner::{MineService, MinerConfig, MinerMessage};
@@ -60,7 +59,6 @@ pub struct ClientBuilder {
     network: Option<NetworkComponents>,
     sync: Option<SyncComponents>,
     miner: Option<MinerComponents>,
-    chunk_pool: Option<Arc<MemoryChunkPool>>,
 }
 
 impl ClientBuilder {
@@ -74,7 +72,6 @@ impl ClientBuilder {
             network: None,
             sync: None,
             miner: None,
-            chunk_pool: None,
         }
     }
 
@@ -205,7 +202,7 @@ impl ClientBuilder {
     }
 
     pub async fn with_rpc(
-        mut self,
+        self,
         rpc_config: RPCConfig,
         chunk_pool_config: ChunkPoolConfig,
     ) -> Result<Self, String> {
@@ -220,8 +217,6 @@ impl ClientBuilder {
 
         let (chunk_pool, chunk_pool_handler) =
             chunk_pool::unbounded(chunk_pool_config, async_store.clone(), network_send.clone());
-
-        self.chunk_pool = Some(chunk_pool.clone());
 
         let ctx = rpc::Context {
             config: rpc_config,
@@ -247,8 +242,7 @@ impl ClientBuilder {
     pub async fn with_log_sync(self, config: LogSyncConfig) -> Result<Self, String> {
         let executor = require!("log_sync", self, runtime_context).clone().executor;
         let store = require!("log_sync", self, store).clone();
-        let chunk_pool = require!("log_sync", self, chunk_pool).clone();
-        LogSyncManager::spawn(config, executor, store, chunk_pool)
+        LogSyncManager::spawn(config, executor, store)
             .await
             .map_err(|e| e.to_string())?;
         Ok(self)

@@ -61,22 +61,22 @@ impl Inner {
             ));
         }
 
-        let mut file = self.segment_cache.remove_file(root).unwrap();
+        let file = self.segment_cache.remove_file(root).unwrap();
         let tx_seq = file.tx_seq;
-        let segs = file.segments.take().unwrap();
-        let segs = segs.into_iter().map(|(_k, v)| v).collect();
+        let cached_chunk_num = file.cached_chunk_num;
+        let segs = file.segments.into_iter().map(|(_k, v)| v).collect();
 
         self.write_control.total_writings += 1;
 
-        Ok((tx_seq, file.cached_chunk_num, segs))
+        Ok((tx_seq, cached_chunk_num, segs))
     }
 }
 
-pub struct SegmentMetaInfo {
+pub struct SegmentInfo {
+    pub root: DataRoot,
+    pub seg_data: Vec<u8>,
+    pub seg_index: usize,
     pub chunks_per_segment: usize,
-    pub need_cache: bool,
-    pub tx_seq: Option<u64>,
-    pub file_size: usize,
 }
 
 /// Caches data chunks in memory before the entire file uploaded to storage node
@@ -108,56 +108,30 @@ impl MemoryChunkPool {
         Ok(())
     }
 
-    /// Adds chunks into memory pool if log entry not retrieved from blockchain yet. Otherwise, write
-    /// the segment into store directly.
-    pub async fn add_chunks(
-        &self,
-        root: DataRoot,
-        segment: Vec<u8>,
-        seg_index: usize,
-        info: SegmentMetaInfo,
-    ) -> Result<()> {
-        // Lazy GC when new chunks added.
+    pub async fn cache_chunks(&self, seg_info: SegmentInfo) -> Result<()> {
         self.inner.lock().await.segment_cache.garbage_collect();
-
-        if info.need_cache {
+        let file_complete;
+        let root = seg_info.root;
+        {
             let mut inner = self.inner.lock().await;
             let max_cached_chunks_all = inner.config.max_cached_chunks_all;
-            let file_complete = inner.segment_cache.cache_segment(
-                root,
-                segment,
-                seg_index,
-                info.chunks_per_segment,
-                max_cached_chunks_all,
-            )?;
+            file_complete = inner
+                .segment_cache
+                .cache_segment(seg_info, max_cached_chunks_all)?;
             inner.segment_cache.update_expiration_time(&root);
-            drop(inner);
+        } //inner is dropped after this code block, so the lock is released
 
-            if file_complete {
-                //Trigger writing the cached file into store and finalize when all chunks of a file are cached
-                self.write_all_cached_chunks_and_finalize(root).await?;
-            }
-        } else {
-            self.write_chunks_inner(
-                root,
-                segment,
-                seg_index,
-                info.chunks_per_segment,
-                info.tx_seq.unwrap(),
-                info.file_size,
-            )
-            .await?;
+        if file_complete {
+            //Trigger writing the cached file into store and finalize when all chunks of a file are cached
+            self.write_all_cached_chunks_and_finalize(root).await?;
         }
 
         Ok(())
     }
 
-    async fn write_chunks_inner(
+    pub async fn write_chunks(
         &self,
-        root: DataRoot,
-        segment: Vec<u8>,
-        seg_index: usize,
-        chunks_per_segment: usize,
+        seg_info: SegmentInfo,
         tx_seq: u64,
         file_size: usize,
     ) -> Result<()> {
@@ -165,32 +139,33 @@ impl MemoryChunkPool {
 
         debug!(
             "Begin to write segment, root={}, segment_size={}, segment_index={}",
-            root,
-            segment.len(),
-            seg_index,
+            seg_info.root,
+            seg_info.seg_data.len(),
+            seg_info.seg_index,
         );
 
-        //Write the segment in window
-        let mut inner = self.inner.lock().await;
-        let write_window_size = inner.config.write_window_size;
-        let max_writings = inner.config.max_writings;
-        inner.write_control.write_segment(
-            root,
-            tx_seq,
-            seg_index,
-            file_total_chunk_num,
-            write_window_size,
-            max_writings,
-        )?;
-        drop(inner);
+        {
+            //Write the segment in window
+            let mut inner = self.inner.lock().await;
+            let write_window_size = inner.config.write_window_size;
+            let max_writings = inner.config.max_writings;
+            inner.write_control.write_segment(
+                seg_info.root,
+                tx_seq,
+                seg_info.seg_index,
+                file_total_chunk_num,
+                write_window_size,
+                max_writings,
+            )?;
+        } //inner is dropped after this code block, so the lock is released
 
         // Write memory cached segments into store.
         // TODO(qhz): error handling
         // 1. Push the failed segment back to front. (enhance store to return Err(ChunkArray))
         // 2. Put the incompleted segments back to memory pool.
         let seg = ChunkArray {
-            data: segment,
-            start_index: (seg_index * chunks_per_segment) as u64,
+            data: seg_info.seg_data,
+            start_index: (seg_info.seg_index * seg_info.chunks_per_segment) as u64,
         };
 
         if let Err(e) = self.log_store.put_chunks(tx_seq, seg).await {
@@ -198,24 +173,24 @@ impl MemoryChunkPool {
                 .lock()
                 .await
                 .write_control
-                .on_write_failed(&root, seg_index);
+                .on_write_failed(&seg_info.root, seg_info.seg_index);
             return Err(e);
         }
 
         let all_uploaded = self.inner.lock().await.write_control.on_write_succeeded(
-            &root,
-            seg_index,
-            chunks_per_segment,
+            &seg_info.root,
+            seg_info.seg_index,
+            seg_info.chunks_per_segment,
             file_total_chunk_num,
         );
 
         // Notify to finalize transaction asynchronously.
         if all_uploaded {
-            if let Err(e) = self.sender.send(root) {
+            if let Err(e) = self.sender.send(seg_info.root) {
                 // Channel receiver will not be dropped until program exit.
                 bail!(anyhow!("channel send error: {}", e));
             }
-            debug!("Queue to finalize transaction for file {}", root);
+            debug!("Queue to finalize transaction for file {}", seg_info.root);
         }
 
         Ok(())

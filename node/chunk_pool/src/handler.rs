@@ -43,14 +43,12 @@ impl ChunkPoolHandler {
         // TODO(qhz): remove from memory pool after transaction finalized,
         // when store support to write chunks with reference.
         let tx_seq = self.mem_pool.get_tx_seq(&root).await;
-        if let Some(mut file) = self.mem_pool.remove_cached_file(&root).await {
+        if let Some(file) = self.mem_pool.remove_cached_file(&root).await {
             //If there is still cache of chunks, write them into store
-            if let Some(segments) = file.segments.take() {
-                let mut segments: Vec<ChunkArray> = segments.into_iter().map(|(_k, v)| v).collect();
-
-                while let Some(seg) = segments.pop() {
-                    self.log_store.put_chunks(tx_seq, seg).await?;
-                }
+            let mut segments: Vec<ChunkArray> =
+                file.segments.into_iter().map(|(_k, v)| v).collect();
+            while let Some(seg) = segments.pop() {
+                self.log_store.put_chunks(tx_seq, seg).await?;
             }
         }
 
