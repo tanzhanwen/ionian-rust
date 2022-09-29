@@ -6,8 +6,10 @@ use crate::log_store::log_manager::{
 use crate::log_store::{FlowRead, FlowWrite};
 use crate::{try_option, IonianKeyValueDB};
 use anyhow::{anyhow, bail, Result};
-use shared_types::{ChunkArray, DataRoot};
-use ssz::{Decode, Encode};
+use append_merkle::{AppendMerkleTree, MerkleTreeRead, Sha3Algorithm};
+use ethereum_types::H256;
+use shared_types::{bytes_to_chunks, ChunkArray, DataRoot};
+use ssz::{Decode, DecodeError, Encode};
 use ssz_derive::{Decode as DeriveDecode, Encode as DeriveEncode};
 use std::cmp;
 use std::fmt::Debug;
