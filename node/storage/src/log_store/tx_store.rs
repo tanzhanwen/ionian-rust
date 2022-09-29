@@ -5,7 +5,7 @@ use crate::log_store::log_manager::{
 };
 use crate::{try_option, IonianKeyValueDB, LogManager};
 use anyhow::{anyhow, Result};
-use append_merkle::{AppendMerkleTree, Sha3Algorithm};
+use append_merkle::{AppendMerkleTree, MerkleTreeRead, Sha3Algorithm};
 use ethereum_types::H256;
 use merkle_light::merkle::log2_pow2;
 use shared_types::{DataRoot, Transaction};
