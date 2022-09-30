@@ -199,4 +199,13 @@ impl ChunkPoolWriteCtrl {
         let file_ctrl = self.files.get(root).unwrap();
         file_ctrl.tx_seq
     }
+
+    pub fn get_uploaded_seg_num(&self, root: &DataRoot) -> usize {
+        let uploaded_seg_num = match self.files.get(root) {
+            Some(write_ctrl) => write_ctrl.window.left_boundary,
+            None => 0,
+        };
+
+        uploaded_seg_num
+    }
 }

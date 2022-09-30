@@ -118,10 +118,22 @@ impl RpcServer for RpcServerImpl {
                 .await?
         );
         let tx = try_option!(self.ctx.log_store.get_tx_by_seq_number(tx_seq).await?);
+        let is_cached = self
+            .ctx
+            .chunk_pool
+            .check_already_has_cache(&data_root)
+            .await;
+        let uploaded_seg_num = self
+            .ctx
+            .chunk_pool
+            .get_uploaded_seg_num(&data_root, is_cached)
+            .await;
 
         Ok(Some(FileInfo {
             tx,
             finalized: self.ctx.log_store.check_tx_completed(tx_seq).await?,
+            is_cached,
+            uploaded_seg_num,
         }))
     }
 }

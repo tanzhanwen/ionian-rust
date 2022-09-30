@@ -138,4 +138,13 @@ impl ChunkPoolCache {
     pub fn remove_file(&mut self, root: &DataRoot) -> Option<MemoryCachedFile> {
         self.files.remove(root)
     }
+
+    pub fn get_cached_seg_num(&self, root: &DataRoot) -> usize {
+        let cached_seg_num = match self.files.get(root) {
+            Some(file) => file.cached_chunk_num,
+            None => 0,
+        };
+
+        cached_seg_num
+    }
 }

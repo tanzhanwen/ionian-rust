@@ -37,6 +37,8 @@ pub struct NetworkInfo {
 pub struct FileInfo {
     pub tx: Transaction,
     pub finalized: bool,
+    pub is_cached: bool,
+    pub uploaded_seg_num: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
