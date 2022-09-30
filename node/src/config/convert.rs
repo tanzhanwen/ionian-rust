@@ -64,6 +64,7 @@ impl IonianConfig {
             enabled: self.rpc_enabled,
             listen_address,
             chunks_per_segment: self.rpc_chunks_per_segment,
+            max_cache_file_size: self.rpc_max_cache_file_size,
         })
     }
 
@@ -118,7 +119,7 @@ impl IonianConfig {
 
     pub fn chunk_pool_config(&self) -> chunk_pool::Config {
         chunk_pool::Config {
-            window_size: self.chunk_pool_window_size,
+            write_window_size: self.chunk_pool_write_window_size,
             max_cached_chunks_all: self.chunk_pool_max_cached_chunks_all,
             max_writings: self.chunk_pool_max_writings,
             expiration_time_secs: self.chunk_pool_expiration_time_secs,

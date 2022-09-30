@@ -22,7 +22,6 @@ pub struct LogSyncManager {
     config: LogSyncConfig,
     log_fetcher: LogEntryFetcher,
     store: Arc<RwLock<dyn Store>>,
-
     next_tx_seq: u64,
 }
 
