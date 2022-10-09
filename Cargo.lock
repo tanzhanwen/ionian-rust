@@ -505,6 +505,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
+name = "bitmaps"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "703642b98a00b3b90513279a8ede3fcfa479c126c5fb46e78f3051522f021403"
+
+[[package]]
 name = "bitvec"
 version = "0.17.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2513,6 +2519,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hex-literal"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ebdb29d2ea9ed0083cd8cece49bbd968021bd99b0849edb4a9a7ee0fdf6a4e0"
+
+[[package]]
 name = "hex_fmt"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2846,6 +2858,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "ionian_spec"
+version = "0.1.0"
 
 [[package]]
 name = "ionian_version"
@@ -4024,6 +4040,7 @@ dependencies = [
  "contract-interface",
  "ethereum-types 0.13.1",
  "ethers",
+ "ionian_spec",
  "lazy_static",
  "network",
  "rand 0.8.5",
@@ -6047,10 +6064,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "append_merkle",
+ "bitmaps",
  "eth2_ssz",
  "eth2_ssz_derive",
  "ethereum-types 0.13.1",
  "hex",
+ "hex-literal",
+ "ionian_spec",
  "kvdb",
  "kvdb-memorydb",
  "kvdb-rocksdb",
@@ -6059,7 +6079,9 @@ dependencies = [
  "rand 0.8.5",
  "rayon",
  "shared_types",
+ "static_assertions",
  "tempdir",
+ "tiny-keccak",
  "tracing",
  "typenum",
 ]

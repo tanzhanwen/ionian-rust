@@ -1,5 +1,5 @@
-use crate::pora::{BYTES_PER_LOADING, BYTES_PER_SEAL, SEALS_PER_LOADING, SECTORS_PER_SEAL};
 use async_trait::async_trait;
+use ionian_spec::{BYTES_PER_LOADING, BYTES_PER_SEAL, SEALS_PER_LOADING, SECTORS_PER_SEAL};
 use std::sync::Arc;
 use storage::log_store::Store;
 use tokio::sync::RwLock;

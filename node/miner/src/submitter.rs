@@ -8,7 +8,9 @@ use task_executor::TaskExecutor;
 use tokio::sync::{mpsc, RwLock};
 
 use crate::config::{MineServiceMiddleware, MinerConfig};
-use crate::pora::{AnswerWithoutProof, SECTORS_PER_SEAL};
+use crate::pora::AnswerWithoutProof;
+
+use ionian_spec::SECTORS_PER_SEAL;
 
 const SUBMISSION_RETIES: usize = 3;
 

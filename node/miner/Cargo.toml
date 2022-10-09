@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 network = { path = "../network" }
 storage = { path = "../storage" }
+ionian_spec = { path = "../../common/spec" }
 task_executor = { path = "../../common/task_executor" }
 contract-interface = { path = "../../common/contract-interface" }
 ethereum-types = "0.13"

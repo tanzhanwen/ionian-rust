@@ -163,7 +163,12 @@ impl FlowWrite for FlowStore {
                 None => {
                     let start_offset = chunk.start_index as usize % self.config.batch_size;
                     let is_full_chunk = chunk.data.len() == self.config.batch_size * ENTRY_SIZE;
-                    EntryBatch::new_with_chunk_array(chunk, start_offset, is_full_chunk)
+                    EntryBatch::new_with_chunk_array(
+                        chunk,
+                        chunk_index,
+                        start_offset,
+                        is_full_chunk,
+                    )
                 }
                 Some(mut data_in_db) => {
                     data_in_db.insert_data(

@@ -4,11 +4,10 @@ use rand::{self, Rng};
 use task_executor::TaskExecutor;
 use tokio::sync::{broadcast, mpsc};
 
+use ionian_spec::{SECTORS_PER_LOADING, SECTORS_PER_MAX_MINING_RANGE, SECTORS_PER_PRICING};
+
 use crate::{
-    pora::{
-        AnswerWithoutProof, Miner, SECTORS_PER_LOADING, SECTORS_PER_MAX_MINING_RANGE,
-        SECTORS_PER_PRICING,
-    },
+    pora::{AnswerWithoutProof, Miner},
     watcher::MineContextMessage,
     MinerConfig, MinerMessage, PoraLoader,
 };
