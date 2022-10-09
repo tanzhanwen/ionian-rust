@@ -167,7 +167,7 @@ class TestFramework:
             dest="conflux",
             default=os.path.join(
                 __file_path__,
-                "../utility/conflux" + (".exe" if is_windows_platform() else ""),
+                "../tmp/conflux" + (".exe" if is_windows_platform() else ""),
             ),
             type=str,
         )
@@ -177,7 +177,7 @@ class TestFramework:
             dest="bsc",
             default=os.path.join(
                 __file_path__,
-                "../utility/geth" + (".exe" if is_windows_platform() else ""),
+                "../tmp/geth" + (".exe" if is_windows_platform() else ""),
             ),
             type=str,
         )

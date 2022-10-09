@@ -3,5 +3,5 @@
 # src/config.rs
 /.idea
 tests/**/__pycache__
-tests/utility/geth
+tests/tmp/**
 .vscode/*.json

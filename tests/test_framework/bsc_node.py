@@ -50,6 +50,10 @@ class BSCNode(BlockchainNode):
 
         if not os.path.exists(self.binary):
             log.info("binary does not exist")
+            dir_name = os.path.dirname(self.binary)
+            if not os.path.exists(dir_name):
+                os.makedirs(dir_name, exist_ok=True)
+
             try:
                 with open(f"{self.binary}", "xb") as f:
                     self.__try_download_node(f, log)

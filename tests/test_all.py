@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 import argparse
 import os
+import shutil
+import stat
 import subprocess
 import sys
 
 from concurrent.futures import ProcessPoolExecutor
 
+from utility.utils import is_windows_platform
+
 PORT_MIN = 11000
 PORT_MAX = 65535
-PORT_RANGE = 400
+PORT_RANGE = 500
+
+__file_path__ = os.path.dirname(os.path.realpath(__file__))
 
 
 def run_single_test(py, script, test_dir, index, port_min, port_max):
@@ -51,6 +57,14 @@ def run_single_test(py, script, test_dir, index, port_min, port_max):
 
 
 def run():
+    dir_name = os.path.join(__file_path__, "tmp")
+    if not os.path.exists(dir_name):
+        os.makedirs(dir_name, exist_ok=True)
+
+    conflux_path = os.path.join(dir_name, "conflux")
+    if not os.path.exists(conflux_path):
+        build_conflux(conflux_path)
+
     parser = argparse.ArgumentParser(usage="%(prog)s [options]")
     parser.add_argument(
         "--max-workers",
@@ -125,6 +139,29 @@ def run():
         for c in failed:
             print(c)
         sys.exit(1)
+
+
+def build_conflux(conflux_path):
+    destination_path = os.path.join(__file_path__, "tmp", "conflux_tmp")
+    if os.path.exists(destination_path):
+        shutil.rmtree(destination_path)
+
+    clone_command = "git clone https://github.com/Conflux-Chain/conflux-rust.git"
+    clone_with_path = clone_command + " " + destination_path
+    os.system(clone_with_path)
+
+    origin_path = os.getcwd()
+    os.chdir(destination_path)
+    os.system("cargo build --release --bin conflux")
+
+    path = os.path.join(destination_path, "target", "release", "conflux")
+    shutil.copyfile(path, conflux_path)
+
+    if not is_windows_platform():
+        st = os.stat(conflux_path)
+        os.chmod(conflux_path, st.st_mode | stat.S_IEXEC)
+
+    os.chdir(origin_path)
 
 
 if __name__ == "__main__":
