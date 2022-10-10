@@ -140,11 +140,9 @@ impl ChunkPoolCache {
     }
 
     pub fn get_cached_seg_num(&self, root: &DataRoot) -> usize {
-        let cached_seg_num = match self.files.get(root) {
+        match self.files.get(root) {
             Some(file) => file.cached_chunk_num,
             None => 0,
-        };
-
-        cached_seg_num
+        }
     }
 }
