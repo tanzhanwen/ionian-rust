@@ -60,8 +60,7 @@ pub struct SegmentWithProof {
 
 impl SegmentWithProof {
     /// Splits file into segments and returns the total number of segments and the last segment size.
-    fn split_file_into_segments(
-        &self,
+    pub fn split_file_into_segments(
         file_size: usize,
         chunks_per_segment: usize,
     ) -> RpcResult<(u32, usize)> {
@@ -96,7 +95,7 @@ impl SegmentWithProof {
         chunks_per_segment: usize,
     ) -> RpcResult<u32> {
         let (num_segments, last_segment_size) =
-            self.split_file_into_segments(file_size, chunks_per_segment)?;
+            SegmentWithProof::split_file_into_segments(file_size, chunks_per_segment)?;
 
         if self.index >= num_segments {
             return Err(error::invalid_params("index", "index out of bound"));

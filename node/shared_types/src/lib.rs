@@ -1,12 +1,21 @@
+mod proof;
+
 use anyhow::bail;
 use append_merkle::{Proof as RawProof, RangeProof as RawRangeProof};
 use ethereum_types::{H256, U256};
-use merkle_light::merkle::next_pow2;
+use merkle_light::merkle::MerkleTree;
 use merkle_light::proof::Proof as RawFileProof;
+use merkle_light::{hash::Algorithm, merkle::next_pow2};
 use merkle_tree::RawLeafSha3Algorithm;
 use serde::{Deserialize, Serialize};
 use ssz_derive::{Decode as DeriveDecode, Encode as DeriveEncode};
+use std::hash::Hasher;
 use tracing::debug;
+
+const ZERO_HASH: [u8; 32] = [
+    0xd3, 0x97, 0xb3, 0xb0, 0x43, 0xd8, 0x7f, 0xcd, 0x6f, 0xad, 0x12, 0x91, 0xff, 0xb, 0xfd, 0x16,
+    0x40, 0x1c, 0x27, 0x48, 0x96, 0xd8, 0xc6, 0x3a, 0x92, 0x37, 0x27, 0xf0, 0x77, 0xb8, 0xe0, 0xb5,
+];
 
 /// Application level requests sent to the network.
 #[derive(Debug, Clone, Copy)]
@@ -77,10 +86,14 @@ pub struct Transaction {
 }
 
 impl Transaction {
+    pub fn num_entries_of_node(depth: usize) -> usize {
+        1 << (depth - 1)
+    }
+
     pub fn num_entries(&self) -> usize {
-        self.merkle_nodes
-            .iter()
-            .fold(0, |size, &(depth, _)| size + (1 << (depth - 1)))
+        self.merkle_nodes.iter().fold(0, |size, &(depth, _)| {
+            size + Transaction::num_entries_of_node(depth)
+        })
     }
 }
 
@@ -164,6 +177,14 @@ pub struct FileProof {
     pub path: Vec<bool>,
 }
 impl FileProof {
+    pub fn new(mut lemma: Vec<H256>, path: Vec<bool>) -> Self {
+        if path.is_empty() {
+            lemma.truncate(1);
+        }
+
+        FileProof { lemma, path }
+    }
+
     pub fn validate(
         &self,
         leaf_hash: &[u8; 32],
@@ -257,4 +278,23 @@ impl TryFrom<&FileProof> for RawFileProof<[u8; 32]> {
 pub fn timestamp_now() -> u32 {
     let timestamp = chrono::Utc::now().timestamp();
     u32::try_from(timestamp).expect("The year is between 1970 and 2106")
+}
+
+pub fn compute_segment_merkle_root(data: &[u8], segment_chunks: usize) -> [u8; 32] {
+    let mut a = RawLeafSha3Algorithm::default();
+    let mut hashes: Vec<[u8; 32]> = data
+        .chunks_exact(CHUNK_SIZE)
+        .map(|x| {
+            a.reset();
+            a.write(x);
+            a.hash()
+        })
+        .collect();
+
+    let num_chunks = data.len() / CHUNK_SIZE;
+    if num_chunks < segment_chunks {
+        hashes.append(&mut vec![ZERO_HASH; segment_chunks - num_chunks]);
+    }
+
+    MerkleTree::<_, RawLeafSha3Algorithm>::new(hashes).root()
 }

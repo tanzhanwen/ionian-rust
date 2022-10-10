@@ -5,7 +5,7 @@ use crate::Context;
 use chunk_pool::SegmentInfo;
 use jsonrpsee::core::async_trait;
 use jsonrpsee::core::RpcResult;
-use shared_types::DataRoot;
+use shared_types::{DataRoot, CHUNK_SIZE};
 use storage::try_option;
 
 pub struct RpcServerImpl {
@@ -106,6 +106,63 @@ impl RpcServer for RpcServerImpl {
         );
 
         Ok(Some(Segment(segment.data)))
+    }
+
+    async fn download_segment_with_proof(
+        &self,
+        data_root: DataRoot,
+        index: u32,
+    ) -> RpcResult<Option<SegmentWithProof>> {
+        debug!("ionian_downloadSegmentWithProof()");
+
+        let tx_seq = try_option!(
+            self.ctx
+                .log_store
+                .get_tx_seq_by_data_root(&data_root)
+                .await?
+        );
+
+        // ensure file already finalized
+        if !self.ctx.log_store.check_tx_completed(tx_seq).await? {
+            return Err(error::invalid_params("root", "file not finalized yet"));
+        }
+
+        let tx = try_option!(self.ctx.log_store.get_tx_by_seq_number(tx_seq).await?);
+
+        // validate index
+        let chunks_per_segment = self.ctx.config.chunks_per_segment;
+        let (num_segments, last_segment_size) =
+            SegmentWithProof::split_file_into_segments(tx.size as usize, chunks_per_segment)?;
+
+        if index >= num_segments {
+            return Err(error::invalid_params("index", "index out of bound"));
+        }
+
+        // calculate chunk start and end index
+        let start_index = index as usize * chunks_per_segment;
+        let end_index = if index == num_segments - 1 {
+            // last segment without padding chunks by flow
+            start_index + last_segment_size / CHUNK_SIZE
+        } else {
+            start_index + chunks_per_segment
+        };
+
+        let segment = try_option!(
+            self.ctx
+                .log_store
+                .get_chunks_with_proof_by_tx_and_index_range(tx_seq, start_index, end_index)
+                .await?
+        );
+
+        let proof = tx.compute_segment_proof(&segment, chunks_per_segment)?;
+
+        Ok(Some(SegmentWithProof {
+            root: data_root,
+            data: segment.chunks.data,
+            index,
+            proof,
+            file_size: tx.size,
+        }))
     }
 
     async fn get_file_info(&self, data_root: DataRoot) -> RpcResult<Option<FileInfo>> {
