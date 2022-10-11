@@ -20,6 +20,7 @@ build_config! {
     (log_contract_address, (String), "".to_string())
     (log_sync_start_block_number, (u64), 0)
     (confirmation_block_count, (u64), 500)
+    (log_page_size, (u64), 1000)
     (max_cache_data_size, (usize), 100 * 1024 * 1024) // 100 MB
     (cache_tx_seq_ttl, (usize), 500)
 

@@ -46,9 +46,12 @@ impl LogSyncManager {
                         .expect("shutdown send error")
                 },
                 async move {
-                    let log_fetcher =
-                        LogEntryFetcher::new(&config.rpc_endpoint_url, config.contract_address)
-                            .await?;
+                    let log_fetcher = LogEntryFetcher::new(
+                        &config.rpc_endpoint_url,
+                        config.contract_address,
+                        config.log_page_size,
+                    )
+                    .await?;
                     let data_cache = DataCache::new(config.cache_config.clone());
                     let mut log_sync_manager = Self {
                         config,

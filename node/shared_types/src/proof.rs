@@ -1,4 +1,4 @@
-use crate::{compute_segment_merkle_root, ChunkArrayWithProof, FileProof, Transaction};
+use crate::{compute_segment_merkle_root, ChunkArrayWithProof, FileProof, Transaction, CHUNK_SIZE};
 use anyhow::{bail, Result};
 use append_merkle::{Algorithm, Sha3Algorithm};
 use ethereum_types::H256;
@@ -116,7 +116,7 @@ impl Transaction {
         }
 
         let data_len = segment.chunks.data.len();
-        if chunk_start_index + data_len > total_entries {
+        if chunk_start_index + data_len / CHUNK_SIZE > total_entries {
             bail!("end index out of bound");
         }
 

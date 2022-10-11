@@ -12,6 +12,8 @@ pub struct LogSyncConfig {
     /// This is used to rollback to a stable height if reorg happens during node restart.
     /// TODO(zz): Some blockchains have better confirmation/finalization mechanisms.
     pub confirmation_block_count: u64,
+    /// Maximum number of event logs to poll at a time.
+    pub log_page_size: u64,
 }
 
 #[derive(Clone)]
@@ -29,6 +31,7 @@ impl LogSyncConfig {
         start_block_number: u64,
         confirmation_block_count: u64,
         cache_config: CacheConfig,
+        log_page_size: u64,
     ) -> Self {
         Self {
             rpc_endpoint_url,
@@ -36,6 +39,7 @@ impl LogSyncConfig {
             cache_config,
             start_block_number,
             confirmation_block_count,
+            log_page_size,
         }
     }
 }
