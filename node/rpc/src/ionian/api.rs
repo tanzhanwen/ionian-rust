@@ -15,15 +15,15 @@ pub trait Rpc {
     async fn download_segment(
         &self,
         data_root: DataRoot,
-        start_index: u32,
-        end_index: u32,
+        start_index: usize,
+        end_index: usize,
     ) -> RpcResult<Option<Segment>>;
 
     #[method(name = "downloadSegmentWithProof")]
     async fn download_segment_with_proof(
         &self,
         data_root: DataRoot,
-        index: u32,
+        index: usize,
     ) -> RpcResult<Option<SegmentWithProof>>;
 
     #[method(name = "getFileInfo")]

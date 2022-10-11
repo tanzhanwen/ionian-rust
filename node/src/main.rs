@@ -36,6 +36,12 @@ async fn start_node(context: RuntimeContext, config: IonianConfig) -> Result<Cli
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // Only allow 64-bit targets for compilation, since there are many
+    // type conversions between `usize` and `u64`, or even use `usize`
+    // as file size or chunk index.
+    #[cfg(not(target_pointer_width = "64"))]
+    compile_error!("compilation is only allowed for 64-bit targets");
+
     // enable backtraces
     std::env::set_var("RUST_BACKTRACE", "1");
 

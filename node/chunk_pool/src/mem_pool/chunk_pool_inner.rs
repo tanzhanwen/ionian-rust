@@ -285,8 +285,8 @@ impl MemoryChunkPool {
 }
 
 pub fn file_size_to_chunk_num(file_size: usize) -> usize {
-    let mut chunk_num = file_size as usize / CHUNK_SIZE;
-    if file_size as usize % CHUNK_SIZE > 0 {
+    let mut chunk_num = file_size / CHUNK_SIZE;
+    if file_size % CHUNK_SIZE > 0 {
         chunk_num += 1;
     }
 

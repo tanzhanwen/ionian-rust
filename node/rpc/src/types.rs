@@ -51,11 +51,11 @@ pub struct SegmentWithProof {
     /// With fixed data size except the last segment.
     pub data: Vec<u8>,
     /// Segment index.
-    pub index: u32,
+    pub index: usize,
     /// File merkle proof whose leaf node is segment root.
     pub proof: FileProof,
     /// File size
-    pub file_size: u64,
+    pub file_size: usize,
 }
 
 impl SegmentWithProof {
@@ -63,7 +63,7 @@ impl SegmentWithProof {
     pub fn split_file_into_segments(
         file_size: usize,
         chunks_per_segment: usize,
-    ) -> RpcResult<(u32, usize)> {
+    ) -> RpcResult<(usize, usize)> {
         if file_size == 0 {
             return Err(error::invalid_params("file_size", "file is empty"));
         }
@@ -73,7 +73,7 @@ impl SegmentWithProof {
         let mut num_segments = file_size / segment_size;
 
         if remaining_size == 0 {
-            return Ok((num_segments as u32, segment_size));
+            return Ok((num_segments, segment_size));
         }
 
         // Otherwise, the last segment is not full.
@@ -81,11 +81,11 @@ impl SegmentWithProof {
 
         let last_chunk_size = remaining_size % CHUNK_SIZE;
         if last_chunk_size == 0 {
-            Ok((num_segments as u32, remaining_size))
+            Ok((num_segments, remaining_size))
         } else {
             // Padding last chunk with zeros.
             let last_segment_size = remaining_size - last_chunk_size + CHUNK_SIZE;
-            Ok((num_segments as u32, last_segment_size))
+            Ok((num_segments, last_segment_size))
         }
     }
 
@@ -93,7 +93,7 @@ impl SegmentWithProof {
         &self,
         file_size: usize,
         chunks_per_segment: usize,
-    ) -> RpcResult<u32> {
+    ) -> RpcResult<usize> {
         let (num_segments, last_segment_size) =
             SegmentWithProof::split_file_into_segments(file_size, chunks_per_segment)?;
 
@@ -152,7 +152,7 @@ impl SegmentWithProof {
         let segment_root = self.calculate_segment_merkle_root(extend_chunk_length);
         if !self
             .proof
-            .validate(&segment_root, &self.root, self.index as usize, num_segments)?
+            .validate(&segment_root, &self.root, self.index, num_segments)?
         {
             return Err(error::invalid_params("proof", "validation failed"));
         }
@@ -162,13 +162,13 @@ impl SegmentWithProof {
 
     /// Validates the segment data size and proof.
     pub fn validate(&self, chunks_per_segment: usize) -> RpcResult<()> {
-        self.validate_data_size_and_index(self.file_size as usize, chunks_per_segment)?;
+        self.validate_data_size_and_index(self.file_size, chunks_per_segment)?;
 
-        let (chunks, _) = compute_padded_chunk_size(self.file_size as usize);
+        let (chunks, _) = compute_padded_chunk_size(self.file_size);
         let (segments_for_proof, last_segment_size) =
             compute_segment_size(chunks, chunks_per_segment);
 
-        let expected_data_length = if self.index as usize == segments_for_proof - 1 {
+        let expected_data_length = if self.index == segments_for_proof - 1 {
             last_segment_size * CHUNK_SIZE
         } else {
             chunks_per_segment * CHUNK_SIZE
@@ -187,7 +187,7 @@ impl SegmentWithProof {
     /// Returns the index of first chunk in the segment.
     #[allow(dead_code)]
     pub fn chunk_index(&self, chunks_per_segment: usize) -> usize {
-        self.index as usize * chunks_per_segment
+        self.index * chunks_per_segment
     }
 }
 

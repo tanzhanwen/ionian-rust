@@ -54,7 +54,7 @@ impl RpcServer for RpcServerImpl {
         let seg_info = SegmentInfo {
             root: segment.root,
             seg_data: segment.data,
-            seg_index: segment.index as usize,
+            seg_index: segment.index,
             chunks_per_segment: self.ctx.config.chunks_per_segment,
         };
 
@@ -63,7 +63,7 @@ impl RpcServer for RpcServerImpl {
         } else {
             self.ctx
                 .chunk_pool
-                .write_chunks(seg_info, seq.unwrap(), segment.file_size as usize)
+                .write_chunks(seg_info, seq.unwrap(), segment.file_size)
                 .await?;
         }
 
@@ -73,8 +73,8 @@ impl RpcServer for RpcServerImpl {
     async fn download_segment(
         &self,
         data_root: DataRoot,
-        start_index: u32,
-        end_index: u32,
+        start_index: usize,
+        end_index: usize,
     ) -> RpcResult<Option<Segment>> {
         debug!("ionian_downloadSegment()");
 
@@ -82,7 +82,7 @@ impl RpcServer for RpcServerImpl {
             return Err(error::invalid_params("end_index", "invalid chunk index"));
         }
 
-        if end_index - start_index > self.ctx.config.chunks_per_segment as u32 {
+        if end_index - start_index > self.ctx.config.chunks_per_segment {
             return Err(error::invalid_params(
                 "end_index",
                 format!(
@@ -101,7 +101,7 @@ impl RpcServer for RpcServerImpl {
         let segment = try_option!(
             self.ctx
                 .log_store
-                .get_chunks_by_tx_and_index_range(tx_seq, start_index as usize, end_index as usize)
+                .get_chunks_by_tx_and_index_range(tx_seq, start_index, end_index)
                 .await?
         );
 
@@ -111,7 +111,7 @@ impl RpcServer for RpcServerImpl {
     async fn download_segment_with_proof(
         &self,
         data_root: DataRoot,
-        index: u32,
+        index: usize,
     ) -> RpcResult<Option<SegmentWithProof>> {
         debug!("ionian_downloadSegmentWithProof()");
 
@@ -139,7 +139,7 @@ impl RpcServer for RpcServerImpl {
         }
 
         // calculate chunk start and end index
-        let start_index = index as usize * chunks_per_segment;
+        let start_index = index * chunks_per_segment;
         let end_index = if index == num_segments - 1 {
             // last segment without padding chunks by flow
             start_index + last_segment_size / CHUNK_SIZE
@@ -161,7 +161,7 @@ impl RpcServer for RpcServerImpl {
             data: segment.chunks.data,
             index,
             proof,
-            file_size: tx.size,
+            file_size: tx.size as usize,
         }))
     }
 
@@ -184,7 +184,7 @@ impl RpcServer for RpcServerImpl {
 }
 
 impl RpcServerImpl {
-    async fn check_need_cache(&self, seq: Option<u64>, file_size: u64) -> RpcResult<bool> {
+    async fn check_need_cache(&self, seq: Option<u64>, file_size: usize) -> RpcResult<bool> {
         let mut need_cache = false;
 
         if let Some(tx_seq) = seq {
@@ -201,7 +201,7 @@ impl RpcServerImpl {
                 None => return Err(error::invalid_params("root", "data root not found")),
             };
 
-            if tx.size != file_size {
+            if tx.size != file_size as u64 {
                 return Err(error::invalid_params(
                     "file_size",
                     "segment file size not matched with tx file size",
@@ -209,7 +209,7 @@ impl RpcServerImpl {
             }
         } else {
             //Check whether file is small enough to cache in the system
-            if file_size as usize > self.ctx.config.max_cache_file_size {
+            if file_size > self.ctx.config.max_cache_file_size {
                 return Err(error::invalid_params(
                     "file_size",
                     "caching of large file when tx is unavailable is not supported",
