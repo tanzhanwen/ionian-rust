@@ -282,6 +282,16 @@ impl MemoryChunkPool {
 
         tx_seq
     }
+
+    pub async fn get_uploaded_seg_num(&self, root: &DataRoot, is_cached: bool) -> u32 {
+        let inner = self.inner.lock().await;
+        let uploaded_seg_num = match is_cached {
+            true => inner.segment_cache.get_cached_seg_num(root),
+            _ => inner.write_control.get_uploaded_seg_num(root),
+        };
+
+        uploaded_seg_num as u32
+    }
 }
 
 pub fn file_size_to_chunk_num(file_size: usize) -> usize {
