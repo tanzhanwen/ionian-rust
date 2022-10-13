@@ -212,15 +212,18 @@ impl LogSyncManager {
         } else {
             if let Some(data) = self.data_cache.pop_data(&tx.data_merkle_root) {
                 let mut store = self.store.write().await;
+                // We are holding a mutable reference of LogSyncManager, so no chain reorg is
+                // possible after put_tx.
                 if let Err(e) = store
-                    .put_chunks(
+                    .put_chunks_with_tx_hash(
                         tx.seq,
+                        tx.hash(),
                         ChunkArray {
                             data,
                             start_index: 0,
                         },
                     )
-                    .and_then(|_| store.finalize_tx(tx.seq))
+                    .and_then(|_| store.finalize_tx_with_hash(tx.seq, tx.hash()))
                 {
                     error!("put_tx data error: e={:?}", e);
                     return false;

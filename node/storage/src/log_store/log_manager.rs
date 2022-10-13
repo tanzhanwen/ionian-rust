@@ -77,6 +77,37 @@ impl LogStoreChunkWrite for LogManager {
         Ok(())
     }
 
+    fn put_chunks_with_tx_hash(
+        &mut self,
+        tx_seq: u64,
+        tx_hash: H256,
+        chunks: ChunkArray,
+    ) -> Result<bool> {
+        let tx = self
+            .tx_store
+            .get_tx_by_seq_number(tx_seq)?
+            .ok_or_else(|| anyhow!("put chunks with missing tx: tx_seq={}", tx_seq))?;
+        if tx.hash() != tx_hash {
+            return Ok(false);
+        }
+        let (chunks_for_proof, _) = compute_padded_chunk_size(tx.size as usize);
+        if chunks.start_index.saturating_mul(ENTRY_SIZE as u64) + chunks.data.len() as u64
+            > (chunks_for_proof * ENTRY_SIZE) as u64
+        {
+            bail!(
+                "put chunks with data out of tx range: tx_seq={} start_index={} data_len={}",
+                tx_seq,
+                chunks.start_index,
+                chunks.data.len()
+            );
+        }
+        // TODO: Use another struct to avoid confusion.
+        let mut flow_entry_array = chunks;
+        flow_entry_array.start_index += tx.start_entry_index;
+        self.append_entries(flow_entry_array)?;
+        Ok(true)
+    }
+
     fn remove_all_chunks(&self, _tx_seq: u64) -> crate::error::Result<()> {
         todo!()
     }
@@ -111,6 +142,32 @@ impl LogStoreWrite for LogManager {
             .is_some()
         {
             self.tx_store.finalize_tx(tx_seq)
+        } else {
+            bail!("finalize tx with data missing: tx_seq={}", tx_seq)
+        }
+    }
+
+    fn finalize_tx_with_hash(&mut self, tx_seq: u64, tx_hash: H256) -> crate::error::Result<bool> {
+        let tx = self
+            .tx_store
+            .get_tx_by_seq_number(tx_seq)?
+            .ok_or_else(|| anyhow!("finalize_tx with tx missing: tx_seq={}", tx_seq))?;
+        if tx.hash() != tx_hash {
+            return Ok(false);
+        }
+
+        self.padding_rear_data(&tx, tx_seq)?;
+
+        let tx_end_index = tx.start_entry_index + bytes_to_entries(tx.size);
+        // TODO: Check completeness without loading all data in memory.
+        // TODO: Should we double check the tx merkle root?
+        if self
+            .flow_store
+            .get_entries(tx.start_entry_index, tx_end_index)?
+            .is_some()
+        {
+            self.tx_store.finalize_tx(tx_seq)?;
+            Ok(true)
         } else {
             bail!("finalize tx with data missing: tx_seq={}", tx_seq)
         }
@@ -697,8 +754,10 @@ impl LogManager {
 
             debug!("Padding size: {}", padding_size);
             if padding_size > 0 {
-                self.put_chunks(
+                // This tx hash is guaranteed to be consistent.
+                self.put_chunks_with_tx_hash(
                     tx_seq,
+                    tx.hash(),
                     ChunkArray {
                         data: vec![0u8; padding_size],
                         start_index: ((segments_for_file - 1) * PORA_CHUNK_SIZE

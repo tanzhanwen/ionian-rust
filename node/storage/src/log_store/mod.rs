@@ -94,6 +94,7 @@ pub trait LogStoreWrite: LogStoreChunkWrite {
     /// This will return error if not all chunks are stored. But since this check can be expensive,
     /// the caller is supposed to track chunk statuses and call this after storing all the chunks.
     fn finalize_tx(&mut self, tx_seq: u64) -> Result<()>;
+    fn finalize_tx_with_hash(&mut self, tx_seq: u64, tx_hash: H256) -> Result<bool>;
 
     /// Store the progress of synced block number and its hash.
     fn put_sync_progress(&self, progress: (u64, H256)) -> Result<()>;
@@ -108,6 +109,13 @@ pub trait LogStoreWrite: LogStoreChunkWrite {
 pub trait LogStoreChunkWrite {
     /// Store data chunks of a data entry.
     fn put_chunks(&mut self, tx_seq: u64, chunks: ChunkArray) -> Result<()>;
+
+    fn put_chunks_with_tx_hash(
+        &mut self,
+        tx_seq: u64,
+        tx_hash: H256,
+        chunks: ChunkArray,
+    ) -> Result<bool>;
 
     /// Delete all chunks of a tx.
     fn remove_all_chunks(&self, tx_seq: u64) -> Result<()>;

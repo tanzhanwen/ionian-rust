@@ -8,8 +8,10 @@ use merkle_light::proof::Proof as RawFileProof;
 use merkle_light::{hash::Algorithm, merkle::next_pow2};
 use merkle_tree::RawLeafSha3Algorithm;
 use serde::{Deserialize, Serialize};
+use ssz::Encode;
 use ssz_derive::{Decode as DeriveDecode, Encode as DeriveEncode};
 use std::hash::Hasher;
+use tiny_keccak::{Hasher as KeccakHasher, Keccak};
 use tracing::debug;
 
 const ZERO_HASH: [u8; 32] = [
@@ -94,6 +96,15 @@ impl Transaction {
         self.merkle_nodes.iter().fold(0, |size, &(depth, _)| {
             size + Transaction::num_entries_of_node(depth)
         })
+    }
+
+    pub fn hash(&self) -> H256 {
+        let bytes = self.as_ssz_bytes();
+        let mut h = Keccak::v256();
+        let mut e = H256::zero();
+        h.update(&bytes);
+        h.finalize(e.as_mut());
+        e
     }
 }
 
