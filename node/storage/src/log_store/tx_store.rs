@@ -26,7 +26,8 @@ impl TransactionStore {
     }
 
     #[instrument(skip(self))]
-    pub fn put_tx(&self, mut tx: Transaction) -> Result<()> {
+    /// Return `Ok(Some(tx_seq))` if a previous transaction has the same tx root.
+    pub fn put_tx(&self, mut tx: Transaction) -> Result<Vec<u64>> {
         let mut db_tx = self.kvdb.transaction();
 
         if !tx.data.is_empty() {
@@ -41,19 +42,22 @@ impl TransactionStore {
         }
 
         db_tx.put(COL_TX, &tx.seq.to_be_bytes(), &tx.as_ssz_bytes());
-        if self
-            .get_tx_seq_by_data_root(&tx.data_merkle_root)?
-            .is_none()
-        {
-            db_tx.put(
-                COL_TX_DATA_ROOT_INDEX,
-                tx.data_merkle_root.as_bytes(),
-                &tx.seq.to_be_bytes(),
-            );
-        }
+        let old_tx_seq_list = self.get_tx_seq_list_by_data_root(&tx.data_merkle_root)?;
+        // The list is sorted, and we always call `put_tx` in order.
+        assert!(old_tx_seq_list
+            .last()
+            .map(|last| *last < tx.seq)
+            .unwrap_or(true));
+        let mut new_tx_seq_list = old_tx_seq_list.clone();
+        new_tx_seq_list.push(tx.seq);
+        db_tx.put(
+            COL_TX_DATA_ROOT_INDEX,
+            tx.data_merkle_root.as_bytes(),
+            &new_tx_seq_list.as_ssz_bytes(),
+        );
 
         self.kvdb.write(db_tx)?;
-        Ok(())
+        Ok(old_tx_seq_list)
     }
 
     pub fn get_tx_by_seq_number(&self, seq: u64) -> Result<Option<Transaction>> {
@@ -68,20 +72,40 @@ impl TransactionStore {
         db_tx.delete(COL_TX, &seq.to_be_bytes());
         db_tx.delete(COL_TX_COMPLETED, &seq.to_be_bytes());
         // We only remove tx when the blockchain reorgs.
-        // The data root is always mapped to the first tx with the data. If it's reverted, all
-        // data after it will also be reverted, so we should remove this index.
-        if try_option!(self.get_tx_seq_by_data_root(&tx.data_merkle_root)?) == seq {
+        // If a tx is reverted, all data after it will also be reverted, so we call remove
+        // all indices after it.
+        let mut tx_seq_list = self.get_tx_seq_list_by_data_root(&tx.data_merkle_root)?;
+        tx_seq_list.retain(|e| *e < seq);
+        if tx_seq_list.is_empty() {
             db_tx.delete(COL_TX_DATA_ROOT_INDEX, tx.data_merkle_root.as_bytes());
+        } else {
+            db_tx.put(
+                COL_TX_DATA_ROOT_INDEX,
+                tx.data_merkle_root.as_bytes(),
+                &tx_seq_list.as_ssz_bytes(),
+            );
         }
         self.kvdb.write(db_tx)?;
         Ok(Some(tx))
     }
 
-    pub fn get_tx_seq_by_data_root(&self, data_root: &DataRoot) -> Result<Option<u64>> {
+    pub fn get_tx_seq_list_by_data_root(&self, data_root: &DataRoot) -> Result<Vec<u64>> {
+        let value = match self
+            .kvdb
+            .get(COL_TX_DATA_ROOT_INDEX, data_root.as_bytes())?
+        {
+            Some(v) => v,
+            None => return Ok(Vec::new()),
+        };
+        Ok(Vec::<u64>::from_ssz_bytes(&value).map_err(Error::from)?)
+    }
+
+    pub fn get_first_tx_seq_by_data_root(&self, data_root: &DataRoot) -> Result<Option<u64>> {
         let value = try_option!(self
             .kvdb
             .get(COL_TX_DATA_ROOT_INDEX, data_root.as_bytes())?);
-        Ok(Some(decode_tx_seq(&value)?))
+        let seq_list = Vec::<u64>::from_ssz_bytes(&value).map_err(Error::from)?;
+        Ok(seq_list.first().cloned())
     }
 
     #[instrument(skip(self))]

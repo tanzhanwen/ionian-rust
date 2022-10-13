@@ -1,4 +1,4 @@
-use crate::log_store::flow_store::{FlowConfig, FlowStore};
+use crate::log_store::flow_store::{batch_iter, FlowConfig, FlowStore};
 use crate::log_store::tx_store::TransactionStore;
 use crate::log_store::{
     Configurable, FlowRead, FlowWrite, LogStoreChunkRead, LogStoreChunkWrite, LogStoreRead,
@@ -121,7 +121,13 @@ impl LogStoreWrite for LogManager {
         self.append_subtree_list(tx.merkle_nodes.clone())?;
         // TODO(zz): tx_store and the merkle tree are not updated atomically.
         self.commit(tx.seq)?;
-        self.tx_store.put_tx(tx)?;
+
+        if let Some(old_tx_seq) = self.tx_store.put_tx(tx.clone())?.first() {
+            if self.check_tx_completed(*old_tx_seq)? {
+                self.copy_tx_data(*old_tx_seq, vec![tx.seq])?;
+                self.tx_store.finalize_tx(tx.seq)?;
+            }
+        }
         Ok(())
     }
 
@@ -141,7 +147,15 @@ impl LogStoreWrite for LogManager {
             .get_entries(tx.start_entry_index, tx_end_index)?
             .is_some()
         {
-            self.tx_store.finalize_tx(tx_seq)
+            self.tx_store.finalize_tx(tx_seq)?;
+            let same_root_seq_list = self
+                .tx_store
+                .get_tx_seq_list_by_data_root(&tx.data_merkle_root)?;
+            // Check if there are other same-root transaction not finalized.
+            if same_root_seq_list.first() == Some(&tx_seq) {
+                self.copy_tx_data(tx_seq, same_root_seq_list[1..].to_vec())?;
+            }
+            Ok(())
         } else {
             bail!("finalize tx with data missing: tx_seq={}", tx_seq)
         }
@@ -268,7 +282,7 @@ impl LogStoreRead for LogManager {
     }
 
     fn get_tx_seq_by_data_root(&self, data_root: &DataRoot) -> crate::error::Result<Option<u64>> {
-        self.tx_store.get_tx_seq_by_data_root(data_root)
+        self.tx_store.get_first_tx_seq_by_data_root(data_root)
     }
 
     fn get_chunk_with_proof_by_tx_and_index(
@@ -771,6 +785,49 @@ impl LogManager {
             segments_for_file += 1;
         }
 
+        Ok(())
+    }
+
+    fn copy_tx_data(&mut self, from_tx_seq: u64, to_tx_seq_list: Vec<u64>) -> Result<()> {
+        // We have all the data need for this tx, so just copy them.
+        let old_tx = self
+            .get_tx_by_seq_number(from_tx_seq)?
+            .ok_or_else(|| anyhow!("from tx missing"))?;
+        let mut to_tx_offset_list = Vec::with_capacity(to_tx_seq_list.len());
+        for seq in to_tx_seq_list {
+            // No need to copy data for completed tx.
+            if self.check_tx_completed(seq)? {
+                continue;
+            }
+            let tx = self
+                .get_tx_by_seq_number(seq)?
+                .ok_or_else(|| anyhow!("to tx missing"))?;
+            to_tx_offset_list.push((tx.seq, tx.start_entry_index - old_tx.start_entry_index));
+        }
+        if to_tx_offset_list.is_empty() {
+            return Ok(());
+        }
+        // copy data in batches
+        // TODO(zz): Do this asynchronously and keep atomicity.
+        for (batch_start, batch_end) in batch_iter(
+            old_tx.start_entry_index,
+            old_tx.start_entry_index + old_tx.num_entries() as u64,
+            PORA_CHUNK_SIZE,
+        ) {
+            let batch_data = self
+                .get_chunk_by_flow_index(batch_start, batch_end - batch_start)?
+                .ok_or_else(|| anyhow!("tx data missing"))?;
+            for (_, offset) in &to_tx_offset_list {
+                let mut data = batch_data.clone();
+                data.start_index += offset;
+                self.append_entries(data)?;
+            }
+        }
+        // num_entries() includes the rear padding data, so no need for more padding.
+
+        for (seq, _) in to_tx_offset_list {
+            self.tx_store.finalize_tx(seq)?;
+        }
         Ok(())
     }
 }
