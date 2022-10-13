@@ -18,7 +18,7 @@ async fn start_node(context: RuntimeContext, config: IonianConfig) -> Result<Cli
     let miner_config = config.mine_config()?;
     let router_config = config.router_config(&network_config)?;
 
-    ClientBuilder::new()
+    ClientBuilder::default()
         .with_runtime_context(context)
         .with_rocksdb_store(&storage_config)?
         .with_file_location_cache()

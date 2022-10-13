@@ -1,7 +1,7 @@
 use super::{Client, RuntimeContext};
 use chunk_pool::Config as ChunkPoolConfig;
 use file_location_cache::FileLocationCache;
-use log_entry_sync::{LogSyncConfig, LogSyncManager};
+use log_entry_sync::{LogSyncConfig, LogSyncEvent, LogSyncManager};
 use miner::{MineService, MinerConfig, MinerMessage};
 use network::{
     self, Keypair, NetworkConfig, NetworkGlobals, NetworkMessage, RequestId,
@@ -45,12 +45,17 @@ struct MinerComponents {
     send: broadcast::Sender<MinerMessage>,
 }
 
+struct LogSyncComponents {
+    send: broadcast::Sender<LogSyncEvent>,
+}
+
 /// Builds a `Client` instance.
 ///
 /// ## Notes
 ///
 /// The builder may start some services (e.g.., libp2p, http server) immediately after they are
 /// initialized, _before_ the `self.build(..)` method has been called.
+#[derive(Default)]
 pub struct ClientBuilder {
     runtime_context: Option<RuntimeContext>,
     store: Option<Arc<RwLock<dyn Store>>>,
@@ -59,22 +64,10 @@ pub struct ClientBuilder {
     network: Option<NetworkComponents>,
     sync: Option<SyncComponents>,
     miner: Option<MinerComponents>,
+    log_sync: Option<LogSyncComponents>,
 }
 
 impl ClientBuilder {
-    /// Instantiates a new, empty builder.
-    pub fn new() -> Self {
-        Self {
-            runtime_context: None,
-            store: None,
-            async_store: None,
-            file_location_cache: None,
-            network: None,
-            sync: None,
-            miner: None,
-        }
-    }
-
     /// Specifies the runtime context (tokio executor, logger, etc) for client services.
     pub fn with_runtime_context(mut self, context: RuntimeContext) -> Self {
         self.runtime_context = Some(context);
@@ -240,12 +233,13 @@ impl ClientBuilder {
         Ok(self)
     }
 
-    pub async fn with_log_sync(self, config: LogSyncConfig) -> Result<Self, String> {
+    pub async fn with_log_sync(mut self, config: LogSyncConfig) -> Result<Self, String> {
         let executor = require!("log_sync", self, runtime_context).clone().executor;
         let store = require!("log_sync", self, store).clone();
-        LogSyncManager::spawn(config, executor, store)
+        let send = LogSyncManager::spawn(config, executor, store)
             .await
             .map_err(|e| e.to_string())?;
+        self.log_sync = Some(LogSyncComponents { send });
         Ok(self)
     }
 

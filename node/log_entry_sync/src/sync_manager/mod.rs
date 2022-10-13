@@ -13,10 +13,20 @@ use std::sync::Arc;
 use std::time::Duration;
 use storage::log_store::Store;
 use task_executor::{ShutdownReason, TaskExecutor};
+use tokio::sync::broadcast;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::RwLock;
 
 const RETRY_WAIT_MS: u64 = 500;
+const BROADCAST_CHANNEL_CAPACITY: usize = 16;
+
+#[derive(Clone, Debug)]
+pub enum LogSyncEvent {
+    /// Chain reorg detected without any operation yet.
+    ReorgDetected { tx_seq: u64 },
+    /// Transaction reverted in storage.
+    Reverted { tx_seq: u64 },
+}
 
 pub struct LogSyncManager {
     config: LogSyncConfig,
@@ -25,6 +35,9 @@ pub struct LogSyncManager {
     data_cache: DataCache,
 
     next_tx_seq: u64,
+
+    /// To broadcast events to handle in advance.
+    event_send: broadcast::Sender<LogSyncEvent>,
 }
 
 impl LogSyncManager {
@@ -32,11 +45,15 @@ impl LogSyncManager {
         config: LogSyncConfig,
         executor: TaskExecutor,
         store: Arc<RwLock<dyn Store>>,
-    ) -> Result<()> {
+    ) -> Result<broadcast::Sender<LogSyncEvent>> {
         let next_tx_seq = store.read().await.next_tx_seq()?;
 
         let executor_clone = executor.clone();
         let mut shutdown_sender = executor.shutdown_sender();
+
+        let (event_send, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+        let event_send_cloned = event_send.clone();
+
         // Spawn the task to sync log entries from the blockchain.
         executor.spawn(
             run_and_log(
@@ -59,6 +76,7 @@ impl LogSyncManager {
                         next_tx_seq,
                         store,
                         data_cache,
+                        event_send,
                     };
 
                     // Load previous progress from db and check if chain reorg happens after restart.
@@ -122,7 +140,7 @@ impl LogSyncManager {
             .map(|_| ()),
             "log_sync",
         );
-        Ok(())
+        Ok(event_send_cloned)
     }
 
     async fn put_tx(&mut self, tx: Transaction) -> bool {
@@ -164,13 +182,22 @@ impl LogSyncManager {
                         }
                     }
                 }
+
+                let tx_seq = tx.seq;
+
+                let _ = self.event_send.send(LogSyncEvent::ReorgDetected { tx_seq });
+
                 // TODO: Process reverted transactions.
-                if let Err(e) = self.store.write().await.revert_to(tx.seq.wrapping_sub(1)) {
+                if let Err(e) = self.store.write().await.revert_to(tx_seq.wrapping_sub(1)) {
                     error!("revert_to fails: e={:?}", e);
                     return false;
                 }
-                self.next_tx_seq = tx.seq;
-                self.put_tx_inner(tx).await
+                self.next_tx_seq = tx_seq;
+                let succeeded = self.put_tx_inner(tx).await;
+
+                let _ = self.event_send.send(LogSyncEvent::Reverted { tx_seq });
+
+                succeeded
             }
             Ordering::Equal => {
                 debug!("log entry sync get entry: {:?}", tx);

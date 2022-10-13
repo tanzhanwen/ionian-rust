@@ -6,5 +6,5 @@ mod sync_manager;
 pub use rpc_proxy::ContractAddress;
 pub use sync_manager::{
     config::{CacheConfig, LogSyncConfig},
-    LogSyncManager,
+    LogSyncEvent, LogSyncManager,
 };
