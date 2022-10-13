@@ -547,10 +547,70 @@ mod tests {
     use storage::log_store::LogStoreRead;
     use task_executor::test_utils::TestRuntime;
     use tokio::sync::mpsc::UnboundedReceiver;
+    use tokio::sync::mpsc::UnboundedSender;
 
     use crate::test_util::tests::{create_2_store, create_file_location_cache};
 
     use super::*;
+
+    struct TestSyncRuntime {
+        runtime: TestRuntime,
+
+        chunk_count: usize,
+        store: Arc<RwLock<LogManager>>,
+        peer_store: Arc<RwLock<LogManager>>,
+        init_data: Vec<u8>,
+
+        init_peer_id: PeerId,
+        file_location_cache: Arc<FileLocationCache>,
+
+        network_send: UnboundedSender<NetworkMessage>,
+        network_recv: UnboundedReceiver<NetworkMessage>,
+    }
+
+    impl Default for TestSyncRuntime {
+        fn default() -> Self {
+            TestSyncRuntime::new(vec![1535], 1)
+        }
+    }
+
+    impl TestSyncRuntime {
+        fn new(chunk_counts: Vec<usize>, seq_size: usize) -> Self {
+            let chunk_count = chunk_counts[0];
+            let (store, peer_store, _, data) = create_2_store(chunk_counts);
+            let init_data = data[0].clone();
+            let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
+            let (network_send, network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
+
+            Self {
+                runtime: TestRuntime::default(),
+                chunk_count,
+                store,
+                peer_store,
+                init_data,
+                init_peer_id,
+                file_location_cache: create_file_location_cache(init_peer_id, seq_size),
+                network_send,
+                network_recv,
+            }
+        }
+
+        fn spawn_sync_service(&self, with_peer_store: bool) -> SyncSender {
+            let store = if with_peer_store {
+                self.peer_store.clone()
+            } else {
+                self.store.clone()
+            };
+
+            SyncService::spawn_with_config(
+                Config::default().disable_auto_sync(),
+                self.runtime.task_executor.clone(),
+                self.network_send.clone(),
+                store,
+                self.file_location_cache.clone(),
+            )
+        }
+    }
 
     #[tokio::test]
     async fn test_peer_connected_not_in_controller() {
@@ -616,41 +676,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_chunks() {
-        let runtime = TestRuntime::default();
-
-        let chunk_count = 1535;
-        let (_, store, _txs, data) = create_2_store(vec![chunk_count]);
-        let data = data[0].clone();
-
-        let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
-        let file_location_cache: Arc<FileLocationCache> =
-            create_file_location_cache(init_peer_id, 1);
-
-        let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
-
-        let sync_send = SyncService::spawn_with_config(
-            Config::default().disable_auto_sync(),
-            runtime.task_executor.clone(),
-            network_send,
-            store.clone(),
-            file_location_cache,
-        );
+        let mut runtime = TestSyncRuntime::default();
+        let sync_send = runtime.spawn_sync_service(true);
 
         let request = GetChunksRequest {
             tx_seq: 0,
             index_start: 0,
-            index_end: chunk_count as u64,
+            index_end: runtime.chunk_count as u64,
         };
 
         sync_send
             .notify(SyncMessage::RequestChunks {
                 request_id: (ConnectionId::new(0), SubstreamId(0)),
-                peer_id: init_peer_id,
+                peer_id: runtime.init_peer_id,
                 request,
             })
             .unwrap();
 
-        if let Some(msg) = network_recv.recv().await {
+        if let Some(msg) = runtime.network_recv.recv().await {
             match msg {
                 NetworkMessage::SendResponse {
                     peer_id,
@@ -658,10 +701,11 @@ mod tests {
                     id,
                 } => match response {
                     network::Response::Chunks(response) => {
-                        assert_eq!(peer_id, init_peer_id);
+                        assert_eq!(peer_id, runtime.init_peer_id);
                         assert_eq!(id.0, ConnectionId::new(0));
                         assert_eq!(id.1 .0, 0);
 
+                        let data = runtime.init_data.clone();
                         let chunk_array = ChunkArray {
                             data,
                             start_index: 0,
@@ -669,10 +713,13 @@ mod tests {
 
                         assert_eq!(
                             response.chunks,
-                            chunk_array.sub_array(0, chunk_count as u64).unwrap()
+                            chunk_array
+                                .sub_array(0, runtime.chunk_count as u64)
+                                .unwrap()
                         );
 
-                        store
+                        runtime
+                            .peer_store
                             .read()
                             .await
                             .validate_range_proof(0, &response)
@@ -691,24 +738,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_chunks_invalid_indices() {
-        let runtime = TestRuntime::default();
-
-        let chunk_count = 1535;
-        let (_, store, _, _) = create_2_store(vec![chunk_count]);
-
-        let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
-        let file_location_cache: Arc<FileLocationCache> =
-            create_file_location_cache(init_peer_id, 1);
-
-        let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
-
-        let sync_send = SyncService::spawn_with_config(
-            Config::default().disable_auto_sync(),
-            runtime.task_executor.clone(),
-            network_send,
-            store.clone(),
-            file_location_cache,
-        );
+        let mut runtime = TestSyncRuntime::default();
+        let sync_send = runtime.spawn_sync_service(true);
 
         let request = GetChunksRequest {
             tx_seq: 0,
@@ -719,12 +750,12 @@ mod tests {
         sync_send
             .notify(SyncMessage::RequestChunks {
                 request_id: (ConnectionId::new(0), SubstreamId(0)),
-                peer_id: init_peer_id,
+                peer_id: runtime.init_peer_id,
                 request,
             })
             .unwrap();
 
-        if let Some(msg) = network_recv.recv().await {
+        if let Some(msg) = runtime.network_recv.recv().await {
             match msg {
                 NetworkMessage::ReportPeer {
                     peer_id,
@@ -732,7 +763,7 @@ mod tests {
                     source,
                     msg,
                 } => {
-                    assert_eq!(peer_id, init_peer_id);
+                    assert_eq!(peer_id, runtime.init_peer_id);
                     match action {
                         PeerAction::Fatal => {}
                         _ => {
@@ -757,40 +788,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_chunks_tx_not_exist() {
-        let runtime = TestRuntime::default();
-
-        let chunk_count = 1535;
-        let (_, store, _, _) = create_2_store(vec![chunk_count]);
-
-        let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
-        let file_location_cache: Arc<FileLocationCache> =
-            create_file_location_cache(init_peer_id, 1);
-
-        let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
-
-        let sync_send = SyncService::spawn_with_config(
-            Config::default().disable_auto_sync(),
-            runtime.task_executor.clone(),
-            network_send,
-            store.clone(),
-            file_location_cache,
-        );
+        let mut runtime = TestSyncRuntime::default();
+        let sync_send = runtime.spawn_sync_service(true);
 
         let request = GetChunksRequest {
             tx_seq: 1,
             index_start: 0,
-            index_end: chunk_count as u64,
+            index_end: runtime.chunk_count as u64,
         };
 
         sync_send
             .notify(SyncMessage::RequestChunks {
                 request_id: (ConnectionId::new(0), SubstreamId(0)),
-                peer_id: init_peer_id,
+                peer_id: runtime.init_peer_id,
                 request,
             })
             .unwrap();
 
-        if let Some(msg) = network_recv.recv().await {
+        if let Some(msg) = runtime.network_recv.recv().await {
             match msg {
                 NetworkMessage::ReportPeer {
                     peer_id,
@@ -798,7 +813,7 @@ mod tests {
                     source,
                     msg,
                 } => {
-                    assert_eq!(peer_id, init_peer_id);
+                    assert_eq!(peer_id, runtime.init_peer_id);
                     match action {
                         PeerAction::Fatal => {}
                         _ => {
@@ -823,40 +838,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_chunks_index_out_bound() {
-        let runtime = TestRuntime::default();
-
-        let chunk_count = 1535;
-        let (_, store, _, _) = create_2_store(vec![chunk_count]);
-
-        let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
-        let file_location_cache: Arc<FileLocationCache> =
-            create_file_location_cache(init_peer_id, 1);
-
-        let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
-
-        let sync_send = SyncService::spawn_with_config(
-            Config::default().disable_auto_sync(),
-            runtime.task_executor.clone(),
-            network_send,
-            store.clone(),
-            file_location_cache,
-        );
+        let mut runtime = TestSyncRuntime::default();
+        let sync_send = runtime.spawn_sync_service(true);
 
         let request = GetChunksRequest {
             tx_seq: 0,
             index_start: 0,
-            index_end: chunk_count as u64 + 1,
+            index_end: runtime.chunk_count as u64 + 1,
         };
 
         sync_send
             .notify(SyncMessage::RequestChunks {
                 request_id: (ConnectionId::new(0), SubstreamId(0)),
-                peer_id: init_peer_id,
+                peer_id: runtime.init_peer_id,
                 request,
             })
             .unwrap();
 
-        if let Some(msg) = network_recv.recv().await {
+        if let Some(msg) = runtime.network_recv.recv().await {
             match msg {
                 NetworkMessage::ReportPeer {
                     peer_id,
@@ -864,7 +863,7 @@ mod tests {
                     source,
                     msg,
                 } => {
-                    assert_eq!(peer_id, init_peer_id);
+                    assert_eq!(peer_id, runtime.init_peer_id);
                     match action {
                         PeerAction::Fatal => {}
                         _ => {
@@ -889,40 +888,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_chunks_tx_not_finalized() {
-        let runtime = TestRuntime::default();
-
-        let chunk_count = 1535;
-        let (store, _, _, _) = create_2_store(vec![chunk_count]);
-
-        let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
-        let file_location_cache: Arc<FileLocationCache> =
-            create_file_location_cache(init_peer_id, 1);
-
-        let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
-
-        let sync_send = SyncService::spawn_with_config(
-            Config::default().disable_auto_sync(),
-            runtime.task_executor.clone(),
-            network_send,
-            store.clone(),
-            file_location_cache,
-        );
+        let mut runtime = TestSyncRuntime::default();
+        let sync_send = runtime.spawn_sync_service(false);
 
         let request = GetChunksRequest {
             tx_seq: 0,
             index_start: 0,
-            index_end: chunk_count as u64,
+            index_end: runtime.chunk_count as u64,
         };
 
         sync_send
             .notify(SyncMessage::RequestChunks {
                 request_id: (ConnectionId::new(0), SubstreamId(0)),
-                peer_id: init_peer_id,
+                peer_id: runtime.init_peer_id,
                 request,
             })
             .unwrap();
 
-        if let Some(msg) = network_recv.recv().await {
+        if let Some(msg) = runtime.network_recv.recv().await {
             match msg {
                 NetworkMessage::ReportPeer {
                     peer_id,
@@ -930,7 +913,7 @@ mod tests {
                     source,
                     msg,
                 } => {
-                    assert_eq!(peer_id, init_peer_id);
+                    assert_eq!(peer_id, runtime.init_peer_id);
                     match action {
                         PeerAction::MidToleranceError => {}
                         _ => {
@@ -952,7 +935,7 @@ mod tests {
             }
         }
 
-        if let Some(msg) = network_recv.recv().await {
+        if let Some(msg) = runtime.network_recv.recv().await {
             match msg {
                 NetworkMessage::SendErrorResponse {
                     peer_id,
@@ -960,7 +943,7 @@ mod tests {
                     error,
                     reason,
                 } => {
-                    assert_eq!(peer_id, init_peer_id);
+                    assert_eq!(peer_id, runtime.init_peer_id);
                     assert_eq!(id.1 .0, 0);
                     assert_eq!(error, RPCResponseErrorCode::InvalidRequest);
                     assert_eq!(reason, "Tx not finalized".to_string());
@@ -986,7 +969,6 @@ mod tests {
             create_file_location_cache(init_peer_id, 1);
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
-
         let sync_send = SyncService::spawn_with_config(
             Config::default().disable_auto_sync(),
             runtime.task_executor.clone(),
@@ -1011,24 +993,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_file_exist_in_store() {
-        let runtime = TestRuntime::default();
-
-        let chunk_count = 1535;
-        let (_, peer_store, _, _) = create_2_store(vec![chunk_count]);
-
-        let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
-        let file_location_cache: Arc<FileLocationCache> =
-            create_file_location_cache(init_peer_id, 1);
-
-        let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
-
-        let sync_send = SyncService::spawn_with_config(
-            Config::default().disable_auto_sync(),
-            runtime.task_executor.clone(),
-            network_send,
-            peer_store.clone(),
-            file_location_cache,
-        );
+        let mut runtime = TestSyncRuntime::default();
+        let sync_send = runtime.spawn_sync_service(true);
 
         let tx_seq = 0u64;
         sync_send
@@ -1038,10 +1004,15 @@ mod tests {
 
         thread::sleep(Duration::from_millis(1000));
         assert_eq!(
-            peer_store.read().await.check_tx_completed(tx_seq).unwrap(),
+            runtime
+                .peer_store
+                .read()
+                .await
+                .check_tx_completed(tx_seq)
+                .unwrap(),
             true
         );
-        assert_eq!(network_recv.try_recv().is_err(), true);
+        assert_eq!(runtime.network_recv.try_recv().is_err(), true);
     }
 
     async fn wait_for_tx_finalized(store: Arc<RwLock<LogManager>>, tx_seq: u64) {
@@ -1057,24 +1028,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_file_success() {
-        let runtime = TestRuntime::default();
-
-        let chunk_count = 1535;
-        let (store, peer_store, _, _) = create_2_store(vec![chunk_count]);
-
-        let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
-        let file_location_cache: Arc<FileLocationCache> =
-            create_file_location_cache(init_peer_id, 1);
-
-        let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
-
-        let sync_send = SyncService::spawn_with_config(
-            Config::default().disable_auto_sync(),
-            runtime.task_executor.clone(),
-            network_send,
-            store.clone(),
-            file_location_cache,
-        );
+        let mut runtime = TestSyncRuntime::default();
+        let sync_send = runtime.spawn_sync_service(false);
 
         let tx_seq = 0u64;
         sync_send
@@ -1082,10 +1037,15 @@ mod tests {
             .await
             .unwrap();
 
-        receive_dial(&mut network_recv, &sync_send, init_peer_id).await;
+        receive_dial(&mut runtime, &sync_send).await;
 
         assert_eq!(
-            store.read().await.check_tx_completed(tx_seq).unwrap(),
+            runtime
+                .store
+                .read()
+                .await
+                .check_tx_completed(tx_seq)
+                .unwrap(),
             false
         );
 
@@ -1098,17 +1058,17 @@ mod tests {
         ));
 
         receive_chunk_request(
-            &mut network_recv,
+            &mut runtime.network_recv,
             &sync_send,
-            peer_store.clone(),
-            init_peer_id,
+            runtime.peer_store.clone(),
+            runtime.init_peer_id,
             tx_seq,
             0,
-            chunk_count as u64,
+            runtime.chunk_count as u64,
         )
         .await;
 
-        wait_for_tx_finalized(store, tx_seq).await;
+        wait_for_tx_finalized(runtime.store, tx_seq).await;
 
         // test heartbeat
         let deadline = Instant::now() + Duration::from_secs(HEARTBEAT_INTERVAL_SEC + 1);
@@ -1142,24 +1102,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_file_exceed_max_chunks_to_request() {
-        let runtime = TestRuntime::default();
-
-        let chunk_count = 2049;
-        let (store, peer_store, _, _) = create_2_store(vec![chunk_count]);
-
-        let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
-        let file_location_cache: Arc<FileLocationCache> =
-            create_file_location_cache(init_peer_id, 1);
-
-        let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
-
-        let sync_send = SyncService::spawn_with_config(
-            Config::default().disable_auto_sync(),
-            runtime.task_executor.clone(),
-            network_send,
-            store.clone(),
-            file_location_cache,
-        );
+        let mut runtime = TestSyncRuntime::new(vec![2049], 1);
+        let sync_send = runtime.spawn_sync_service(false);
 
         let tx_seq = 0u64;
         sync_send
@@ -1167,18 +1111,23 @@ mod tests {
             .await
             .unwrap();
 
-        receive_dial(&mut network_recv, &sync_send, init_peer_id).await;
+        receive_dial(&mut runtime, &sync_send).await;
 
         assert_eq!(
-            store.read().await.check_tx_completed(tx_seq).unwrap(),
+            runtime
+                .store
+                .read()
+                .await
+                .check_tx_completed(tx_seq)
+                .unwrap(),
             false
         );
 
         receive_chunk_request(
-            &mut network_recv,
+            &mut runtime.network_recv,
             &sync_send,
-            peer_store.clone(),
-            init_peer_id,
+            runtime.peer_store.clone(),
+            runtime.init_peer_id,
             tx_seq,
             0,
             2048,
@@ -1195,39 +1144,23 @@ mod tests {
 
         // next batch
         receive_chunk_request(
-            &mut network_recv,
+            &mut runtime.network_recv,
             &sync_send,
-            peer_store.clone(),
-            init_peer_id,
+            runtime.peer_store.clone(),
+            runtime.init_peer_id,
             tx_seq,
             2048,
-            chunk_count as u64,
+            runtime.chunk_count as u64,
         )
         .await;
 
-        wait_for_tx_finalized(store, tx_seq).await;
+        wait_for_tx_finalized(runtime.store, tx_seq).await;
     }
 
     #[tokio::test]
     async fn test_sync_file_multi_files() {
-        let runtime = TestRuntime::default();
-
-        let chunk_count = vec![1535, 1535, 1535];
-        let (store, peer_store, _, _) = create_2_store(chunk_count.clone());
-
-        let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
-        let file_location_cache: Arc<FileLocationCache> =
-            create_file_location_cache(init_peer_id, 3);
-
-        let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
-
-        let sync_send = SyncService::spawn_with_config(
-            Config::default().disable_auto_sync(),
-            runtime.task_executor.clone(),
-            network_send,
-            store.clone(),
-            file_location_cache,
-        );
+        let mut runtime = TestSyncRuntime::new(vec![1535, 1535, 1535], 3);
+        let sync_send = runtime.spawn_sync_service(false);
 
         // second file
         let tx_seq = 1u64;
@@ -1236,28 +1169,39 @@ mod tests {
             .await
             .unwrap();
 
-        receive_dial(&mut network_recv, &sync_send, init_peer_id).await;
+        receive_dial(&mut runtime, &sync_send).await;
 
         assert_eq!(
-            store.read().await.check_tx_completed(tx_seq).unwrap(),
+            runtime
+                .store
+                .read()
+                .await
+                .check_tx_completed(tx_seq)
+                .unwrap(),
             false
         );
-        assert_eq!(store.read().await.check_tx_completed(0).unwrap(), false);
+        assert_eq!(
+            runtime.store.read().await.check_tx_completed(0).unwrap(),
+            false
+        );
 
         receive_chunk_request(
-            &mut network_recv,
+            &mut runtime.network_recv,
             &sync_send,
-            peer_store.clone(),
-            init_peer_id,
+            runtime.peer_store.clone(),
+            runtime.init_peer_id,
             tx_seq,
             0,
-            chunk_count[0] as u64,
+            runtime.chunk_count as u64,
         )
         .await;
 
-        wait_for_tx_finalized(store.clone(), tx_seq).await;
+        wait_for_tx_finalized(runtime.store.clone(), tx_seq).await;
 
-        assert_eq!(store.read().await.check_tx_completed(0).unwrap(), false);
+        assert_eq!(
+            runtime.store.read().await.check_tx_completed(0).unwrap(),
+            false
+        );
 
         // first file
         let tx_seq = 0u64;
@@ -1266,134 +1210,92 @@ mod tests {
             .await
             .unwrap();
 
-        receive_dial(&mut network_recv, &sync_send, init_peer_id).await;
+        receive_dial(&mut runtime, &sync_send).await;
 
         receive_chunk_request(
-            &mut network_recv,
+            &mut runtime.network_recv,
             &sync_send,
-            peer_store.clone(),
-            init_peer_id,
+            runtime.peer_store.clone(),
+            runtime.init_peer_id,
             tx_seq,
             0,
-            chunk_count[0] as u64,
+            runtime.chunk_count as u64,
         )
         .await;
 
-        wait_for_tx_finalized(store, tx_seq).await;
+        wait_for_tx_finalized(runtime.store, tx_seq).await;
 
         sync_send
             .notify(SyncMessage::PeerDisconnected {
-                peer_id: init_peer_id,
+                peer_id: runtime.init_peer_id,
             })
             .unwrap();
 
         thread::sleep(Duration::from_millis(1000));
-        assert_eq!(network_recv.try_recv().is_err(), true);
+        assert_eq!(runtime.network_recv.try_recv().is_err(), true);
     }
 
     #[tokio::test]
     async fn test_rpc_error() {
-        let runtime = TestRuntime::default();
-
-        let chunk_count = 1535;
-        let (_, store, _, _) = create_2_store(vec![chunk_count]);
-
-        let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
-        let file_location_cache: Arc<FileLocationCache> =
-            create_file_location_cache(init_peer_id, 1);
-
-        let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
-
-        let sync_send = SyncService::spawn_with_config(
-            Config::default().disable_auto_sync(),
-            runtime.task_executor.clone(),
-            network_send,
-            store,
-            file_location_cache,
-        );
+        let mut runtime = TestSyncRuntime::default();
+        let sync_send = runtime.spawn_sync_service(true);
 
         sync_send
             .notify(SyncMessage::RpcError {
                 request_id: network::SyncId::SerialSync { tx_seq: 0 },
-                peer_id: init_peer_id,
+                peer_id: runtime.init_peer_id,
             })
             .unwrap();
 
         thread::sleep(Duration::from_millis(1000));
-        assert_eq!(network_recv.try_recv().is_err(), true);
+        assert_eq!(runtime.network_recv.try_recv().is_err(), true);
     }
 
     #[tokio::test]
     async fn test_announce_file() {
-        let runtime = TestRuntime::default();
-
-        let chunk_count = 1535;
-        let (store, peer_store, _, _) = create_2_store(vec![chunk_count]);
-
-        let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
-        let file_location_cache: Arc<FileLocationCache> = Default::default();
-
-        let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
-
-        let sync_send = SyncService::spawn_with_config(
-            Config::default().disable_auto_sync(),
-            runtime.task_executor.clone(),
-            network_send,
-            store.clone(),
-            file_location_cache,
-        );
+        let mut runtime = TestSyncRuntime::new(vec![1535], 0);
+        let sync_send = runtime.spawn_sync_service(false);
 
         let tx_seq = 0u64;
         let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
         sync_send
             .notify(SyncMessage::AnnounceFileGossip {
                 tx_seq,
-                peer_id: init_peer_id,
+                peer_id: runtime.init_peer_id,
                 addr: address,
             })
             .unwrap();
 
-        receive_dial(&mut network_recv, &sync_send, init_peer_id).await;
+        receive_dial(&mut runtime, &sync_send).await;
 
         assert_eq!(
-            store.read().await.check_tx_completed(tx_seq).unwrap(),
+            runtime
+                .store
+                .read()
+                .await
+                .check_tx_completed(tx_seq)
+                .unwrap(),
             false
         );
 
         receive_chunk_request(
-            &mut network_recv,
+            &mut runtime.network_recv,
             &sync_send,
-            peer_store.clone(),
-            init_peer_id,
+            runtime.peer_store.clone(),
+            runtime.init_peer_id,
             tx_seq,
             0,
-            chunk_count as u64,
+            runtime.chunk_count as u64,
         )
         .await;
 
-        wait_for_tx_finalized(store, tx_seq).await;
+        wait_for_tx_finalized(runtime.store, tx_seq).await;
     }
 
     #[tokio::test]
     async fn test_announce_file_in_sync() {
-        let runtime = TestRuntime::default();
-
-        let chunk_count = 1535;
-        let (store, peer_store, _, _) = create_2_store(vec![chunk_count]);
-
-        let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
-        let file_location_cache: Arc<FileLocationCache> =
-            create_file_location_cache(init_peer_id, 1);
-
-        let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
-
-        let sync_send = SyncService::spawn_with_config(
-            Config::default().disable_auto_sync(),
-            runtime.task_executor.clone(),
-            network_send,
-            store.clone(),
-            file_location_cache,
-        );
+        let mut runtime = TestSyncRuntime::default();
+        let sync_send = runtime.spawn_sync_service(false);
 
         let tx_seq = 0u64;
         sync_send
@@ -1405,87 +1307,60 @@ mod tests {
         sync_send
             .notify(SyncMessage::AnnounceFileGossip {
                 tx_seq,
-                peer_id: init_peer_id,
+                peer_id: runtime.init_peer_id,
                 addr: address,
             })
             .unwrap();
 
-        receive_dial(&mut network_recv, &sync_send, init_peer_id).await;
+        receive_dial(&mut runtime, &sync_send).await;
 
         assert_eq!(
-            store.read().await.check_tx_completed(tx_seq).unwrap(),
+            runtime
+                .store
+                .read()
+                .await
+                .check_tx_completed(tx_seq)
+                .unwrap(),
             false
         );
 
         receive_chunk_request(
-            &mut network_recv,
+            &mut runtime.network_recv,
             &sync_send,
-            peer_store.clone(),
-            init_peer_id,
+            runtime.peer_store.clone(),
+            runtime.init_peer_id,
             tx_seq,
             0,
-            chunk_count as u64,
+            runtime.chunk_count as u64,
         )
         .await;
 
-        wait_for_tx_finalized(store, tx_seq).await;
+        wait_for_tx_finalized(runtime.store, tx_seq).await;
     }
 
     #[tokio::test]
     async fn test_announce_file_already_in_store() {
-        let runtime = TestRuntime::default();
-
-        let chunk_count = 1535;
-        let (_, peer_store, _, _) = create_2_store(vec![chunk_count]);
-
-        let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
-        let file_location_cache: Arc<FileLocationCache> =
-            create_file_location_cache(init_peer_id, 1);
-
-        let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
-
-        let sync_send = SyncService::spawn_with_config(
-            Config::default().disable_auto_sync(),
-            runtime.task_executor.clone(),
-            network_send,
-            peer_store,
-            file_location_cache,
-        );
+        let mut runtime = TestSyncRuntime::default();
+        let sync_send = runtime.spawn_sync_service(true);
 
         let tx_seq = 0u64;
         let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
         sync_send
             .notify(SyncMessage::AnnounceFileGossip {
                 tx_seq,
-                peer_id: init_peer_id,
+                peer_id: runtime.init_peer_id,
                 addr: address,
             })
             .unwrap();
 
         thread::sleep(Duration::from_millis(1000));
-        assert_eq!(network_recv.try_recv().is_err(), true);
+        assert_eq!(runtime.network_recv.try_recv().is_err(), true);
     }
 
     #[tokio::test]
     async fn test_sync_status_unknown() {
-        let runtime = TestRuntime::default();
-
-        let chunk_count = 1535;
-        let (store, _, _, _) = create_2_store(vec![chunk_count]);
-
-        let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
-        let file_location_cache: Arc<FileLocationCache> =
-            create_file_location_cache(init_peer_id, 1);
-
-        let (network_send, _) = mpsc::unbounded_channel::<NetworkMessage>();
-
-        let sync_send = SyncService::spawn_with_config(
-            Config::default().disable_auto_sync(),
-            runtime.task_executor.clone(),
-            network_send,
-            store.clone(),
-            file_location_cache,
-        );
+        let runtime = TestSyncRuntime::default();
+        let sync_send = runtime.spawn_sync_service(false);
 
         assert!(matches!(
             sync_send
@@ -1496,18 +1371,14 @@ mod tests {
         ));
     }
 
-    async fn receive_dial(
-        network_recv: &mut UnboundedReceiver<NetworkMessage>,
-        sync_send: &SyncSender,
-        init_peer_id: PeerId,
-    ) {
-        if let Some(msg) = network_recv.recv().await {
+    async fn receive_dial(runtime: &mut TestSyncRuntime, sync_send: &SyncSender) {
+        if let Some(msg) = runtime.network_recv.recv().await {
             match msg {
                 NetworkMessage::DialPeer {
                     address: _,
                     peer_id,
                 } => {
-                    assert_eq!(peer_id, init_peer_id);
+                    assert_eq!(peer_id, runtime.init_peer_id);
 
                     sync_send
                         .notify(SyncMessage::PeerConnected { peer_id })
@@ -1521,23 +1392,8 @@ mod tests {
     }
 
     async fn test_sync_file(chunk_count: usize) {
-        let runtime = TestRuntime::default();
-
-        let (store, peer_store, _, _) = create_2_store(vec![chunk_count]);
-
-        let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
-        let file_location_cache: Arc<FileLocationCache> =
-            create_file_location_cache(init_peer_id, 1);
-
-        let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
-
-        let sync_send = SyncService::spawn_with_config(
-            Config::default().disable_auto_sync(),
-            runtime.task_executor.clone(),
-            network_send,
-            store.clone(),
-            file_location_cache,
-        );
+        let mut runtime = TestSyncRuntime::new(vec![chunk_count], 1);
+        let sync_send = runtime.spawn_sync_service(false);
 
         let tx_seq = 0u64;
         sync_send
@@ -1545,10 +1401,15 @@ mod tests {
             .await
             .unwrap();
 
-        receive_dial(&mut network_recv, &sync_send, init_peer_id).await;
+        receive_dial(&mut runtime, &sync_send).await;
 
         assert_eq!(
-            store.read().await.check_tx_completed(tx_seq).unwrap(),
+            runtime
+                .store
+                .read()
+                .await
+                .check_tx_completed(tx_seq)
+                .unwrap(),
             false
         );
 
@@ -1560,17 +1421,17 @@ mod tests {
             SyncResponse::SyncStatus { status } if status == "Completed".to_string()));
 
         receive_chunk_request(
-            &mut network_recv,
+            &mut runtime.network_recv,
             &sync_send,
-            peer_store.clone(),
-            init_peer_id,
+            runtime.peer_store.clone(),
+            runtime.init_peer_id,
             tx_seq,
             0,
             chunk_count as u64,
         )
         .await;
 
-        wait_for_tx_finalized(store, tx_seq).await;
+        wait_for_tx_finalized(runtime.store, tx_seq).await;
     }
 
     async fn receive_chunk_request(
