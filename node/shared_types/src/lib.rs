@@ -72,6 +72,12 @@ pub fn compute_segment_size(chunks: usize, chunks_per_segment: usize) -> (usize,
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Chunk(pub [u8; CHUNK_SIZE]);
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TxID {
+    pub seq: u64,
+    pub hash: H256,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, DeriveDecode, DeriveEncode, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Transaction {
@@ -105,6 +111,13 @@ impl Transaction {
         h.update(&bytes);
         h.finalize(e.as_mut());
         e
+    }
+
+    pub fn id(&self) -> TxID {
+        TxID {
+            seq: self.seq,
+            hash: self.hash(),
+        }
     }
 }
 

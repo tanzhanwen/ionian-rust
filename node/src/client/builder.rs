@@ -143,8 +143,15 @@ impl ClientBuilder {
         let store = require!("sync", self, store).clone();
         let file_location_cache = require!("sync", self, file_location_cache).clone();
         let network_send = require!("sync", self, network).send.clone();
+        let event_recv = require!("sync", self, log_sync).send.subscribe();
 
-        let send = SyncService::spawn(executor, network_send, store, file_location_cache);
+        let send = SyncService::spawn(
+            executor,
+            network_send,
+            store,
+            file_location_cache,
+            event_recv,
+        );
         self.sync = Some(SyncComponents { send });
 
         Ok(self)

@@ -5,6 +5,7 @@ use crate::Config;
 use anyhow::{bail, Result};
 use file_location_cache::FileLocationCache;
 use libp2p::swarm::DialError;
+use log_entry_sync::LogSyncEvent;
 use network::{
     rpc::GetChunksRequest, rpc::RPCResponseErrorCode, Multiaddr, NetworkMessage, PeerAction,
     PeerId, PeerRequestId, SyncId as RequestId,
@@ -17,7 +18,7 @@ use std::{
 use storage::error::Result as StorageResult;
 use storage::log_store::Store as LogStore;
 use storage_async::Store;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock};
 
 const HEARTBEAT_INTERVAL_SEC: u64 = 5;
 
@@ -61,6 +62,7 @@ pub enum SyncRequest {
     SyncStatus { tx_seq: u64 },
     SyncFile { tx_seq: u64 },
     FileSyncInfo { tx_seq: Option<u64> },
+    TerminateFileSync { tx_seq: u64 },
 }
 
 #[derive(Debug)]
@@ -68,6 +70,7 @@ pub enum SyncResponse {
     SyncStatus { status: String },
     SyncFile { err: String },
     FileSyncInfo { result: HashMap<u64, FileSyncInfo> },
+    TerminateFileSync { count: usize },
 }
 
 pub struct SyncService {
@@ -98,6 +101,7 @@ impl SyncService {
         network_send: mpsc::UnboundedSender<NetworkMessage>,
         store: Arc<RwLock<dyn LogStore>>,
         file_location_cache: Arc<FileLocationCache>,
+        event_recv: broadcast::Receiver<LogSyncEvent>,
     ) -> SyncSender {
         Self::spawn_with_config(
             Config::default(),
@@ -105,6 +109,7 @@ impl SyncService {
             network_send,
             store,
             file_location_cache,
+            event_recv,
         )
     }
 
@@ -114,6 +119,7 @@ impl SyncService {
         network_send: mpsc::UnboundedSender<NetworkMessage>,
         store: Arc<RwLock<dyn LogStore>>,
         file_location_cache: Arc<FileLocationCache>,
+        event_recv: broadcast::Receiver<LogSyncEvent>,
     ) -> SyncSender {
         let (sync_send, sync_recv) = channel::Channel::unbounded();
 
@@ -123,11 +129,9 @@ impl SyncService {
         let store = Store::new(store, executor.clone());
 
         if !config.auto_sync_disabled {
-            let mut manager = SyncManager::new(store.clone(), sync_send.clone());
-            executor.spawn(
-                async move { Box::pin(manager.start()).await },
-                "auto_sync_file",
-            );
+            let manager = SyncManager::new(store.clone(), sync_send.clone());
+            manager.monitor_reorg(&executor, event_recv, "sync_manager_reorg_monitor");
+            executor.spawn(manager.start(), "sync_manager_syncer");
         }
 
         let mut sync = SyncService {
@@ -265,6 +269,11 @@ impl SyncService {
                 }
 
                 let _ = sender.send(SyncResponse::FileSyncInfo { result });
+            }
+
+            SyncRequest::TerminateFileSync { tx_seq } => {
+                let count = self.on_terminate_file_sync(tx_seq);
+                let _ = sender.send(SyncResponse::TerminateFileSync { count });
             }
         }
     }
@@ -514,6 +523,27 @@ impl SyncService {
         }
     }
 
+    /// Terminate all file sync that `tx_seq` greater than `min_tx_seq`
+    /// when confirmed transactions reverted.
+    ///
+    /// Note, this function should be as fast as possible to avoid
+    /// message lagged in channel.
+    fn on_terminate_file_sync(&mut self, min_tx_seq: u64) -> usize {
+        let mut reverted = vec![];
+
+        for (tx_seq, _) in self.controllers.iter() {
+            if *tx_seq >= min_tx_seq {
+                reverted.push(*tx_seq);
+            }
+        }
+
+        for tx_seq in reverted.iter() {
+            self.controllers.remove(tx_seq);
+        }
+
+        reverted.len()
+    }
+
     fn on_heartbeat(&mut self) {
         let mut completed = vec![];
 
@@ -566,6 +596,7 @@ mod tests {
 
         network_send: UnboundedSender<NetworkMessage>,
         network_recv: UnboundedReceiver<NetworkMessage>,
+        event_send: broadcast::Sender<LogSyncEvent>,
     }
 
     impl Default for TestSyncRuntime {
@@ -581,6 +612,7 @@ mod tests {
             let init_data = data[0].clone();
             let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
             let (network_send, network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
+            let (event_send, _) = broadcast::channel(16);
 
             Self {
                 runtime: TestRuntime::default(),
@@ -592,6 +624,7 @@ mod tests {
                 file_location_cache: create_file_location_cache(init_peer_id, seq_size),
                 network_send,
                 network_recv,
+                event_send,
             }
         }
 
@@ -608,6 +641,7 @@ mod tests {
                 self.network_send.clone(),
                 store,
                 self.file_location_cache.clone(),
+                self.event_send.subscribe(),
             )
         }
     }
@@ -969,12 +1003,14 @@ mod tests {
             create_file_location_cache(init_peer_id, 1);
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
+        let (_event_send, event_recv) = broadcast::channel(16);
         let sync_send = SyncService::spawn_with_config(
             Config::default().disable_auto_sync(),
             runtime.task_executor.clone(),
             network_send,
             store.clone(),
             file_location_cache,
+            event_recv,
         );
 
         let tx_seq = 0u64;

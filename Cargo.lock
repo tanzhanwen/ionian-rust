@@ -6210,6 +6210,7 @@ dependencies = [
  "eth2_ssz",
  "file_location_cache",
  "libp2p",
+ "log_entry_sync",
  "merkle_light",
  "network",
  "rand 0.8.5",

@@ -8,6 +8,7 @@ anyhow = { version = "1.0.58", features = ["backtrace"] }
 append_merkle = { path = "../../common/append_merkle" }
 channel = { path = "../../common/channel" }
 file_location_cache = { path = "../file_location_cache" }
+log_entry_sync = { path = "../log_entry_sync" }
 network = { path = "../network" }
 rand = "0.8.5"
 shared_types = { path = "../shared_types" }
