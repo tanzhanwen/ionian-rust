@@ -1,3 +1,4 @@
+use crate::sealer::Sealer;
 use crate::submitter::Submitter;
 use crate::{config::MinerConfig, mine::PoraService, watcher::MineContextWatcher};
 use network::NetworkMessage;
@@ -44,7 +45,15 @@ impl MineService {
             &config,
         );
 
-        Submitter::spawn(executor, mine_answer_receiver, provider, store, &config);
+        Submitter::spawn(
+            executor.clone(),
+            mine_answer_receiver,
+            provider.clone(),
+            store.clone(),
+            &config,
+        );
+
+        Sealer::spawn(executor, provider, store, &config);
 
         debug!("Starting miner service");
 

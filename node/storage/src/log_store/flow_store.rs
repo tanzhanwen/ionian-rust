@@ -1,21 +1,28 @@
 use super::load_chunk::EntryBatch;
+use super::{MineLoadChunk, SealAnswer, SealTask};
 use crate::error::Error;
-use crate::log_store::log_manager::{
-    bytes_to_entries, COL_ENTRY_BATCH, COL_ENTRY_BATCH_ROOT, ENTRY_SIZE, PORA_CHUNK_SIZE,
-};
-use crate::log_store::{FlowRead, FlowWrite};
+use crate::log_store::log_manager::{bytes_to_entries, COL_ENTRY_BATCH, COL_ENTRY_BATCH_ROOT};
+use crate::log_store::{FlowRead, FlowSeal, FlowWrite};
 use crate::{try_option, IonianKeyValueDB};
 use anyhow::{anyhow, bail, Result};
+use ionian_spec::{BYTES_PER_SECTOR, SEALS_PER_LOADING, SECTORS_PER_LOADING, SECTORS_PER_SEAL};
+use itertools::Itertools;
 use shared_types::{ChunkArray, DataRoot};
 use ssz::{Decode, Encode};
 use ssz_derive::{Decode as DeriveDecode, Encode as DeriveEncode};
 use std::cmp;
+use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::sync::Arc;
-use tracing::trace;
+use tracing::{debug, trace};
 
 pub struct FlowStore {
     db: FlowDBStore,
+    // TODO(kevin): This is an in-memory cache for recording which chunks are ready for sealing. It should be persisted on disk.
+    to_seal_set: BTreeMap<usize, usize>,
+    // Data sealing is an asynchronized process.
+    // The sealing service uses the version number to distinguish if revert happens during sealing.
+    to_seal_version: usize,
     config: FlowConfig,
 }
 
@@ -23,6 +30,8 @@ impl FlowStore {
     pub fn new(db: Arc<dyn IonianKeyValueDB>, config: FlowConfig) -> Self {
         Self {
             db: FlowDBStore::new(db),
+            to_seal_set: Default::default(),
+            to_seal_version: 0,
             config,
         }
     }
@@ -40,7 +49,7 @@ pub struct FlowConfig {
 impl Default for FlowConfig {
     fn default() -> Self {
         Self {
-            batch_size: PORA_CHUNK_SIZE,
+            batch_size: SECTORS_PER_LOADING,
         }
     }
 }
@@ -55,7 +64,7 @@ impl FlowRead for FlowStore {
                 index_end
             );
         }
-        let mut data = Vec::with_capacity((index_end - index_start) as usize * ENTRY_SIZE);
+        let mut data = Vec::with_capacity((index_end - index_start) as usize * BYTES_PER_SECTOR);
         for (start_entry_index, end_entry_index) in
             batch_iter(index_start, index_end, self.config.batch_size)
         {
@@ -71,7 +80,7 @@ impl FlowRead for FlowStore {
 
             let entry_batch = try_option!(self.db.get_entry_batch(chunk_index)?);
             let mut entry_batch_data =
-                try_option!(entry_batch.get_data(offset as usize, length as usize));
+                try_option!(entry_batch.get_unsealed_data(offset as usize, length as usize));
             data.append(&mut entry_batch_data);
         }
         Ok(Some(ChunkArray {
@@ -135,14 +144,31 @@ impl FlowRead for FlowStore {
         }
         Ok(chunk_roots)
     }
+
+    fn load_sealed_data(&self, chunk_index: u64) -> Result<Option<MineLoadChunk>> {
+        let batch = try_option!(self.db.get_entry_batch(chunk_index as u64)?);
+        let mut mine_chunk = MineLoadChunk::default();
+        for (seal_index, (sealed, validity)) in mine_chunk
+            .loaded_chunk
+            .iter_mut()
+            .zip(mine_chunk.avalibilities.iter_mut())
+            .enumerate()
+        {
+            if let Some(data) = batch.get_sealed_data(seal_index as u16) {
+                *validity = true;
+                *sealed = data;
+            }
+        }
+        Ok(Some(mine_chunk))
+    }
 }
 
 impl FlowWrite for FlowStore {
     /// Return the roots of completed chunks. The order is guaranteed to be increasing
     /// by chunk index.
-    fn append_entries(&self, data: ChunkArray) -> Result<Vec<(u64, DataRoot)>> {
+    fn append_entries(&mut self, data: ChunkArray) -> Result<Vec<(u64, DataRoot)>> {
         trace!("append_entries: {} {}", data.start_index, data.data.len());
-        if data.data.len() % ENTRY_SIZE != 0 {
+        if data.data.len() % BYTES_PER_SECTOR != 0 {
             bail!("append_entries: invalid data size, len={}", data.data.len());
         }
         let mut batch_list = Vec::new();
@@ -159,34 +185,103 @@ impl FlowWrite for FlowStore {
             let chunk_index = chunk.start_index / self.config.batch_size as u64;
 
             // TODO: Try to avoid loading from db if possible.
-            let batch = match self.db.get_entry_batch(chunk_index)? {
-                None => {
-                    let start_offset = chunk.start_index as usize % self.config.batch_size;
-                    let is_full_chunk = chunk.data.len() == self.config.batch_size * ENTRY_SIZE;
-                    EntryBatch::new_with_chunk_array(
-                        chunk,
-                        chunk_index,
-                        start_offset,
-                        is_full_chunk,
-                    )
-                }
-                Some(mut data_in_db) => {
-                    data_in_db.insert_data(
-                        (chunk.start_index % self.config.batch_size as u64) as usize,
-                        chunk.data,
-                    )?;
-                    data_in_db
-                }
-            };
+            let mut batch = self
+                .db
+                .get_entry_batch(chunk_index)?
+                .unwrap_or_else(|| EntryBatch::new(chunk_index));
+            let completed_seals = batch.insert_data(
+                (chunk.start_index % self.config.batch_size as u64) as usize,
+                chunk.data,
+            )?;
+            completed_seals.into_iter().for_each(|x| {
+                self.to_seal_set.insert(
+                    chunk_index as usize * SEALS_PER_LOADING + x as usize,
+                    self.to_seal_version,
+                );
+            });
 
-            // TODO(kevin, sealing): collect sealing position
             batch_list.push((chunk_index, batch));
         }
         self.db.put_entry_batch_list(batch_list)
     }
 
-    fn truncate(&self, start_index: u64) -> crate::error::Result<()> {
-        self.db.truncate(start_index, self.config.batch_size)
+    fn truncate(&mut self, start_index: u64) -> crate::error::Result<()> {
+        self.db.truncate(start_index, self.config.batch_size)?;
+        self.to_seal_set
+            .split_off(&(start_index as usize / SECTORS_PER_SEAL));
+        self.to_seal_version += 1;
+        Ok(())
+    }
+}
+
+impl FlowSeal for FlowStore {
+    fn pull_seal_chunk(&self, seal_index_max: usize) -> Result<Option<Vec<SealTask>>> {
+        let mut to_seal_iter = self.to_seal_set.iter();
+        let (&first_index, &first_version) = try_option!(to_seal_iter.next());
+        if first_index >= seal_index_max {
+            return Ok(None);
+        }
+
+        let mut tasks = Vec::with_capacity(SEALS_PER_LOADING);
+
+        let batch_data = self
+            .db
+            .get_entry_batch((first_index / SEALS_PER_LOADING) as u64)?
+            .expect("Lost data chunk in to_seal_set");
+
+        for (&seal_index, &version) in
+            std::iter::once((&first_index, &first_version)).chain(to_seal_iter.filter(|(&x, _)| {
+                first_index / SEALS_PER_LOADING == x / SEALS_PER_LOADING && x < seal_index_max
+            }))
+        {
+            let seal_index_local = seal_index % SEALS_PER_LOADING;
+            let non_sealed_data = batch_data
+                .get_non_sealed_data(seal_index_local as u16)
+                .expect("Lost seal chunk in to_seal_set");
+            tasks.push(SealTask {
+                seal_index: seal_index as u64,
+                version,
+                non_sealed_data,
+            })
+        }
+
+        Ok(Some(tasks))
+    }
+
+    fn submit_seal_result(&mut self, answers: Vec<SealAnswer>) -> Result<()> {
+        let is_consistent = |answer: &SealAnswer| {
+            self.to_seal_set
+                .get(&(answer.seal_index as usize))
+                .map_or(false, |cur_ver| cur_ver == &answer.version)
+        };
+
+        let mut updated_chunk = vec![];
+        let mut removed_seal_index = Vec::new();
+        for (load_index, answers_in_chunk) in &answers
+            .into_iter()
+            .filter(is_consistent)
+            .group_by(|answer| answer.seal_index / SEALS_PER_LOADING as u64)
+        {
+            let mut batch_chunk = self
+                .db
+                .get_entry_batch(load_index)?
+                .expect("Can not find chunk data");
+            for answer in answers_in_chunk {
+                removed_seal_index.push(answer.seal_index as usize);
+                batch_chunk.submit_seal_result(answer)?;
+            }
+            updated_chunk.push((load_index, batch_chunk));
+        }
+
+        debug!("Seal chunks: indices = {:?}", removed_seal_index);
+
+        for idx in removed_seal_index.into_iter() {
+            self.to_seal_set.remove(&idx);
+        }
+
+        self.db.put_entry_raw(updated_chunk)?;
+
+        Ok(())
     }
 }
 
@@ -222,6 +317,19 @@ impl FlowDBStore {
         }
         self.kvdb.write(tx)?;
         Ok(completed_batches)
+    }
+
+    fn put_entry_raw(&self, batch_list: Vec<(u64, EntryBatch)>) -> Result<()> {
+        let mut tx = self.kvdb.transaction();
+        for (batch_index, batch) in batch_list {
+            tx.put(
+                COL_ENTRY_BATCH,
+                &batch_index.to_be_bytes(),
+                &batch.as_ssz_bytes(),
+            );
+        }
+        self.kvdb.write(tx)?;
+        Ok(())
     }
 
     fn get_entry_batch(&self, batch_index: u64) -> Result<Option<EntryBatch>> {

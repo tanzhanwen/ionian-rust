@@ -2841,6 +2841,7 @@ dependencies = [
  "file_location_cache",
  "futures",
  "ionian_version",
+ "itertools",
  "libp2p",
  "log_entry_sync",
  "miner",
@@ -2857,6 +2858,15 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "ionian_seal"
+version = "0.1.0"
+dependencies = [
+ "ethereum-types 0.13.1",
+ "ionian_spec",
+ "tiny-keccak",
 ]
 
 [[package]]
@@ -4040,6 +4050,7 @@ dependencies = [
  "contract-interface",
  "ethereum-types 0.13.1",
  "ethers",
+ "ionian_seal",
  "ionian_spec",
  "lazy_static",
  "network",
@@ -6070,7 +6081,9 @@ dependencies = [
  "ethereum-types 0.13.1",
  "hex",
  "hex-literal",
+ "ionian_seal",
  "ionian_spec",
+ "itertools",
  "kvdb",
  "kvdb-memorydb",
  "kvdb-rocksdb",

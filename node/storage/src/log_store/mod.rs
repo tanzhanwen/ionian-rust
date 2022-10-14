@@ -1,4 +1,5 @@
 use ethereum_types::H256;
+use ionian_spec::{BYTES_PER_SEAL, SEALS_PER_LOADING};
 use shared_types::{
     Chunk, ChunkArray, ChunkArrayWithProof, ChunkWithProof, DataRoot, FlowRangeProof, Transaction,
 };
@@ -129,8 +130,33 @@ pub trait Configurable {
 pub trait LogChunkStore: LogStoreChunkRead + LogStoreChunkWrite + Send + Sync + 'static {}
 impl<T: LogStoreChunkRead + LogStoreChunkWrite + Send + Sync + 'static> LogChunkStore for T {}
 
-pub trait Store: LogStoreRead + LogStoreWrite + Configurable + Send + Sync + 'static {}
-impl<T: LogStoreRead + LogStoreWrite + Configurable + Send + Sync + 'static> Store for T {}
+pub trait Store:
+    LogStoreRead + LogStoreWrite + LogStoreInner + Configurable + Send + Sync + 'static
+{
+}
+impl<T: LogStoreRead + LogStoreWrite + LogStoreInner + Configurable + Send + Sync + 'static> Store
+    for T
+{
+}
+
+pub trait LogStoreInner {
+    fn flow(&self) -> &dyn Flow;
+    fn flow_mut(&mut self) -> &mut dyn Flow;
+}
+
+pub struct MineLoadChunk {
+    pub loaded_chunk: [[u8; BYTES_PER_SEAL]; SEALS_PER_LOADING],
+    pub avalibilities: [bool; SEALS_PER_LOADING],
+}
+
+impl Default for MineLoadChunk {
+    fn default() -> Self {
+        Self {
+            loaded_chunk: [[0u8; BYTES_PER_SEAL]; SEALS_PER_LOADING],
+            avalibilities: [false; SEALS_PER_LOADING],
+        }
+    }
+}
 
 pub trait FlowRead {
     /// Return the entries in the given range. If some data are missing, `Ok(None)` is returned.
@@ -143,18 +169,54 @@ pub trait FlowRead {
     fn get_available_entries(&self, index_start: u64, index_end: u64) -> Result<Vec<ChunkArray>>;
 
     fn get_chunk_root_list(&self) -> Result<Vec<(usize, DataRoot)>>;
+
+    fn load_sealed_data(&self, chunk_index: u64) -> Result<Option<MineLoadChunk>>;
 }
 
 pub trait FlowWrite {
     /// Append data to the flow. `start_index` is included in `ChunkArray`, so
     /// it's possible to append arrays in any place.
     /// Return the list of completed chunks.
-    fn append_entries(&self, data: ChunkArray) -> Result<Vec<(u64, DataRoot)>>;
+    fn append_entries(&mut self, data: ChunkArray) -> Result<Vec<(u64, DataRoot)>>;
 
     /// Remove all the entries after `start_index`.
     /// This is used to remove deprecated data in case of chain reorg.
-    fn truncate(&self, start_index: u64) -> Result<()>;
+    fn truncate(&mut self, start_index: u64) -> Result<()>;
 }
 
-pub trait Flow: FlowRead + FlowWrite {}
-impl<T: FlowRead + FlowWrite> Flow for T {}
+pub struct SealTask {
+    /// The index (in seal) of chunks
+    pub seal_index: u64,
+    /// An ephemeral version number to distinguish if revert happending
+    pub version: usize,
+    /// The data to be sealed
+    pub non_sealed_data: [u8; BYTES_PER_SEAL],
+}
+
+#[derive(Debug)]
+pub struct SealAnswer {
+    /// The index (in seal) of chunks
+    pub seal_index: u64,
+    /// An ephemeral version number to distinguish if revert happending
+    pub version: usize,
+    /// The data to be sealed
+    pub sealed_data: [u8; BYTES_PER_SEAL],
+    /// The miner Id
+    pub miner_id: H256,
+    /// The seal_context for this chunk
+    pub seal_context: H256,
+    pub context_end_seal: u64,
+}
+
+pub trait FlowSeal {
+    /// Pull a seal chunk ready for sealing
+    /// Return the global index (in sector) and the data
+    fn pull_seal_chunk(&self, seal_index_max: usize) -> Result<Option<Vec<SealTask>>>;
+
+    /// Submit sealing result
+
+    fn submit_seal_result(&mut self, answers: Vec<SealAnswer>) -> Result<()>;
+}
+
+pub trait Flow: FlowRead + FlowWrite + FlowSeal {}
+impl<T: FlowRead + FlowWrite + FlowSeal> Flow for T {}

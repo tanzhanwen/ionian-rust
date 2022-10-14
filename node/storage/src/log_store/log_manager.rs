@@ -21,6 +21,8 @@ use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, error, instrument, trace};
 
+use super::LogStoreInner;
+
 /// 256 Bytes
 pub const ENTRY_SIZE: usize = 256;
 /// 1024 Entries.
@@ -51,6 +53,16 @@ pub struct LogManager {
 #[derive(Clone, Default)]
 pub struct LogConfig {
     pub flow: FlowConfig,
+}
+
+impl LogStoreInner for LogManager {
+    fn flow(&self) -> &dyn super::Flow {
+        &self.flow_store
+    }
+
+    fn flow_mut(&mut self) -> &mut dyn super::Flow {
+        &mut self.flow_store
+    }
 }
 
 impl LogStoreChunkWrite for LogManager {

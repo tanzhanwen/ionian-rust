@@ -7,6 +7,7 @@ edition = "2021"
 network = { path = "../network" }
 storage = { path = "../storage" }
 ionian_spec = { path = "../../common/spec" }
+ionian_seal = { path = "../../common/ionian_seal" }
 task_executor = { path = "../../common/task_executor" }
 contract-interface = { path = "../../common/contract-interface" }
 ethereum-types = "0.13"

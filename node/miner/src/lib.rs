@@ -8,6 +8,7 @@ mod config;
 mod loader;
 mod mine;
 pub mod pora;
+mod sealer;
 mod service;
 mod submitter;
 mod watcher;

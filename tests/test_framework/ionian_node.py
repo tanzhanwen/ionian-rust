@@ -1,4 +1,5 @@
 import os
+import sys
 
 from config.node_config import IONIAN_CONFIG
 from test_framework.blockchain_node import NodeType, TestNode

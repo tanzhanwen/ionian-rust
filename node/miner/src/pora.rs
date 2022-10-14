@@ -2,9 +2,8 @@ use crate::{CustomMineRange, PoraLoader};
 use blake2::{Blake2b512, Digest};
 use contract_interface::ionian_flow::MineContext;
 use ethereum_types::{H256, U256};
-use ionian_spec::{
-    BYTES_PER_SCRATCHPAD, BYTES_PER_SEAL, SEALS_PER_LOADING, SECTORS_PER_LOADING, SECTORS_PER_SEAL,
-};
+use ionian_spec::{BYTES_PER_SCRATCHPAD, BYTES_PER_SEAL, SECTORS_PER_LOADING, SECTORS_PER_SEAL};
+use storage::log_store::MineLoadChunk;
 use tiny_keccak::{Hasher, Keccak};
 
 pub const BLAKE2B_OUTPUT_BYTES: usize = 64;
@@ -61,22 +60,22 @@ impl<'a> Miner<'a> {
             return None;
         }
 
-        let (data_chunk, avalibility) = self
+        let MineLoadChunk {
+            loaded_chunk,
+            avalibilities,
+        } = self
             .loader
-            .load_sealed_data(self.start_position + recall_offset * SECTORS_PER_LOADING as u64)
+            .load_sealed_data(self.start_position / SECTORS_PER_LOADING as u64 + recall_offset)
             .await?;
-
-        let data_chunk: [[u8; BYTES_PER_SEAL]; SEALS_PER_LOADING] =
-            unsafe { std::mem::transmute(data_chunk) };
 
         let scratch_pad: [[u8; BYTES_PER_SEAL]; BYTES_PER_SCRATCHPAD / BYTES_PER_SEAL] =
             unsafe { std::mem::transmute(scratch_pad) };
 
-        for ((idx, mut sealed_data), scratch_pad) in data_chunk
+        for ((idx, mut sealed_data), scratch_pad) in loaded_chunk
             .into_iter()
             .enumerate()
             .zip(scratch_pad.iter().cycle())
-            .zip(avalibility.into_iter())
+            .zip(avalibilities.into_iter())
             .filter_map(|(data, avaliable)| avaliable.then_some(data))
         {
             // Rust can optimize this loop well.

@@ -1,14 +1,9 @@
-use crate::log_store::log_manager::{data_to_merkle_leaves, sub_merkle_tree, PORA_CHUNK_SIZE};
-
 use anyhow::{bail, Result};
-use append_merkle::{AppendMerkleTree, MerkleTreeRead, Sha3Algorithm};
-use ethereum_types::H256;
-use ionian_spec::{BYTES_PER_LOADING, BYTES_PER_SECTOR, SECTORS_PER_SEAL};
-use shared_types::{bytes_to_chunks, ChunkArray};
+use ionian_spec::{BYTES_PER_LOADING, BYTES_PER_SECTOR, SECTORS_PER_LOADING, SECTORS_PER_SEAL};
+use shared_types::bytes_to_chunks;
 use ssz::{Decode, DecodeError, Encode};
 use std::fmt::{Debug, Formatter};
 use std::mem;
-use tracing::trace;
 
 pub enum EntryBatchData {
     Complete(Vec<u8>),
@@ -119,24 +114,8 @@ impl PartialBatch {
 }
 
 impl EntryBatchData {
-    #[cfg(test)]
-    fn new_empty_test() -> Self {
+    pub fn new() -> Self {
         EntryBatchData::Incomplete(vec![])
-    }
-
-    pub fn new_with_chunk_array(
-        chunk: ChunkArray,
-        start_sector: usize,
-        is_full_chunk: bool,
-    ) -> Self {
-        if is_full_chunk {
-            EntryBatchData::Complete(chunk.data)
-        } else {
-            EntryBatchData::Incomplete(vec![PartialBatch {
-                start_sector,
-                data: chunk.data,
-            }])
-        }
     }
 
     pub fn get(&self, mut start_byte: usize, length_byte: usize) -> Option<&[u8]> {
@@ -319,25 +298,12 @@ impl EntryBatchData {
         // TODO(zz): Use config here?
         if list.len() == 1
             && list[0].start_sector == 0
-            && bytes_to_chunks(list[0].data.len()) == PORA_CHUNK_SIZE
+            && bytes_to_chunks(list[0].data.len()) == SECTORS_PER_LOADING
         {
             // All data in this batch have been filled.
             *self = EntryBatchData::Complete(list.remove(0).data);
         }
         Ok(ready_for_seal_idxs)
-    }
-
-    pub fn build_root(&self, is_first_chunk: bool) -> Result<Option<H256>> {
-        if is_first_chunk {
-            return self.build_root_for_first_chunk();
-        }
-        Ok(if let EntryBatchData::Complete(raw_data) = self {
-            // TODO(zz): Check if we want to insert here.
-            assert_eq!(raw_data.len(), BYTES_PER_SECTOR * PORA_CHUNK_SIZE);
-            Some(sub_merkle_tree(raw_data.as_slice())?.root().into())
-        } else {
-            None
-        })
     }
 
     pub(super) fn available_range_entries(&self) -> Vec<(usize, usize)> {
@@ -350,31 +316,6 @@ impl EntryBatchData {
                 .map(|b| (b.start_sector, b.data.len() / BYTES_PER_SECTOR))
                 .collect(),
         }
-    }
-
-    fn build_root_for_first_chunk(&self) -> Result<Option<H256>> {
-        let partial_batch = match self {
-            EntryBatchData::Complete(_) => {
-                bail!("Unexpected first batch");
-            }
-            EntryBatchData::Incomplete(p)
-                if p.len() == 1
-                    && p[0].start_sector == 1
-                    && p[0].data.len() == BYTES_PER_SECTOR * (PORA_CHUNK_SIZE - 1) =>
-            {
-                &p[0]
-            }
-            _ => {
-                return Ok(None);
-            }
-        };
-
-        trace!("put first batch: {:?}", partial_batch);
-        let mut leaves = vec![H256::zero()];
-        leaves.append(&mut data_to_merkle_leaves(&partial_batch.data)?);
-        let root = *AppendMerkleTree::<H256, Sha3Algorithm>::new(leaves, 0, None).root();
-
-        Ok(Some(root))
     }
 }
 
@@ -412,7 +353,7 @@ mod tests {
     #[test]
     fn test_data_chunk_insert() {
         let data = test_data();
-        let mut chunk_batch = EntryBatchData::new_empty_test();
+        let mut chunk_batch = EntryBatchData::new();
 
         for i in [2usize, 0, 1, 3].into_iter() {
             chunk_batch
@@ -429,7 +370,7 @@ mod tests {
     #[test]
     fn test_data_chunk_truncate() {
         let data = test_data();
-        let mut chunk_batch = EntryBatchData::new_empty_test();
+        let mut chunk_batch = EntryBatchData::new();
 
         for i in [3, 1].into_iter() {
             chunk_batch
@@ -470,7 +411,7 @@ mod tests {
     #[test]
     fn test_data_chunk_get_slice() {
         let data = test_data();
-        let mut chunk_batch = EntryBatchData::new_empty_test();
+        let mut chunk_batch = EntryBatchData::new();
 
         const N: usize = BYTES_PER_LOADING;
         const B: usize = N / 16;
@@ -489,6 +430,12 @@ mod tests {
                 &data[B * i..B * (i + 1)]
             );
         }
+
+        const S: usize = B / BYTES_PER_SECTOR;
+        assert_eq!(
+            chunk_batch.available_range_entries(),
+            vec![(0, 5 * S), (6 * S, S), (8 * S, 2 * S), (12 * S, 4 * S)]
+        );
 
         assert_eq!(chunk_batch.get(B * 8, B * 2).unwrap(), &data[B * 8..B * 10]);
         assert_eq!(

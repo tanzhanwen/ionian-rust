@@ -65,7 +65,7 @@ impl Submitter {
         let sealed_context_digest = self
             .flow_contract
             .query_context_at_position(
-                (mine_answer.recall_position + SECTORS_PER_SEAL as u64) as u128,
+                (mine_answer.recall_position + SECTORS_PER_SEAL as u64 - 1) as u128,
             )
             .call()
             .await

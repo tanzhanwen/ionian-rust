@@ -1,8 +1,8 @@
 use ethereum_types::H256;
+use ionian_seal;
 use ionian_spec::{SEALS_PER_LOADING, SECTORS_PER_LOADING, SECTORS_PER_SEAL};
 use ssz_derive::{Decode as DeriveDecode, Encode as DeriveEncode};
 use static_assertions::const_assert;
-use tiny_keccak::{Hasher, Keccak};
 
 use super::bitmap::WrappedBitmap;
 
@@ -25,21 +25,24 @@ pub struct SealInfo {
     load_chunk_index: u64,
     // the miner Id for sealing this chunk, zero representing doesn't exists
     miner_id: H256,
-    // seal information
+    // seal context information, indexed by u16. Get a position has never been set is undefined behaviour.
     seal_contexts: Vec<SealContextInfo>,
 }
 
 impl SealInfo {
-    pub fn new(miner_id: Option<H256>, load_chunk_index: u64) -> Self {
+    pub fn new(load_chunk_index: u64) -> Self {
         Self {
             load_chunk_index,
-            miner_id: miner_id.unwrap_or_default(),
             ..Default::default()
         }
     }
 
     pub fn is_sealed(&self, index: u16) -> bool {
         self.bitmap.get(index as usize)
+    }
+
+    pub fn load_chunk_index(&self) -> u64 {
+        self.load_chunk_index
     }
 
     pub fn truncate(&mut self, index: u16) {
@@ -56,89 +59,151 @@ impl SealInfo {
     }
 
     /// Return the start position (inclusive, in seals), the end position (exclusive, in seals) and context hash
-    pub fn get_seal_context(&self, index: u16) -> Option<(u16, u16, H256)> {
+    pub fn get_seal_context(&self, seal_index: u16) -> Option<H256> {
         let index = match self
+            .seal_contexts
+            .binary_search_by_key(&(seal_index + 1), |x| x.end_position)
+        {
+            Ok(x) | Err(x) => x,
+        };
+
+        if index == self.seal_contexts.len() {
+            None
+        } else {
+            Some(self.seal_contexts[index].context_digest)
+        }
+    }
+
+    /// Return the start position (inclusive, in seals), the end position (exclusive, in seals) and context hash
+    pub fn trucate_seal_context(&self, seal_index: u16) -> u16 {
+        let index = match self
+            .seal_contexts
+            .binary_search_by_key(&(seal_index + 1), |x| x.end_position)
+        {
+            Ok(x) | Err(x) => x,
+        };
+
+        if index == 0 {
+            0
+        } else {
+            self.seal_contexts.get(index - 1).unwrap().end_position
+        }
+    }
+
+    pub fn set_seal_context(
+        &mut self,
+        index: u16,
+        context_digest: H256,
+        end_position: u64,
+        miner_id: H256,
+    ) {
+        self.bitmap.set(index as usize, true);
+        if self.miner_id.is_zero() {
+            self.miner_id = miner_id;
+        } else {
+            assert!(
+                self.miner_id == miner_id,
+                "miner_id setting is inconsistent with db"
+            );
+        }
+
+        let local_end_position = std::cmp::min(
+            end_position - self.load_chunk_index * SEALS_PER_LOADING as u64,
+            SEALS_PER_LOADING as u64,
+        ) as u16;
+
+        if self.seal_contexts.is_empty() {
+            self.seal_contexts.push(SealContextInfo {
+                context_digest,
+                end_position: local_end_position,
+            });
+            return;
+        }
+
+        let insert_position = match self
             .seal_contexts
             .binary_search_by_key(&(index + 1), |x| x.end_position)
         {
             Ok(x) | Err(x) => x,
         };
 
-        if index == self.seal_contexts.len() {
-            return None;
+        if insert_position >= 1
+            && self.seal_contexts[insert_position - 1].context_digest == context_digest
+        {
+            assert!(
+                self.seal_contexts
+                    .get(insert_position)
+                    .map_or(true, |x| x.end_position > index + 1),
+                "Seal context conflict"
+            );
+            let end_position = &mut self.seal_contexts[insert_position - 1].end_position;
+            *end_position = std::cmp::max(*end_position, index + 1);
+            return;
         }
 
-        let context = self.seal_contexts[index].context_digest;
-        let end_position = self.seal_contexts[index].end_position;
-        let start_position = if index == 0 {
-            0
-        } else {
-            self.seal_contexts.get(index - 1).unwrap().end_position
-        };
-        Some((start_position, end_position, context))
-    }
+        if insert_position < self.seal_contexts.len()
+            && self.seal_contexts[insert_position].context_digest == context_digest
+        {
+            let end_position = &mut self.seal_contexts[insert_position].end_position;
+            *end_position = std::cmp::max(*end_position, index + 1);
+            return;
+        }
 
-    pub fn unseal_partial(data: &mut [u8], first_mask: [u8; 32]) {
-        assert!(data.len() % 32 == 0);
-
-        let mut mask = first_mask;
-        data.chunks_exact_mut(32).for_each(|x| {
-            let next_mask = keccak(&*x);
-
-            // Compiler will optimize this well
-            x.iter_mut()
-                .zip(mask.iter())
-                .for_each(|(x, mask)| *x ^= *mask);
-            mask = next_mask;
-        })
+        self.seal_contexts.insert(
+            insert_position,
+            SealContextInfo {
+                context_digest,
+                end_position: index + 1,
+            },
+        );
     }
 
     pub fn unseal(&self, data: &mut [u8], index: u16) {
         if !self.is_sealed(index) {
             return;
         }
-        let first_mask = self.compute_first_mask(index).unwrap();
-        Self::unseal_partial(data, first_mask);
-    }
-
-    fn compute_first_mask(&self, index: u16) -> Result<[u8; 32], &'static str> {
-        assert!(self.miner_id != H256::zero());
-
-        let (_, _, seal_context) = self
+        let seal_context = self
             .get_seal_context(index)
-            .ok_or("try to unseal non-sealed data")?;
-
-        let start_sector_index = self.load_chunk_index as usize * SECTORS_PER_LOADING
-            + index as usize * SECTORS_PER_SEAL;
-
-        let mut hasher = Keccak::v256();
-        hasher.update(&self.miner_id.0);
-        hasher.update(&seal_context.0);
-        hasher.update(&[0u8; 24]);
-        hasher.update(&start_sector_index.to_be_bytes());
-
-        let mut first_mask = [0u8; 32];
-        hasher.finalize(&mut first_mask);
-        Ok(first_mask)
+            .expect("cannot unseal non-sealed data");
+        ionian_seal::unseal(
+            data,
+            &self.miner_id,
+            &seal_context,
+            self.global_seal_sector(index),
+        );
     }
-}
 
-pub fn keccak(input: impl AsRef<[u8]>) -> [u8; 32] {
-    let mut hasher = Keccak::v256();
-    let mut output = [0u8; 32];
-    hasher.update(input.as_ref());
-    hasher.finalize(&mut output);
-    output
+    #[cfg(test)]
+    pub fn seal(&self, data: &mut [u8], index: u16) {
+        if self.is_sealed(index) {
+            return;
+        }
+        let seal_context = self
+            .get_seal_context(index)
+            .expect("cannot unseal non-sealed data");
+        ionian_seal::seal(
+            data,
+            &self.miner_id,
+            &seal_context,
+            self.global_seal_sector(index),
+        );
+    }
+
+    pub fn global_seal_sector(&self, index: u16) -> u64 {
+        (self.load_chunk_index as usize * SECTORS_PER_LOADING + index as usize * SECTORS_PER_SEAL)
+            as u64
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use ethereum_types::H256;
     use hex_literal::hex;
+    use ionian_seal;
     use ionian_spec::BYTES_PER_SEAL;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
 
-    use super::{keccak, SealContextInfo, SealInfo};
+    use super::{SealContextInfo, SealInfo};
 
     const TEST_MINER_ID: H256 = H256(hex!(
         "003d82782c78262bada18a22f5f982d2b43934d5541e236ca3781ddc8c911cb8"
@@ -155,7 +220,7 @@ mod tests {
         random.fill_bytes(&mut context2.0);
         random.fill_bytes(&mut context3.0);
 
-        let mut sealer = SealInfo::new(None, 0);
+        let mut sealer = SealInfo::new(0);
         sealer.seal_contexts.push(SealContextInfo {
             context_digest: context1,
             end_position: 2,
@@ -169,13 +234,21 @@ mod tests {
             end_position: 6,
         });
 
-        assert_eq!(sealer.get_seal_context(0), Some((0, 2, context1)));
-        assert_eq!(sealer.get_seal_context(1), Some((0, 2, context1)));
-        assert_eq!(sealer.get_seal_context(2), Some((2, 3, context2)));
-        assert_eq!(sealer.get_seal_context(3), Some((3, 6, context3)));
-        assert_eq!(sealer.get_seal_context(4), Some((3, 6, context3)));
-        assert_eq!(sealer.get_seal_context(5), Some((3, 6, context3)));
+        assert_eq!(sealer.get_seal_context(0), Some(context1));
+        assert_eq!(sealer.get_seal_context(1), Some(context1));
+        assert_eq!(sealer.get_seal_context(2), Some(context2));
+        assert_eq!(sealer.get_seal_context(3), Some(context3));
+        assert_eq!(sealer.get_seal_context(4), Some(context3));
+        assert_eq!(sealer.get_seal_context(5), Some(context3));
         assert_eq!(sealer.get_seal_context(6), None);
+
+        assert_eq!(sealer.trucate_seal_context(0), 0);
+        assert_eq!(sealer.trucate_seal_context(1), 0);
+        assert_eq!(sealer.trucate_seal_context(2), 2);
+        assert_eq!(sealer.trucate_seal_context(3), 3);
+        assert_eq!(sealer.trucate_seal_context(4), 3);
+        assert_eq!(sealer.trucate_seal_context(5), 3);
+        assert_eq!(sealer.trucate_seal_context(6), 6);
     }
 
     #[test]
@@ -192,7 +265,8 @@ mod tests {
         random.fill_bytes(&mut context2.0);
         random.fill_bytes(&mut context3.0);
 
-        let mut sealer = SealInfo::new(Some(TEST_MINER_ID), 100);
+        let mut sealer = SealInfo::new(100);
+        sealer.miner_id = TEST_MINER_ID;
 
         sealer.seal_contexts.push(SealContextInfo {
             context_digest: context1,
@@ -209,21 +283,18 @@ mod tests {
 
         // skip seal 6, 3, 9
         for idx in [1, 7, 2, 5, 0, 8, 4].into_iter() {
+            sealer.seal(
+                &mut data[idx * BYTES_PER_SEAL..(idx + 1) * BYTES_PER_SEAL],
+                idx as u16,
+            );
             sealer.bitmap.set(idx, true);
-            let mut mask = sealer.compute_first_mask(idx as u16).unwrap();
-            let chunk = &mut data[idx * BYTES_PER_SEAL..(idx + 1) * BYTES_PER_SEAL];
-            for word in chunk.chunks_mut(32) {
-                word.iter_mut().zip(mask.iter()).for_each(|(x, y)| *x ^= *y);
-                mask = keccak(&*word);
-            }
         }
 
         let partial_hint = &data[BYTES_PER_SEAL * 5 + 64..BYTES_PER_SEAL * 5 + 96];
-        let first_mask: [u8; 32] = keccak(partial_hint).try_into().unwrap();
         let mut tmp_data = data.clone();
-        SealInfo::unseal_partial(
+        ionian_seal::unseal_with_mask_seed(
             &mut tmp_data[BYTES_PER_SEAL * 5 + 96..BYTES_PER_SEAL * 6],
-            first_mask,
+            partial_hint,
         );
         assert_eq!(
             &tmp_data[BYTES_PER_SEAL * 5 + 96..BYTES_PER_SEAL * 6],
