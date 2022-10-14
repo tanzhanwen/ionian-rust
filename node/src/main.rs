@@ -21,6 +21,8 @@ async fn start_node(context: RuntimeContext, config: IonianConfig) -> Result<Cli
     ClientBuilder::default()
         .with_runtime_context(context)
         .with_rocksdb_store(&storage_config)?
+        .with_log_sync(log_sync_config)
+        .await?
         .with_file_location_cache()
         .with_network(&network_config)
         .await?
@@ -29,8 +31,6 @@ async fn start_node(context: RuntimeContext, config: IonianConfig) -> Result<Cli
         .await?
         .with_router(router_config)?
         .with_rpc(rpc_config, config.chunk_pool_config())
-        .await?
-        .with_log_sync(log_sync_config)
         .await?
         .build()
 }
