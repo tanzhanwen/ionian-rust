@@ -56,6 +56,9 @@ impl ChunkPoolHandler {
 
         debug!("Transaction finalized for seq {}", tx_seq);
 
+        // always remove file from pool after transaction finalized
+        self.mem_pool.remove_file(&root).await;
+
         let msg = NetworkMessage::AnnounceLocalFile { tx_seq };
         if let Err(e) = self.sender.send(msg) {
             error!(

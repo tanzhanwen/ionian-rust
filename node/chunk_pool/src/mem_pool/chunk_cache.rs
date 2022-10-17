@@ -1,7 +1,7 @@
-use super::chunk_pool_inner::{file_size_to_chunk_num, SegmentInfo};
-use anyhow::{anyhow, bail, Result};
+use crate::{Config, SegmentInfo};
+use anyhow::{bail, Result};
 use hashlink::LinkedHashMap;
-use shared_types::{ChunkArray, DataRoot, Transaction, CHUNK_SIZE};
+use shared_types::{bytes_to_chunks, ChunkArray, DataRoot, Transaction, CHUNK_SIZE};
 use std::collections::HashMap;
 use std::ops::Add;
 use std::time::{Duration, Instant};
@@ -15,7 +15,7 @@ pub struct MemoryCachedFile {
     pub total_chunks: usize,
     /// Transaction seq that used to write chunks into store.
     pub tx_seq: u64,
-    /// Used for garbage collection.
+    /// Used for garbage collection. It is updated when new segment uploaded.
     expired_at: Instant,
     /// Number of chunks that's currently cached for this file
     pub cached_chunk_num: usize,
@@ -35,37 +35,67 @@ impl MemoryCachedFile {
     /// Updates file with transaction once log entry retrieved from blockchain.
     /// So that, write memory cached segments into database.
     pub fn update_with_tx(&mut self, tx: &Transaction) {
-        self.total_chunks = file_size_to_chunk_num(tx.size as usize);
+        self.total_chunks = bytes_to_chunks(tx.size as usize);
         self.tx_seq = tx.seq;
+    }
+
+    fn update_expiration_time(&mut self, timeout: Duration) {
+        self.expired_at = Instant::now().add(timeout);
+    }
+
+    fn is_completed(&self) -> bool {
+        self.total_chunks > 0 && self.cached_chunk_num >= self.total_chunks
     }
 }
 
+/// ChunkPoolCache is used to cache small files that log entry not retrieved
+/// from L1 blockchain yet.
 pub struct ChunkPoolCache {
-    expiration_timeout: Duration,
+    config: Config,
     /// All cached files.
+    /// Note, file root is used as key instead of `tx_seq`, since log entry
+    /// not retrieved yet.
     files: LinkedHashMap<DataRoot, MemoryCachedFile>,
     /// Total number of chunks that cached in the memory pool.
     pub total_chunks: usize,
 }
 
 impl ChunkPoolCache {
-    pub fn new(expiration_timeout: Duration) -> Self {
+    pub fn new(config: Config) -> Self {
         ChunkPoolCache {
-            expiration_timeout,
+            config,
             files: LinkedHashMap::default(),
             total_chunks: 0,
         }
     }
 
-    pub fn update_expiration_time(&mut self, root: &DataRoot) {
-        if let Some(file) = self.files.to_back(root) {
-            file.expired_at = Instant::now().add(self.expiration_timeout);
-        }
+    pub fn get_file(&self, root: &DataRoot) -> Option<&MemoryCachedFile> {
+        self.files.get(root)
     }
 
-    pub fn garbage_collect(&mut self) {
+    pub fn get_file_mut(&mut self, root: &DataRoot) -> Option<&mut MemoryCachedFile> {
+        self.files.get_mut(root)
+    }
+
+    pub fn remove_file(&mut self, root: &DataRoot) -> Option<MemoryCachedFile> {
+        let file = self.files.remove(root)?;
+        self.update_total_chunks_when_remove_file(&file);
+        Some(file)
+    }
+
+    /// Remove files that no new segment uploaded for a long time.
+    ///
+    /// Note, when log sync delayed, files may be also garbage collected if the
+    /// entire file uploaded. Because, it is hard to check if log sync delayed
+    /// or user upload an invalid file, e.g. for attack purpose.
+    ///
+    /// Once garbage collected, user could simply upload the entire file again,
+    /// which is fast enough due to small file size.
+    fn garbage_collect(&mut self) {
+        let now = Instant::now();
+
         while let Some((_, file)) = self.files.front() {
-            if file.expired_at > Instant::now() {
+            if file.expired_at > now {
                 return;
             }
 
@@ -76,73 +106,45 @@ impl ChunkPoolCache {
         }
     }
 
-    pub fn update_total_chunks_when_remove_file(&mut self, file: &MemoryCachedFile) {
+    fn update_total_chunks_when_remove_file(&mut self, file: &MemoryCachedFile) {
         assert!(self.total_chunks >= file.cached_chunk_num);
         self.total_chunks -= file.cached_chunk_num;
     }
 
-    pub fn cache_segment(
-        &mut self,
-        seg_info: SegmentInfo,
-        max_cached_chunks_all: usize,
-    ) -> Result<bool> {
+    /// Caches the specified segment in memory.
+    ///
+    /// Returns if the entire file is uploaded, and log entry also retrieved.
+    pub fn cache_segment(&mut self, seg_info: SegmentInfo) -> Result<bool> {
+        // always GC at first
+        self.garbage_collect();
+
         let file = self
             .files
             .entry(seg_info.root)
-            .or_insert_with(|| MemoryCachedFile::new(self.expiration_timeout));
+            .or_insert_with(|| MemoryCachedFile::new(self.config.expiration_time()));
 
-        let mut file_complete = false;
-
-        //Segment already cached in memory. Directly return OK
+        // Segment already cached in memory. Directly return OK
         if file.segments.contains_key(&seg_info.seg_index) {
-            return Ok(file_complete);
+            return Ok(file.is_completed());
         }
 
         // Otherwise, just cache segment in memory
         let num_chunks = seg_info.seg_data.len() / CHUNK_SIZE;
 
         // Limits the cached chunks in the memory pool.
-        if self.total_chunks + num_chunks > max_cached_chunks_all {
-            bail!(anyhow!(
+        if self.total_chunks + num_chunks > self.config.max_cached_chunks_all {
+            bail!(
                 "exceeds the maximum cached chunks of whole pool: {}",
-                max_cached_chunks_all
-            ));
+                self.config.max_cached_chunks_all
+            );
         }
 
         // Cache segment and update the counter for cached chunks.
         self.total_chunks += num_chunks;
         file.cached_chunk_num += num_chunks;
-        file.segments.insert(
-            seg_info.seg_index,
-            ChunkArray {
-                data: seg_info.seg_data,
-                start_index: (seg_info.seg_index * seg_info.chunks_per_segment) as u64,
-            },
-        );
+        file.update_expiration_time(self.config.expiration_time());
+        file.segments.insert(seg_info.seg_index, seg_info.into());
 
-        if file.total_chunks > 0 {
-            file_complete = file.cached_chunk_num >= file.total_chunks;
-        }
-
-        Ok(file_complete)
-    }
-
-    pub fn has_cache(&self, root: &DataRoot) -> bool {
-        self.files.contains_key(root)
-    }
-
-    pub fn get_file_mut(&mut self, root: &DataRoot) -> Option<&mut MemoryCachedFile> {
-        self.files.get_mut(root)
-    }
-
-    pub fn remove_file(&mut self, root: &DataRoot) -> Option<MemoryCachedFile> {
-        self.files.remove(root)
-    }
-
-    pub fn get_cached_seg_num(&self, root: &DataRoot) -> usize {
-        match self.files.get(root) {
-            Some(file) => file.cached_chunk_num,
-            None => 0,
-        }
+        Ok(file.is_completed())
     }
 }

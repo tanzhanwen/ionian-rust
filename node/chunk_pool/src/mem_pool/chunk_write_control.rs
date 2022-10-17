@@ -1,17 +1,19 @@
-use anyhow::{anyhow, bail, Result};
+use crate::Config;
+use anyhow::{bail, Result};
 use shared_types::DataRoot;
 use std::collections::HashMap;
 
 /// The segment status in sliding window
 #[derive(PartialEq, Eq, Debug)]
 enum SlotStatus {
-    Writing,
-    Finished,
+    Writing,  // segment in writing
+    Finished, // segment uploaded in store
 }
 
 /// Sliding window is used to control the concurrent uploading process of a file.
-/// Bounded window allows segments to be uploaded concurrenly, while having a capacity limit on writing threads per file
-/// Meanwhile, the left_boundary field records how many segments have been uploaded
+/// Bounded window allows segments to be uploaded concurrenly, while having a capacity
+/// limit on writing threads per file. Meanwhile, the left_boundary field records
+/// how many segments have been uploaded.
 struct CtrlWindow {
     size: usize,
     left_boundary: usize,
@@ -27,20 +29,14 @@ impl CtrlWindow {
         }
     }
 
+    /// Check if the specified slot by `index` has been already uploaded.
+    /// Note, this function do not check about the right boundary.
     fn check_duplicate(&self, index: usize) -> bool {
-        if index < self.left_boundary {
-            return true;
-        }
-
-        if self.slots.contains_key(&index) {
-            return true;
-        }
-
-        false
+        index < self.left_boundary || self.slots.contains_key(&index)
     }
 
-    //Should call check_duplicate and handle the duplicated case before calling this function
-    //This function assumes that there are no duplicate slots in the window
+    /// Should call check_duplicate and handle the duplicated case before calling this function.
+    /// This function assumes that there are no duplicate slots in the window.
     fn start_writing(&mut self, index: usize) -> Result<()> {
         assert!(index >= self.left_boundary);
 
@@ -60,16 +56,15 @@ impl CtrlWindow {
     }
 
     fn rollback_writing(&mut self, index: usize) {
-        let slot_status = self.slots.remove(&index).unwrap();
-        assert_eq!(slot_status, SlotStatus::Writing);
+        let slot_status = self.slots.remove(&index);
+        assert_eq!(slot_status, Some(SlotStatus::Writing));
     }
 
     fn finish_writing(&mut self, index: usize) {
-        let slot_status = self.slots.get_mut(&index).unwrap();
-        assert_eq!(slot_status, &SlotStatus::Writing);
-        *slot_status = SlotStatus::Finished;
+        let old_status = self.slots.insert(index, SlotStatus::Finished);
+        assert_eq!(old_status, Some(SlotStatus::Writing));
 
-        //Check whether left boundary should move forward
+        // move forward if leftmost slot completed
         let mut left_boundary = self.left_boundary;
         while let Some(&SlotStatus::Finished) = self.slots.get(&left_boundary) {
             self.slots.remove(&left_boundary);
@@ -80,104 +75,108 @@ impl CtrlWindow {
     }
 }
 
-struct FileWriteCtrl {
-    tx_seq: u64,
-    total_chunks: usize,
+/// To track the file uploading progress.
+pub struct FileWriteCtrl {
+    pub tx_seq: u64,
+    total_segments: usize,
     window: CtrlWindow,
 }
 
 impl FileWriteCtrl {
-    fn new(tx_seq: u64, total_chunks: usize, window_size: usize) -> Self {
+    fn new(tx_seq: u64, total_segments: usize, window_size: usize) -> Self {
         FileWriteCtrl {
             tx_seq,
-            total_chunks,
+            total_segments,
             window: CtrlWindow::new(window_size),
         }
     }
+
+    pub fn uploaded_seg_num(&self) -> usize {
+        self.window.left_boundary
+    }
 }
 
+/// ChunkPoolWriteCtrl is used to track uploading progress for all files,
+/// and limits the maximum number of threads to write segments into store.
 pub struct ChunkPoolWriteCtrl {
-    /// Total number of threads that are writing chunks into store.
-    pub total_writings: usize,
+    config: Config,
     /// Windows to control writing processes of files
     files: HashMap<DataRoot, FileWriteCtrl>,
+    /// Total number of threads that are writing chunks into store.
+    pub total_writings: usize,
 }
 
 impl ChunkPoolWriteCtrl {
-    pub fn new() -> Self {
+    pub fn new(config: Config) -> Self {
         ChunkPoolWriteCtrl {
-            total_writings: 0,
             files: HashMap::default(),
+            total_writings: 0,
+            config,
         }
     }
 
-    /// Try to cache the segment into memory pool if log entry not retrieved from blockchain yet.
-    /// Otherwise, return segments to write into store asynchronously for different files.
+    pub fn get_file(&self, root: &DataRoot) -> Option<&FileWriteCtrl> {
+        self.files.get(root)
+    }
+
+    pub fn remove_file(&mut self, root: &DataRoot) -> Option<FileWriteCtrl> {
+        self.files.remove(root)
+    }
+
     pub fn write_segment(
         &mut self,
         root: DataRoot,
         tx_seq: u64,
         seg_index: usize,
-        file_total_chunk_num: usize,
-        write_window_size: usize,
-        max_writings: usize,
+        total_segments: usize,
     ) -> Result<()> {
-        let file_ctrl = self
-            .files
-            .entry(root)
-            .or_insert_with(|| FileWriteCtrl::new(tx_seq, file_total_chunk_num, write_window_size));
+        let file_ctrl = self.files.entry(root).or_insert_with(|| {
+            FileWriteCtrl::new(tx_seq, total_segments, self.config.write_window_size)
+        });
 
-        if file_ctrl.total_chunks != file_total_chunk_num {
-            bail!(anyhow!(
-                "file size in segment doesn't match with file size declared in previous segment. Previous total chunk:{}, current total chunk:{}s",
-                file_ctrl.total_chunks,
-                file_total_chunk_num
-            ));
+        if file_ctrl.total_segments != total_segments {
+            bail!(
+                "file size in segment doesn't match with file size declared in previous segment. Previous total segments:{}, current total segments:{}s",
+                file_ctrl.total_segments,
+                total_segments
+            );
         }
 
-        let window = &mut file_ctrl.window;
-
         // Segment already uploaded.
-        if window.check_duplicate(seg_index) {
+        if file_ctrl.window.check_duplicate(seg_index) {
             return Ok(());
         }
 
         // Limits the number of writing threads.
-        if self.total_writings >= max_writings {
-            bail!(anyhow!("too many data writing: {}", max_writings));
+        if self.total_writings >= self.config.max_writings {
+            bail!("too many data writing: {}", self.config.max_writings);
         }
 
-        window.start_writing(seg_index)?;
+        file_ctrl.window.start_writing(seg_index)?;
 
         self.total_writings += 1;
 
         Ok(())
     }
 
-    pub fn on_write_succeeded(
-        &mut self,
-        root: &DataRoot,
-        seg_index: usize,
-        chunks_per_segment: usize,
-        file_total_chunk_num: usize,
-    ) -> bool {
+    pub fn on_write_succeeded(&mut self, root: &DataRoot, seg_index: usize) -> bool {
         let file_ctrl = match self.files.get_mut(root) {
             Some(w) => w,
             None => return false,
         };
 
-        let window = &mut file_ctrl.window;
-
-        window.finish_writing(seg_index);
+        file_ctrl.window.finish_writing(seg_index);
 
         assert!(self.total_writings > 0);
         self.total_writings -= 1;
 
-        debug!("Succeeded to write segment, root={}, seg_index={}, file_total_chunk_num={}, total_writings={}",
-            root, seg_index, file_total_chunk_num, self.total_writings);
+        debug!(
+            "Succeeded to write segment, root={}, seg_index={}, total_writings={}",
+            root, seg_index, self.total_writings
+        );
 
         // All chunks of file written into store.
-        window.left_boundary * chunks_per_segment >= file_total_chunk_num
+        file_ctrl.window.left_boundary >= file_ctrl.total_segments
     }
 
     pub fn on_write_failed(&mut self, root: &DataRoot, seg_index: usize) {
@@ -186,26 +185,10 @@ impl ChunkPoolWriteCtrl {
             None => return,
         };
 
-        let window = &mut file_ctrl.window;
-
         //Rollback the segment status if failed
-        window.rollback_writing(seg_index);
+        file_ctrl.window.rollback_writing(seg_index);
 
         assert!(self.total_writings > 0);
         self.total_writings -= 1;
-    }
-
-    pub fn get_tx_seq(&self, root: &DataRoot) -> u64 {
-        let file_ctrl = self.files.get(root).unwrap();
-        file_ctrl.tx_seq
-    }
-
-    pub fn get_uploaded_seg_num(&self, root: &DataRoot) -> usize {
-        let uploaded_seg_num = match self.files.get(root) {
-            Some(write_ctrl) => write_ctrl.window.left_boundary,
-            None => 0,
-        };
-
-        uploaded_seg_num
     }
 }

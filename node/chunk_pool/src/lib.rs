@@ -9,13 +9,20 @@ pub use mem_pool::MemoryChunkPool;
 pub use mem_pool::SegmentInfo;
 
 use std::sync::Arc;
+use std::time::Duration;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Config {
     pub write_window_size: usize,
     pub max_cached_chunks_all: usize,
     pub max_writings: usize,
     pub expiration_time_secs: u64,
+}
+
+impl Config {
+    pub fn expiration_time(&self) -> Duration {
+        Duration::from_secs(self.expiration_time_secs)
+    }
 }
 
 pub fn unbounded(
