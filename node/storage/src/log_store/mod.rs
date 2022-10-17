@@ -24,6 +24,13 @@ pub trait LogStoreRead: LogStoreChunkRead {
     /// Get a transaction by the data root of its data.
     fn get_tx_seq_by_data_root(&self, data_root: &DataRoot) -> Result<Option<u64>>;
 
+    fn get_tx_by_data_root(&self, data_root: &DataRoot) -> Result<Option<Transaction>> {
+        match self.get_tx_seq_by_data_root(data_root)? {
+            Some(seq) => self.get_tx_by_seq_number(seq),
+            None => Ok(None),
+        }
+    }
+
     fn get_chunk_with_proof_by_tx_and_index(
         &self,
         tx_seq: u64,

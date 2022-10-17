@@ -1,5 +1,6 @@
 use super::chunk_cache::{ChunkPoolCache, MemoryCachedFile};
 use super::chunk_write_control::ChunkPoolWriteCtrl;
+use super::FileID;
 use crate::Config;
 use anyhow::{bail, Result};
 use async_lock::Mutex;
@@ -49,7 +50,7 @@ impl Inner {
     fn get_all_cached_segments_to_write(
         &mut self,
         root: &DataRoot,
-    ) -> Result<(u64, usize, Vec<ChunkArray>)> {
+    ) -> Result<(FileID, usize, Vec<ChunkArray>)> {
         // Limits the number of writing threads.
         if self.write_control.total_writings >= self.config.max_writings {
             bail!("too many data writing: {}", self.config.max_writings);
@@ -59,13 +60,13 @@ impl Inner {
             Some(f) => f,
             None => bail!("file not found to write into store {:?}", root),
         };
-        let tx_seq = file.tx_seq;
+        let id = file.id;
         let cached_chunk_num = file.cached_chunk_num;
         let segs = file.segments.into_iter().map(|(_k, v)| v).collect();
 
         self.write_control.total_writings += 1;
 
-        Ok((tx_seq, cached_chunk_num, segs))
+        Ok((id, cached_chunk_num, segs))
     }
 }
 
@@ -91,11 +92,11 @@ impl From<SegmentInfo> for ChunkArray {
 pub struct MemoryChunkPool {
     inner: Mutex<Inner>,
     log_store: Store,
-    sender: UnboundedSender<DataRoot>,
+    sender: UnboundedSender<FileID>,
 }
 
 impl MemoryChunkPool {
-    pub(crate) fn new(config: Config, log_store: Store, sender: UnboundedSender<DataRoot>) -> Self {
+    pub(crate) fn new(config: Config, log_store: Store, sender: UnboundedSender<FileID>) -> Self {
         MemoryChunkPool {
             inner: Mutex::new(Inner::new(config)),
             log_store,
@@ -135,7 +136,7 @@ impl MemoryChunkPool {
     pub async fn write_chunks(
         &self,
         seg_info: SegmentInfo,
-        tx_seq: u64,
+        file_id: FileID,
         file_size: usize,
     ) -> Result<()> {
         let total_chunks = bytes_to_chunks(file_size);
@@ -150,8 +151,7 @@ impl MemoryChunkPool {
         //Write the segment in window
         let (total_segments, _) = compute_segment_size(total_chunks, seg_info.chunks_per_segment);
         self.inner.lock().await.write_control.write_segment(
-            seg_info.root,
-            tx_seq,
+            file_id,
             seg_info.seg_index,
             total_segments,
         )?;
@@ -165,13 +165,34 @@ impl MemoryChunkPool {
             start_index: (seg_info.seg_index * seg_info.chunks_per_segment) as u64,
         };
 
-        if let Err(e) = self.log_store.put_chunks(tx_seq, seg).await {
-            self.inner
-                .lock()
-                .await
-                .write_control
-                .on_write_failed(&seg_info.root, seg_info.seg_index);
-            return Err(e);
+        match self
+            .log_store
+            .put_chunks_with_tx_hash(file_id.tx_id.seq, file_id.tx_id.hash, seg)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                self.inner
+                    .lock()
+                    .await
+                    .write_control
+                    .on_write_failed(&seg_info.root, seg_info.seg_index);
+                // remove the file if transaction reverted
+                self.inner
+                    .lock()
+                    .await
+                    .write_control
+                    .remove_file(&seg_info.root);
+                bail!("Transaction reverted, please upload again");
+            }
+            Err(e) => {
+                self.inner
+                    .lock()
+                    .await
+                    .write_control
+                    .on_write_failed(&seg_info.root, seg_info.seg_index);
+                return Err(e);
+            }
         }
 
         let all_uploaded = self
@@ -183,7 +204,7 @@ impl MemoryChunkPool {
 
         // Notify to finalize transaction asynchronously.
         if all_uploaded {
-            if let Err(e) = self.sender.send(seg_info.root) {
+            if let Err(e) = self.sender.send(file_id) {
                 // Channel receiver will not be dropped until program exit.
                 bail!("channel send error: {}", e);
             }
@@ -213,7 +234,11 @@ impl MemoryChunkPool {
         }
 
         // Otherwise, notify to write all memory cached chunks and finalize transaction.
-        if let Err(e) = self.sender.send(tx.data_merkle_root) {
+        let file_id = FileID {
+            root: tx.data_merkle_root,
+            tx_id: tx.id(),
+        };
+        if let Err(e) = self.sender.send(file_id) {
             // Channel receiver will not be dropped until program exit.
             bail!("channel send error: {}", e);
         }
@@ -241,7 +266,7 @@ impl MemoryChunkPool {
     }
 
     async fn write_all_cached_chunks_and_finalize(&self, root: DataRoot) -> Result<()> {
-        let (tx_seq, cache_chunk_num, mut segments) = self
+        let (file, cache_chunk_num, mut segments) = self
             .inner
             .lock()
             .await
@@ -251,12 +276,26 @@ impl MemoryChunkPool {
             // TODO(qhz): error handling
             // 1. Push the failed segment back to front. (enhance store to return Err(ChunkArray))
             // 2. Put the incompleted segments back to memory pool.
-            if let Err(e) = self.log_store.put_chunks(tx_seq, seg).await {
-                self.inner
-                    .lock()
-                    .await
-                    .on_write_cache_failed(&root, cache_chunk_num);
-                return Err(e);
+            match self
+                .log_store
+                .put_chunks_with_tx_hash(file.tx_id.seq, file.tx_id.hash, seg)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.inner
+                        .lock()
+                        .await
+                        .on_write_cache_failed(&root, cache_chunk_num);
+                    bail!("Transaction reverted, please upload again");
+                }
+                Err(e) => {
+                    self.inner
+                        .lock()
+                        .await
+                        .on_write_cache_failed(&root, cache_chunk_num);
+                    return Err(e);
+                }
             }
         }
 
@@ -265,24 +304,12 @@ impl MemoryChunkPool {
             .await
             .on_write_cache_succeeded(&root, cache_chunk_num);
 
-        if let Err(e) = self.sender.send(root) {
+        if let Err(e) = self.sender.send(file) {
             // Channel receiver will not be dropped until program exit.
             bail!("channel send error: {}", e);
         }
 
         Ok(())
-    }
-
-    pub async fn get_tx_seq(&self, root: &DataRoot) -> u64 {
-        let inner = self.inner.lock().await;
-
-        if let Some(file) = inner.segment_cache.get_file(root) {
-            file.tx_seq
-        } else if let Some(file) = inner.write_control.get_file(root) {
-            file.tx_seq
-        } else {
-            0
-        }
     }
 
     pub async fn get_uploaded_seg_num(&self, root: &DataRoot) -> (usize, bool) {

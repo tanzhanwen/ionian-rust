@@ -1,3 +1,4 @@
+use super::FileID;
 use crate::{Config, SegmentInfo};
 use anyhow::{bail, Result};
 use hashlink::LinkedHashMap;
@@ -9,12 +10,11 @@ use std::time::{Duration, Instant};
 /// Used to cache chunks in memory pool and persist into db once log entry
 /// retrieved from blockchain.
 pub struct MemoryCachedFile {
+    pub id: FileID,
     /// Window to control the cache of each file
     pub segments: HashMap<usize, ChunkArray>,
     /// Total number of chunks for the cache file, which is updated from log entry.
     pub total_chunks: usize,
-    /// Transaction seq that used to write chunks into store.
-    pub tx_seq: u64,
     /// Used for garbage collection. It is updated when new segment uploaded.
     expired_at: Instant,
     /// Number of chunks that's currently cached for this file
@@ -22,11 +22,14 @@ pub struct MemoryCachedFile {
 }
 
 impl MemoryCachedFile {
-    fn new(timeout: Duration) -> Self {
+    fn new(root: DataRoot, timeout: Duration) -> Self {
         MemoryCachedFile {
+            id: FileID {
+                root,
+                tx_id: Default::default(),
+            },
             segments: HashMap::default(),
             total_chunks: 0,
-            tx_seq: 0,
             expired_at: Instant::now().add(timeout),
             cached_chunk_num: 0,
         }
@@ -36,7 +39,7 @@ impl MemoryCachedFile {
     /// So that, write memory cached segments into database.
     pub fn update_with_tx(&mut self, tx: &Transaction) {
         self.total_chunks = bytes_to_chunks(tx.size as usize);
-        self.tx_seq = tx.seq;
+        self.id.tx_id = tx.id();
     }
 
     fn update_expiration_time(&mut self, timeout: Duration) {
@@ -121,7 +124,7 @@ impl ChunkPoolCache {
         let file = self
             .files
             .entry(seg_info.root)
-            .or_insert_with(|| MemoryCachedFile::new(self.config.expiration_time()));
+            .or_insert_with(|| MemoryCachedFile::new(seg_info.root, self.config.expiration_time()));
 
         // Segment already cached in memory. Directly return OK
         if file.segments.contains_key(&seg_info.seg_index) {

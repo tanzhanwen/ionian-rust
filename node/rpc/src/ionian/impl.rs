@@ -2,10 +2,10 @@ use super::api::RpcServer;
 use crate::error;
 use crate::types::{FileInfo, Segment, SegmentWithProof, Status};
 use crate::Context;
-use chunk_pool::SegmentInfo;
+use chunk_pool::{FileID, SegmentInfo};
 use jsonrpsee::core::async_trait;
 use jsonrpsee::core::RpcResult;
-use shared_types::{DataRoot, CHUNK_SIZE};
+use shared_types::{DataRoot, Transaction, CHUNK_SIZE};
 use storage::try_option;
 
 pub struct RpcServerImpl {
@@ -28,12 +28,11 @@ impl RpcServer for RpcServerImpl {
 
         let _ = self.ctx.chunk_pool.validate_segment_size(&segment.data)?;
 
-        let seq = self
+        let maybe_tx = self
             .ctx
             .log_store
-            .get_tx_seq_by_data_root(&segment.root)
+            .get_tx_by_data_root(&segment.root)
             .await?;
-
         let mut need_cache = false;
 
         if self
@@ -46,7 +45,7 @@ impl RpcServer for RpcServerImpl {
         }
 
         if !need_cache {
-            need_cache = self.check_need_cache(seq, segment.file_size).await?;
+            need_cache = self.check_need_cache(&maybe_tx, segment.file_size).await?;
         }
 
         segment.validate(self.ctx.config.chunks_per_segment)?;
@@ -61,9 +60,13 @@ impl RpcServer for RpcServerImpl {
         if need_cache {
             self.ctx.chunk_pool.cache_chunks(seg_info).await?;
         } else {
+            let file_id = FileID {
+                root: seg_info.root,
+                tx_id: maybe_tx.unwrap().id(),
+            };
             self.ctx
                 .chunk_pool
-                .write_chunks(seg_info, seq.unwrap(), segment.file_size)
+                .write_chunks(seg_info, file_id, segment.file_size)
                 .await?;
         }
 
@@ -115,19 +118,12 @@ impl RpcServer for RpcServerImpl {
     ) -> RpcResult<Option<SegmentWithProof>> {
         debug!("ionian_downloadSegmentWithProof()");
 
-        let tx_seq = try_option!(
-            self.ctx
-                .log_store
-                .get_tx_seq_by_data_root(&data_root)
-                .await?
-        );
+        let tx = try_option!(self.ctx.log_store.get_tx_by_data_root(&data_root).await?);
 
         // ensure file already finalized
-        if !self.ctx.log_store.check_tx_completed(tx_seq).await? {
+        if !self.ctx.log_store.check_tx_completed(tx.seq).await? {
             return Err(error::invalid_params("root", "file not finalized yet"));
         }
-
-        let tx = try_option!(self.ctx.log_store.get_tx_by_seq_number(tx_seq).await?);
 
         // validate index
         let chunks_per_segment = self.ctx.config.chunks_per_segment;
@@ -150,7 +146,7 @@ impl RpcServer for RpcServerImpl {
         let segment = try_option!(
             self.ctx
                 .log_store
-                .get_chunks_with_proof_by_tx_and_index_range(tx_seq, start_index, end_index)
+                .get_chunks_with_proof_by_tx_and_index_range(tx.seq, start_index, end_index)
                 .await?
         );
 
@@ -168,20 +164,16 @@ impl RpcServer for RpcServerImpl {
     async fn get_file_info(&self, data_root: DataRoot) -> RpcResult<Option<FileInfo>> {
         debug!("get_file_info()");
 
-        let tx_seq = try_option!(
-            self.ctx
-                .log_store
-                .get_tx_seq_by_data_root(&data_root)
-                .await?
-        );
-        let tx = try_option!(self.ctx.log_store.get_tx_by_seq_number(tx_seq).await?);
+        let tx = try_option!(self.ctx.log_store.get_tx_by_data_root(&data_root).await?);
 
         let (uploaded_seg_num, is_cached) =
             self.ctx.chunk_pool.get_uploaded_seg_num(&data_root).await;
 
+        let finalized = self.ctx.log_store.check_tx_completed(tx.seq).await?;
+
         Ok(Some(FileInfo {
             tx,
-            finalized: self.ctx.log_store.check_tx_completed(tx_seq).await?,
+            finalized,
             is_cached,
             uploaded_seg_num,
         }))
@@ -189,29 +181,28 @@ impl RpcServer for RpcServerImpl {
 }
 
 impl RpcServerImpl {
-    async fn check_need_cache(&self, seq: Option<u64>, file_size: usize) -> RpcResult<bool> {
-        let mut need_cache = false;
-
-        if let Some(tx_seq) = seq {
-            // Transaction already finalized for the specified file data root.
-            if self.ctx.log_store.check_tx_completed(tx_seq).await? {
-                return Err(error::invalid_params(
-                    "root",
-                    "already uploaded and finalized",
-                ));
-            }
-
-            let tx = match self.ctx.log_store.get_tx_by_seq_number(tx_seq).await? {
-                Some(tx) => tx,
-                None => return Err(error::invalid_params("root", "data root not found")),
-            };
-
+    async fn check_need_cache(
+        &self,
+        maybe_tx: &Option<Transaction>,
+        file_size: usize,
+    ) -> RpcResult<bool> {
+        if let Some(tx) = maybe_tx {
             if tx.size != file_size as u64 {
                 return Err(error::invalid_params(
                     "file_size",
                     "segment file size not matched with tx file size",
                 ));
             }
+
+            // Transaction already finalized for the specified file data root.
+            if self.ctx.log_store.check_tx_completed(tx.seq).await? {
+                return Err(error::invalid_params(
+                    "root",
+                    "already uploaded and finalized",
+                ));
+            }
+
+            Ok(false)
         } else {
             //Check whether file is small enough to cache in the system
             if file_size > self.ctx.config.max_cache_file_size {
@@ -221,9 +212,7 @@ impl RpcServerImpl {
                 ));
             }
 
-            need_cache = true;
+            Ok(true)
         }
-
-        Ok(need_cache)
     }
 }

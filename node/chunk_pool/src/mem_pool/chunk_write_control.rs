@@ -1,3 +1,4 @@
+use super::FileID;
 use crate::Config;
 use anyhow::{bail, Result};
 use shared_types::DataRoot;
@@ -77,15 +78,15 @@ impl CtrlWindow {
 
 /// To track the file uploading progress.
 pub struct FileWriteCtrl {
-    pub tx_seq: u64,
+    pub id: FileID,
     total_segments: usize,
     window: CtrlWindow,
 }
 
 impl FileWriteCtrl {
-    fn new(tx_seq: u64, total_segments: usize, window_size: usize) -> Self {
+    fn new(id: FileID, total_segments: usize, window_size: usize) -> Self {
         FileWriteCtrl {
-            tx_seq,
+            id,
             total_segments,
             window: CtrlWindow::new(window_size),
         }
@@ -125,14 +126,19 @@ impl ChunkPoolWriteCtrl {
 
     pub fn write_segment(
         &mut self,
-        root: DataRoot,
-        tx_seq: u64,
+        id: FileID,
         seg_index: usize,
         total_segments: usize,
     ) -> Result<()> {
-        let file_ctrl = self.files.entry(root).or_insert_with(|| {
-            FileWriteCtrl::new(tx_seq, total_segments, self.config.write_window_size)
+        let file_ctrl = self.files.entry(id.root).or_insert_with(|| {
+            FileWriteCtrl::new(id, total_segments, self.config.write_window_size)
         });
+
+        // ensure the tx_id not changed during file uploading
+        if file_ctrl.id != id {
+            self.files.remove(&id.root);
+            bail!("Transaction reverted when uploading segments, please try again");
+        }
 
         if file_ctrl.total_segments != total_segments {
             bail!(

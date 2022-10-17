@@ -5,8 +5,7 @@ mod handler;
 mod mem_pool;
 
 pub use handler::ChunkPoolHandler;
-pub use mem_pool::MemoryChunkPool;
-pub use mem_pool::SegmentInfo;
+pub use mem_pool::{FileID, MemoryChunkPool, SegmentInfo};
 
 use std::sync::Arc;
 use std::time::Duration;

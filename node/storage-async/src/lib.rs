@@ -54,6 +54,12 @@ impl Store {
             .await
     }
 
+    pub async fn get_tx_by_data_root(&self, data_root: &DataRoot) -> Result<Option<Transaction>> {
+        let root = *data_root;
+        self.spawn(move |store| store.get_tx_by_data_root(&root))
+            .await
+    }
+
     async fn spawn<T, F>(&self, f: F) -> Result<T>
     where
         F: FnOnce(&mut dyn LogStore) -> Result<T> + Send + 'static,

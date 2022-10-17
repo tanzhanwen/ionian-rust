@@ -1,7 +1,8 @@
 use super::mem_pool::MemoryChunkPool;
+use crate::mem_pool::FileID;
 use anyhow::Result;
 use network::NetworkMessage;
-use shared_types::{ChunkArray, DataRoot};
+use shared_types::ChunkArray;
 use std::sync::Arc;
 use storage_async::Store;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -9,7 +10,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 /// Handle the cached file when uploaded completely and verified from blockchain.
 /// Generally, the file will be persisted into log store.
 pub struct ChunkPoolHandler {
-    receiver: UnboundedReceiver<DataRoot>,
+    receiver: UnboundedReceiver<FileID>,
     mem_pool: Arc<MemoryChunkPool>,
     log_store: Store,
     sender: UnboundedSender<NetworkMessage>,
@@ -17,7 +18,7 @@ pub struct ChunkPoolHandler {
 
 impl ChunkPoolHandler {
     pub(crate) fn new(
-        receiver: UnboundedReceiver<DataRoot>,
+        receiver: UnboundedReceiver<FileID>,
         mem_pool: Arc<MemoryChunkPool>,
         log_store: Store,
         sender: UnboundedSender<NetworkMessage>,
@@ -33,37 +34,50 @@ impl ChunkPoolHandler {
     /// Writes memory cached chunks into store and finalize transaction.
     /// Note, a separate thread should be spawned to call this method.
     pub async fn handle(&mut self) -> Result<bool> {
-        let root = match self.receiver.recv().await {
-            Some(root) => root,
+        let id = match self.receiver.recv().await {
+            Some(id) => id,
             None => return Ok(false),
         };
 
-        debug!("Received task to finalize transaction for file {}", root);
+        debug!(?id, "Received task to finalize transaction");
 
         // TODO(qhz): remove from memory pool after transaction finalized,
         // when store support to write chunks with reference.
-        let tx_seq = self.mem_pool.get_tx_seq(&root).await;
-        if let Some(file) = self.mem_pool.remove_cached_file(&root).await {
-            //If there is still cache of chunks, write them into store
+        if let Some(file) = self.mem_pool.remove_cached_file(&id.root).await {
+            // If there is still cache of chunks, write them into store
             let mut segments: Vec<ChunkArray> =
                 file.segments.into_iter().map(|(_k, v)| v).collect();
             while let Some(seg) = segments.pop() {
-                self.log_store.put_chunks(tx_seq, seg).await?;
+                if !self
+                    .log_store
+                    .put_chunks_with_tx_hash(id.tx_id.seq, id.tx_id.hash, seg)
+                    .await?
+                {
+                    return Ok(false);
+                }
             }
         }
 
-        self.log_store.finalize_tx(tx_seq).await?;
+        if !self
+            .log_store
+            .finalize_tx_with_hash(id.tx_id.seq, id.tx_id.hash)
+            .await?
+        {
+            return Ok(false);
+        }
 
-        debug!("Transaction finalized for seq {}", tx_seq);
+        debug!(?id, "Transaction finalized");
 
         // always remove file from pool after transaction finalized
-        self.mem_pool.remove_file(&root).await;
+        self.mem_pool.remove_file(&id.root).await;
 
-        let msg = NetworkMessage::AnnounceLocalFile { tx_seq };
+        let msg = NetworkMessage::AnnounceLocalFile {
+            tx_seq: id.tx_id.seq,
+        };
         if let Err(e) = self.sender.send(msg) {
             error!(
                 "Failed to send NetworkMessage::AnnounceLocalFile message, tx_seq={}, err={}",
-                tx_seq, e
+                id.tx_id.seq, e
             );
         }
 
