@@ -1,6 +1,6 @@
 use crate::rpc_proxy::ContractAddress;
 use crate::sync_manager::{repeat_run_and_log, RETRY_WAIT_MS};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use append_merkle::{Algorithm, Sha3Algorithm};
 use contract_interface::{IonianFlow, SubmissionFilter};
 use ethers::abi::RawLog;
@@ -10,6 +10,7 @@ use ethers::types::H256;
 use futures::StreamExt;
 use jsonrpsee::tracing::{debug, error, info};
 use shared_types::{DataRoot, Transaction};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use task_executor::TaskExecutor;
@@ -19,6 +20,8 @@ pub struct LogEntryFetcher {
     contract_address: ContractAddress,
     provider: Arc<Provider<Http>>,
     log_page_size: u64,
+
+    confirmation_delay: u64,
 }
 
 impl LogEntryFetcher {
@@ -26,6 +29,7 @@ impl LogEntryFetcher {
         url: &str,
         contract_address: ContractAddress,
         log_page_size: u64,
+        confirmation_delay: u64,
     ) -> Result<Self> {
         let provider = Arc::new(Provider::try_from(url)?);
         // TODO: `error` types are removed from the ABI json file.
@@ -33,6 +37,7 @@ impl LogEntryFetcher {
             contract_address,
             provider,
             log_page_size,
+            confirmation_delay,
         })
     }
 
@@ -56,7 +61,10 @@ impl LogEntryFetcher {
                     .to_block(end_block_number)
                     .filter;
                 let mut stream = provider.get_logs_paginated(&filter, log_page_size);
-                debug!("start_recover starts, start={}", start_block_number);
+                debug!(
+                    "start_recover starts, start={} end={}",
+                    start_block_number, end_block_number
+                );
                 while let Some(maybe_log) = stream.next().await {
                     match maybe_log {
                         Ok(log) => {
@@ -114,6 +122,7 @@ impl LogEntryFetcher {
         let (watch_tx, watch_rx) = tokio::sync::mpsc::unbounded_channel();
         let contract = IonianFlow::new(self.contract_address, self.provider.clone());
         let provider = self.provider.clone();
+        let mut log_confirmation_queue = LogConfirmationQueue::new(self.confirmation_delay);
         executor.spawn(
             async move {
                 let mut filter = contract
@@ -126,7 +135,14 @@ impl LogEntryFetcher {
                 let mut progress = start_block_number;
 
                 loop {
-                    match Self::watch_loop(provider.as_ref(), filter_id, &watch_tx).await {
+                    match Self::watch_loop(
+                        provider.as_ref(),
+                        filter_id,
+                        &watch_tx,
+                        &mut log_confirmation_queue,
+                    )
+                    .await
+                    {
                         Err(e) => {
                             error!("log sync watch error: e={:?}", e);
                             filter = filter.from_block(progress);
@@ -158,23 +174,24 @@ impl LogEntryFetcher {
         provider: &Provider<Http>,
         filter_id: U256,
         watch_tx: &UnboundedSender<LogFetchProgress>,
+        log_confirmation_queue: &mut LogConfirmationQueue,
     ) -> Result<Option<u64>> {
         let latest_block = provider
             .get_block(BlockNumber::Latest)
             .await?
             .ok_or_else(|| anyhow!("None for latest block"))?;
         let logs: Vec<Log> = provider.get_filter_changes(filter_id).await?;
-        for log in logs {
-            // Reverted log should not be processed. Since we revert back to a previous tx_seq
-            // directly, we also do not need to notify with reverted logs.
-            if !log.removed.unwrap_or(false) {
-                // TODO(zz): Log parse error means logs might be lost here.
-                let tx = SubmissionFilter::decode_log(&RawLog {
-                    topics: log.topics,
-                    data: log.data.to_vec(),
-                })?;
-                watch_tx.send(submission_event_to_transaction(tx))?;
-            }
+        if let Some(reverted) = log_confirmation_queue.push(logs)? {
+            watch_tx.send(LogFetchProgress::Reverted(reverted))?;
+        }
+        for log in log_confirmation_queue.confirm_logs(latest_block.number.unwrap().as_u64()) {
+            assert!(!log.removed.unwrap_or(false));
+            // TODO(zz): Log parse error means logs might be lost here.
+            let tx = SubmissionFilter::decode_log(&RawLog {
+                topics: log.topics,
+                data: log.data.to_vec(),
+            })?;
+            watch_tx.send(submission_event_to_transaction(tx))?;
         }
         let progress = if latest_block.hash.is_some() && latest_block.number.is_some() {
             Some((
@@ -195,10 +212,103 @@ impl LogEntryFetcher {
     }
 }
 
+struct LogConfirmationQueue {
+    /// Keep the unconfirmed new logs.
+    /// The key is the block number and the value is the set of needed logs in that block.
+    queue: VecDeque<(u64, Vec<Log>)>,
+
+    latest_block_number: u64,
+    confirmation_delay: u64,
+}
+
+impl LogConfirmationQueue {
+    fn new(confirmation_delay: u64) -> Self {
+        Self {
+            queue: VecDeque::new(),
+            latest_block_number: 0,
+            confirmation_delay,
+        }
+    }
+    /// Push a set of new logs.
+    /// We assumes that these logs are in order, and removed logs are returned first.
+    ///
+    /// Return `Ok(Some(tx_seq))` of the first reverted tx_seq if chain reorg happens.
+    /// `Err` is returned if assumptions are violated (like the log have missing fields).
+    fn push(&mut self, logs: Vec<Log>) -> Result<Option<u64>> {
+        let mut revert_to = None;
+        // First merge logs according to the block number.
+        let mut block_logs = BTreeMap::new();
+        let mut removed_block_logs = BTreeMap::new();
+        for log in logs {
+            let set = if log.removed.unwrap_or(false) {
+                &mut removed_block_logs
+            } else {
+                &mut block_logs
+            };
+            let block_number = log
+                .block_number
+                .ok_or_else(|| anyhow!("block number missing"))?
+                .as_u64();
+            set.entry(block_number).or_insert(Vec::new()).push(log);
+        }
+
+        // Handle revert if it happens.
+        for (block_number, removed_logs) in &removed_block_logs {
+            if revert_to.is_none() {
+                let reverted_index = match self.queue.binary_search_by_key(block_number, |e| e.0) {
+                    Ok(x) => x,
+                    Err(x) => x,
+                };
+                self.queue.truncate(reverted_index);
+                let first = removed_logs.first().expect("not empty");
+                let first_reverted_tx_seq = SubmissionFilter::decode_log(&RawLog {
+                    topics: first.topics.clone(),
+                    data: first.data.to_vec(),
+                })?
+                .submission_index
+                .as_u64();
+                revert_to = Some(first_reverted_tx_seq);
+            } else {
+                // Other removed logs should have larger tx seq, so no need to process them.
+                break;
+            }
+        }
+
+        // Add new logs to the queue.
+        for (block_number, new_logs) in block_logs {
+            if block_number <= self.queue.back().map(|e| e.0).unwrap_or(0) {
+                bail!("reverted without being notified");
+            }
+            self.queue.push_back((block_number, new_logs));
+        }
+
+        Ok(revert_to)
+    }
+
+    /// Pass in the latest block number and return the confirmed logs.
+    fn confirm_logs(&mut self, latest_block_number: u64) -> Vec<Log> {
+        self.latest_block_number = latest_block_number;
+        let mut confirmed_logs = Vec::new();
+        while let Some((block_number, _)) = self.queue.front() {
+            if *block_number
+                > self
+                    .latest_block_number
+                    .wrapping_sub(self.confirmation_delay)
+            {
+                break;
+            }
+            let (_, mut logs) = self.queue.pop_front().unwrap();
+            confirmed_logs.append(&mut logs);
+        }
+        confirmed_logs
+    }
+}
+
 #[derive(Debug)]
 pub enum LogFetchProgress {
     SyncedBlock((u64, H256)),
     Transaction(Transaction),
+    Reverted(u64),
 }
 
 fn submission_event_to_transaction(e: SubmissionFilter) -> LogFetchProgress {

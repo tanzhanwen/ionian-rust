@@ -6,7 +6,6 @@ use ethers::prelude::Middleware;
 use futures::FutureExt;
 use jsonrpsee::tracing::{debug, error, trace, warn};
 use shared_types::{ChunkArray, Transaction};
-use std::cmp::Ordering;
 use std::fmt::Debug;
 use std::future::Future;
 use std::sync::Arc;
@@ -67,6 +66,7 @@ impl LogSyncManager {
                         &config.rpc_endpoint_url,
                         config.contract_address,
                         config.log_page_size,
+                        config.confirmation_block_count,
                     )
                     .await?;
                     let data_cache = DataCache::new(config.cache_config.clone());
@@ -128,7 +128,8 @@ impl LogSyncManager {
                         .start_watch(latest_block_number, &executor_clone);
                     let recover_rx = log_sync_manager.log_fetcher.start_recover(
                         start_block_number,
-                        latest_block_number,
+                        // -1 so the recover and watch ranges do not overlap.
+                        latest_block_number.wrapping_sub(1),
                         &executor_clone,
                     );
                     log_sync_manager.handle_data(recover_rx).await?;
@@ -144,73 +145,54 @@ impl LogSyncManager {
     }
 
     async fn put_tx(&mut self, tx: Transaction) -> bool {
-        match tx.seq.cmp(&self.next_tx_seq) {
-            Ordering::Less => {
-                warn!("revert for chain reorg: seq={}", tx.seq);
-                match self.store.read().await.get_tx_by_seq_number(tx.seq) {
-                    Ok(Some(old_tx)) => {
-                        if tx == old_tx {
-                            // The reverted result is the same, so just ignore.
-                            return true;
-                        }
-                    }
-                    e => {
-                        error!("get old tx error: tx_seq={} e={:?}", tx.seq, e);
-                        return false;
-                    }
-                }
-                // TODO(zz): `wrapping_sub` here is a hack to handle the case of tx_seq=0.
-                {
-                    let store = self.store.read().await;
-                    for seq in tx.seq..self.next_tx_seq {
-                        if matches!(store.check_tx_completed(seq), Ok(true)) {
-                            if let Ok(Some(tx)) = store.get_tx_by_seq_number(seq) {
-                                // TODO(zz): Skip reading the rear padding data?
-                                if let Ok(Some(data)) =
-                                    store.get_chunks_by_tx_and_index_range(seq, 0, tx.num_entries())
-                                {
-                                    if !self.data_cache.add_data(
-                                        tx.data_merkle_root,
-                                        seq,
-                                        data.data,
-                                    ) {
-                                        // TODO(zz): Data too large. Save to disk?
-                                        warn!("large reverted data dropped for tx={:?}", tx);
-                                    }
-                                }
+        // We call this after process chain reorg, so the sequence number should match.
+        if tx.seq == self.next_tx_seq {
+            debug!("log entry sync get entry: {:?}", tx);
+            self.put_tx_inner(tx).await
+        } else {
+            error!(
+                "Unexpected transaction seq: next={} get={}",
+                self.next_tx_seq, tx.seq
+            );
+            false
+        }
+    }
+
+    /// `tx_seq` is the first reverted tx seq.
+    async fn process_reverted(&mut self, tx_seq: u64) {
+        warn!("revert for chain reorg: seq={}", tx_seq);
+        {
+            let store = self.store.read().await;
+            for seq in tx_seq..self.next_tx_seq {
+                if matches!(store.check_tx_completed(seq), Ok(true)) {
+                    if let Ok(Some(tx)) = store.get_tx_by_seq_number(seq) {
+                        // TODO(zz): Skip reading the rear padding data?
+                        if let Ok(Some(data)) =
+                            store.get_chunks_by_tx_and_index_range(seq, 0, tx.num_entries())
+                        {
+                            if !self
+                                .data_cache
+                                .add_data(tx.data_merkle_root, seq, data.data)
+                            {
+                                // TODO(zz): Data too large. Save to disk?
+                                warn!("large reverted data dropped for tx={:?}", tx);
                             }
                         }
                     }
                 }
-
-                let tx_seq = tx.seq;
-
-                let _ = self.event_send.send(LogSyncEvent::ReorgDetected { tx_seq });
-
-                // TODO: Process reverted transactions.
-                if let Err(e) = self.store.write().await.revert_to(tx_seq.wrapping_sub(1)) {
-                    error!("revert_to fails: e={:?}", e);
-                    return false;
-                }
-                self.next_tx_seq = tx_seq;
-                let succeeded = self.put_tx_inner(tx).await;
-
-                let _ = self.event_send.send(LogSyncEvent::Reverted { tx_seq });
-
-                succeeded
-            }
-            Ordering::Equal => {
-                debug!("log entry sync get entry: {:?}", tx);
-                self.put_tx_inner(tx).await
-            }
-            Ordering::Greater => {
-                error!(
-                    "Unexpected transaction skip: next={} get={}",
-                    self.next_tx_seq, tx.seq
-                );
-                false
             }
         }
+
+        let _ = self.event_send.send(LogSyncEvent::ReorgDetected { tx_seq });
+
+        // TODO(zz): `wrapping_sub` here is a hack to handle the case of tx_seq=0.
+        if let Err(e) = self.store.write().await.revert_to(tx_seq.wrapping_sub(1)) {
+            error!("revert_to fails: e={:?}", e);
+            return;
+        }
+        self.next_tx_seq = tx_seq;
+
+        let _ = self.event_send.send(LogSyncEvent::Reverted { tx_seq });
     }
 
     async fn handle_data(&mut self, mut rx: UnboundedReceiver<LogFetchProgress>) -> Result<()> {
@@ -226,6 +208,9 @@ impl LogSyncManager {
                         error!("log sync write error");
                         break;
                     }
+                }
+                LogFetchProgress::Reverted(reverted) => {
+                    self.process_reverted(reverted).await;
                 }
             }
         }

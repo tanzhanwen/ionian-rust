@@ -33,6 +33,9 @@ class RevertTest(TestFramework):
         tx_hash = self.contract.submit(submissions, 0)
         self.log.info("tx 1 hash: {}".format(tx_hash.hex()))
         wait_until(lambda: self.contract.num_submissions() == 1)
+        assert client.ionian_get_file_info(data_root) is None
+        # Generate blocks for confirmation
+        blockchain_client1.generate_empty_blocks(12)
         wait_until(lambda: client.ionian_get_file_info(data_root) is not None)
 
         segment = submit_data(client, chunk_data)
@@ -49,7 +52,7 @@ class RevertTest(TestFramework):
         self.log.info("tx 2 hash: {}".format(tx_hash.hex()))
         wait_until(lambda: self.contract.num_submissions(1) == 1)
 
-        blockchain_client2.generate_empty_blocks(15)
+        blockchain_client2.generate_empty_blocks(30)
 
         self.log.info("Node 1 epoch {}".format(blockchain_client1.cfx_epochNumber()))
         self.log.info("Node 2 epoch {}".format(blockchain_client2.cfx_epochNumber()))
