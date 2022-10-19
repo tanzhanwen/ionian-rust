@@ -9,9 +9,6 @@ pub trait Rpc {
     #[method(name = "shutdown")]
     async fn shutdown(&self) -> RpcResult<()>;
 
-    #[method(name = "announceLocalFile")]
-    async fn announce_local_file(&self, tx_seq: u64) -> RpcResult<()>;
-
     #[method(name = "startSyncFile")]
     async fn start_sync_file(&self, tx_seq: u64) -> RpcResult<()>;
 

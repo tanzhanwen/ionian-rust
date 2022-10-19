@@ -10,7 +10,7 @@ use network::{
     NetworkMessage, PeerId, PeerRequestId, PublicKey, PubsubMessage, Request, RequestId, Response,
     Service as LibP2PService, Swarm,
 };
-use shared_types::timestamp_now;
+use shared_types::{timestamp_now, TxID};
 use std::time::Duration;
 use std::{ops::Neg, sync::Arc};
 use storage::log_store::Store as LogStore;
@@ -317,8 +317,8 @@ impl RouterService {
                     };
                 }
             }
-            NetworkMessage::AnnounceLocalFile { tx_seq } => {
-                if let Some(msg) = self.construct_announce_file_message(tx_seq) {
+            NetworkMessage::AnnounceLocalFile { tx_id } => {
+                if let Some(msg) = self.construct_announce_file_message(tx_id) {
                     self.publish(msg);
                 }
             }
@@ -455,7 +455,7 @@ impl RouterService {
             .report_message_validation_result(&propagation_source, id, result);
     }
 
-    fn construct_announce_file_message(&self, tx_seq: u64) -> Option<PubsubMessage> {
+    fn construct_announce_file_message(&self, tx_id: TxID) -> Option<PubsubMessage> {
         let peer_id = *self.network_globals.peer_id.read();
 
         let addr = match self.network_globals.listen_multiaddrs.read().first() {
@@ -469,7 +469,7 @@ impl RouterService {
         let timestamp = timestamp_now();
 
         let msg = AnnounceFile {
-            tx_seq,
+            tx_id,
             peer_id: peer_id.into(),
             at: addr.into(),
             timestamp,
@@ -478,7 +478,7 @@ impl RouterService {
         let mut signed = match msg.into_signed(&self.local_keypair) {
             Ok(signed) => signed,
             Err(e) => {
-                error!(%tx_seq, %e, "Failed to sign AnnounceFile message");
+                error!(%tx_id.seq, %e, "Failed to sign AnnounceFile message");
                 return None;
             }
         };
@@ -489,7 +489,7 @@ impl RouterService {
     }
 
     async fn on_find_file(&mut self, msg: FindFile) -> MessageAcceptance {
-        let FindFile { tx_seq, timestamp } = msg;
+        let FindFile { tx_id, timestamp } = msg;
 
         // verify timestamp
         let d = duration_since(timestamp);
@@ -499,22 +499,26 @@ impl RouterService {
         }
 
         // check if we have it
-        if matches!(self.store.check_tx_completed(tx_seq).await, Ok(true)) {
-            debug!(%tx_seq, "Found file locally, responding to FindFile query");
+        if matches!(self.store.check_tx_completed(tx_id.seq).await, Ok(true)) {
+            if let Ok(Some(tx)) = self.store.get_tx_by_seq_number(tx_id.seq).await {
+                if tx.id() == tx_id {
+                    debug!(?tx_id, "Found file locally, responding to FindFile query");
 
-            return match self.construct_announce_file_message(tx_seq) {
-                Some(msg) => {
-                    self.publish(msg);
-                    MessageAcceptance::Ignore
+                    return match self.construct_announce_file_message(tx_id) {
+                        Some(msg) => {
+                            self.publish(msg);
+                            MessageAcceptance::Ignore
+                        }
+                        // propagate FindFile query to other nodes
+                        None => MessageAcceptance::Accept,
+                    };
                 }
-                // propagate FindFile query to other nodes
-                None => MessageAcceptance::Accept,
-            };
+            }
         }
 
         // try from cache
-        if let Some(mut msg) = self.file_location_cache.get_one(tx_seq) {
-            debug!(%tx_seq, "Found file in cache, responding to FindFile query");
+        if let Some(mut msg) = self.file_location_cache.get_one(tx_id) {
+            debug!(?tx_id, "Found file in cache, responding to FindFile query");
 
             msg.resend_timestamp = timestamp_now();
             self.publish(PubsubMessage::AnnounceFile(msg));
@@ -560,7 +564,7 @@ impl RouterService {
 
         // notify sync layer
         self.send_to_sync(SyncMessage::AnnounceFileGossip {
-            tx_seq: msg.tx_seq,
+            tx_id: msg.tx_id,
             peer_id: msg.peer_id.clone().into(),
             addr: msg.at.clone().into(),
         });

@@ -4,7 +4,6 @@ use crate::{error, Context};
 use futures::prelude::*;
 use jsonrpsee::core::async_trait;
 use jsonrpsee::core::RpcResult;
-use network::NetworkMessage;
 use std::collections::HashMap;
 use sync::{FileSyncInfo, SyncRequest, SyncResponse};
 use task_executor::ShutdownReason;
@@ -25,14 +24,6 @@ impl RpcServer for RpcServerImpl {
             .send(ShutdownReason::Success("Shutdown by admin"))
             .await
             .map_err(|e| error::internal_error(format!("Failed to send shutdown command: {:?}", e)))
-    }
-
-    #[tracing::instrument(skip(self), err)]
-    async fn announce_local_file(&self, tx_seq: u64) -> RpcResult<()> {
-        info!("admin_announceLocalFile({tx_seq})");
-
-        self.ctx
-            .send_network(NetworkMessage::AnnounceLocalFile { tx_seq })
     }
 
     #[tracing::instrument(skip(self), err)]

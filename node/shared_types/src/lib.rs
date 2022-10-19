@@ -72,7 +72,7 @@ pub fn compute_segment_size(chunks: usize, chunks_per_segment: usize) -> (usize,
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Chunk(pub [u8; CHUNK_SIZE]);
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, DeriveDecode, DeriveEncode)]
 pub struct TxID {
     pub seq: u64,
     pub hash: H256,

@@ -23,6 +23,7 @@ pub mod types;
 pub use config::gossip_max_size;
 
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use shared_types::TxID;
 use std::str::FromStr;
 
 /// Wrapper over a libp2p `PeerId` which implements `Serialize` and `Deserialize`
@@ -98,7 +99,7 @@ pub enum RequestId {
 
 #[derive(Debug, Clone, Copy)]
 pub enum SyncId {
-    SerialSync { tx_seq: u64 },
+    SerialSync { tx_id: TxID },
 }
 
 /// Types of messages that the network service can receive.
@@ -141,5 +142,5 @@ pub enum NetworkMessage {
     /// Start dialing a new peer.
     DialPeer { address: Multiaddr, peer_id: PeerId },
     /// Notify that new file stored in db.
-    AnnounceLocalFile { tx_seq: u64 },
+    AnnounceLocalFile { tx_id: TxID },
 }

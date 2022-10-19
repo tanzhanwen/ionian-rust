@@ -10,7 +10,7 @@ use network::{
     rpc::GetChunksRequest, rpc::RPCResponseErrorCode, Multiaddr, NetworkMessage, PeerAction,
     PeerId, PeerRequestId, SyncId as RequestId,
 };
-use shared_types::{bytes_to_chunks, ChunkArrayWithProof};
+use shared_types::{bytes_to_chunks, ChunkArrayWithProof, TxID};
 use std::{
     collections::{hash_map::Entry, HashMap},
     sync::Arc,
@@ -51,7 +51,7 @@ pub enum SyncMessage {
         request_id: RequestId,
     },
     AnnounceFileGossip {
-        tx_seq: u64,
+        tx_id: TxID,
         peer_id: PeerId,
         addr: Multiaddr,
     },
@@ -207,11 +207,11 @@ impl SyncService {
             }
 
             SyncMessage::AnnounceFileGossip {
-                tx_seq,
+                tx_id,
                 peer_id,
                 addr,
             } => {
-                self.on_announce_file_gossip(tx_seq, peer_id, addr).await;
+                self.on_announce_file_gossip(tx_id, peer_id, addr).await;
             }
         }
     }
@@ -340,14 +340,23 @@ impl SyncService {
         }
 
         // ban peer if invalid tx requested
-        // TODO(qhz): add cache to get tx, which will not be removed
-        let tx = match self.store.get_tx_by_seq_number(request.tx_seq).await? {
+        let tx = match self.store.get_tx_by_seq_number(request.tx_id.seq).await? {
             Some(tx) => tx,
             None => {
                 self.ctx.ban_peer(peer_id, "Tx not found");
                 return Ok(());
             }
         };
+
+        // Transaction may be reverted during file sync
+        if tx.id() != request.tx_id {
+            self.ctx.send(NetworkMessage::SendErrorResponse {
+                peer_id,
+                error: RPCResponseErrorCode::InvalidRequest,
+                reason: "Tx not found (Reverted)".into(),
+                id: request_id,
+            });
+        }
 
         // ban peer if chunk index out of bound
         let num_chunks = bytes_to_chunks(tx.size as usize);
@@ -357,9 +366,9 @@ impl SyncService {
         }
 
         // file may be removed, but remote peer still find one from the file location cache
-        let finalized = self.store.check_tx_completed(request.tx_seq).await?;
+        let finalized = self.store.check_tx_completed(request.tx_id.seq).await?;
         if !finalized {
-            info!(%request.tx_seq, "Failed to handle chunks request due to tx not finalized");
+            info!(%request.tx_id.seq, "Failed to handle chunks request due to tx not finalized");
             self.ctx
                 .report_peer(peer_id, PeerAction::MidToleranceError, "Tx not finalized");
             self.ctx.send(NetworkMessage::SendErrorResponse {
@@ -374,7 +383,7 @@ impl SyncService {
         let result = self
             .store
             .get_chunks_with_proof_by_tx_and_index_range(
-                request.tx_seq,
+                request.tx_id.seq,
                 request.index_start as usize,
                 request.index_end as usize,
             )
@@ -390,7 +399,7 @@ impl SyncService {
             }
             None => {
                 // file may be removed during downloading
-                warn!(%request.tx_seq, "Failed to handle chunks request due to chunks not found");
+                warn!(%request.tx_id.seq, "Failed to handle chunks request due to chunks not found");
                 self.ctx.send(NetworkMessage::SendErrorResponse {
                     peer_id,
                     error: RPCResponseErrorCode::InvalidRequest,
@@ -412,7 +421,7 @@ impl SyncService {
         info!(%response.chunks, %peer_id, ?request_id, "Received chunks response");
 
         let tx_seq = match request_id {
-            RequestId::SerialSync { tx_seq } => tx_seq,
+            RequestId::SerialSync { tx_id } => tx_id.seq,
         };
 
         match self.controllers.get_mut(&tx_seq) {
@@ -430,7 +439,7 @@ impl SyncService {
         info!(%peer_id, ?request_id, "Received RPC error");
 
         let tx_seq = match request_id {
-            RequestId::SerialSync { tx_seq } => tx_seq,
+            RequestId::SerialSync { tx_id } => tx_id.seq,
         };
 
         match self.controllers.get_mut(&tx_seq) {
@@ -473,8 +482,7 @@ impl SyncService {
                 }
 
                 entry.insert(SerialSyncController::new(
-                    tx_seq,
-                    tx.data_merkle_root,
+                    tx.id(),
                     num_chunks as u64,
                     self.ctx.clone(),
                     self.store.clone(),
@@ -497,7 +505,8 @@ impl SyncService {
         Ok(())
     }
 
-    async fn on_announce_file_gossip(&mut self, tx_seq: u64, peer_id: PeerId, addr: Multiaddr) {
+    async fn on_announce_file_gossip(&mut self, tx_id: TxID, peer_id: PeerId, addr: Multiaddr) {
+        let tx_seq = tx_id.seq;
         info!(%tx_seq, %peer_id, %addr, "Received AnnounceFile gossip");
 
         // File already in sync
@@ -563,25 +572,24 @@ impl SyncService {
 
 #[cfg(test)]
 mod tests {
-    use std::thread;
-
+    use super::*;
+    use crate::test_util::tests::{create_2_store, create_file_location_cache};
     use libp2p::identity;
     use network::discovery::ConnectionId;
     use network::rpc::SubstreamId;
     use network::ReportSource;
     use shared_types::ChunkArray;
+    use shared_types::Transaction;
+    use std::thread;
     use std::time::Duration;
     use std::time::Instant;
     use storage::log_store::log_manager::LogConfig;
     use storage::log_store::log_manager::LogManager;
     use storage::log_store::LogStoreRead;
+    use storage::H256;
     use task_executor::test_utils::TestRuntime;
     use tokio::sync::mpsc::UnboundedReceiver;
     use tokio::sync::mpsc::UnboundedSender;
-
-    use crate::test_util::tests::{create_2_store, create_file_location_cache};
-
-    use super::*;
 
     struct TestSyncRuntime {
         runtime: TestRuntime,
@@ -589,6 +597,7 @@ mod tests {
         chunk_count: usize,
         store: Arc<RwLock<LogManager>>,
         peer_store: Arc<RwLock<LogManager>>,
+        txs: Vec<Transaction>,
         init_data: Vec<u8>,
 
         init_peer_id: PeerId,
@@ -608,20 +617,23 @@ mod tests {
     impl TestSyncRuntime {
         fn new(chunk_counts: Vec<usize>, seq_size: usize) -> Self {
             let chunk_count = chunk_counts[0];
-            let (store, peer_store, _, data) = create_2_store(chunk_counts);
+            let (store, peer_store, txs, data) = create_2_store(chunk_counts);
             let init_data = data[0].clone();
             let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
             let (network_send, network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
             let (event_send, _) = broadcast::channel(16);
+
+            let tx_ids = txs.iter().take(seq_size).map(|tx| tx.id()).collect();
 
             Self {
                 runtime: TestRuntime::default(),
                 chunk_count,
                 store,
                 peer_store,
+                txs,
                 init_data,
                 init_peer_id,
-                file_location_cache: create_file_location_cache(init_peer_id, seq_size),
+                file_location_cache: create_file_location_cache(init_peer_id, tx_ids),
                 network_send,
                 network_recv,
                 event_send,
@@ -651,12 +663,12 @@ mod tests {
         let runtime = TestRuntime::default();
 
         let chunk_count = 1535;
-        let (_, store, _, _) = create_2_store(vec![chunk_count]);
+        let (_, store, txs, _) = create_2_store(vec![chunk_count]);
         let store = Store::new(store, runtime.task_executor.clone());
 
         let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
         let file_location_cache: Arc<FileLocationCache> =
-            create_file_location_cache(init_peer_id, 1);
+            create_file_location_cache(init_peer_id, vec![txs[0].id()]);
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
         let (_, sync_recv) = channel::Channel::unbounded();
@@ -682,12 +694,12 @@ mod tests {
         let runtime = TestRuntime::default();
 
         let chunk_count = 1535;
-        let (_, store, _, _) = create_2_store(vec![chunk_count]);
+        let (_, store, txs, _) = create_2_store(vec![chunk_count]);
         let store = Store::new(store, runtime.task_executor.clone());
 
         let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
         let file_location_cache: Arc<FileLocationCache> =
-            create_file_location_cache(init_peer_id, 1);
+            create_file_location_cache(init_peer_id, vec![txs[0].id()]);
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
         let (_, sync_recv) = channel::Channel::unbounded();
@@ -714,7 +726,7 @@ mod tests {
         let sync_send = runtime.spawn_sync_service(true);
 
         let request = GetChunksRequest {
-            tx_seq: 0,
+            tx_id: runtime.txs[0].id(),
             index_start: 0,
             index_end: runtime.chunk_count as u64,
         };
@@ -776,7 +788,7 @@ mod tests {
         let sync_send = runtime.spawn_sync_service(true);
 
         let request = GetChunksRequest {
-            tx_seq: 0,
+            tx_id: runtime.txs[0].id(),
             index_start: 0,
             index_end: 0_u64,
         };
@@ -826,7 +838,10 @@ mod tests {
         let sync_send = runtime.spawn_sync_service(true);
 
         let request = GetChunksRequest {
-            tx_seq: 1,
+            tx_id: TxID {
+                seq: 1,
+                hash: H256::random(),
+            },
             index_start: 0,
             index_end: runtime.chunk_count as u64,
         };
@@ -876,7 +891,7 @@ mod tests {
         let sync_send = runtime.spawn_sync_service(true);
 
         let request = GetChunksRequest {
-            tx_seq: 0,
+            tx_id: runtime.txs[0].id(),
             index_start: 0,
             index_end: runtime.chunk_count as u64 + 1,
         };
@@ -926,7 +941,7 @@ mod tests {
         let sync_send = runtime.spawn_sync_service(false);
 
         let request = GetChunksRequest {
-            tx_seq: 0,
+            tx_id: runtime.txs[0].id(),
             index_start: 0,
             index_end: runtime.chunk_count as u64,
         };
@@ -1000,7 +1015,7 @@ mod tests {
 
         let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
         let file_location_cache: Arc<FileLocationCache> =
-            create_file_location_cache(init_peer_id, 1);
+            create_file_location_cache(init_peer_id, vec![]);
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
         let (_event_send, event_recv) = broadcast::channel(16);
@@ -1278,7 +1293,9 @@ mod tests {
 
         sync_send
             .notify(SyncMessage::RpcError {
-                request_id: network::SyncId::SerialSync { tx_seq: 0 },
+                request_id: network::SyncId::SerialSync {
+                    tx_id: runtime.txs[0].id(),
+                },
                 peer_id: runtime.init_peer_id,
             })
             .unwrap();
@@ -1296,7 +1313,7 @@ mod tests {
         let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
         sync_send
             .notify(SyncMessage::AnnounceFileGossip {
-                tx_seq,
+                tx_id: runtime.txs[tx_seq as usize].id(),
                 peer_id: runtime.init_peer_id,
                 addr: address,
             })
@@ -1342,7 +1359,7 @@ mod tests {
         let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
         sync_send
             .notify(SyncMessage::AnnounceFileGossip {
-                tx_seq,
+                tx_id: runtime.txs[tx_seq as usize].id(),
                 peer_id: runtime.init_peer_id,
                 addr: address,
             })
@@ -1383,7 +1400,7 @@ mod tests {
         let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
         sync_send
             .notify(SyncMessage::AnnounceFileGossip {
-                tx_seq,
+                tx_id: runtime.txs[tx_seq as usize].id(),
                 peer_id: runtime.init_peer_id,
                 addr: address,
             })
@@ -1490,7 +1507,7 @@ mod tests {
 
                     let req = match request {
                         network::Request::GetChunks(req) => {
-                            assert_eq!(req.tx_seq, tx_seq);
+                            assert_eq!(req.tx_id.seq, tx_seq);
                             assert_eq!(req.index_start, index_start);
                             assert_eq!(req.index_end, index_end);
 
@@ -1510,7 +1527,7 @@ mod tests {
                         .read()
                         .await
                         .get_chunks_with_proof_by_tx_and_index_range(
-                            req.tx_seq,
+                            tx_seq,
                             req.index_start as usize,
                             req.index_end as usize,
                         )

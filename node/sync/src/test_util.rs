@@ -1,12 +1,11 @@
 #[cfg(test)]
 pub mod tests {
-    use std::{cmp, sync::Arc};
-
     use file_location_cache::FileLocationCache;
     use libp2p::{identity, Multiaddr, PeerId};
-    use network::types::AnnounceFile;
+    use network::types::{AnnounceFile, SignedAnnounceFile};
     use rand::random;
-    use shared_types::{timestamp_now, ChunkArray, Transaction, CHUNK_SIZE};
+    use shared_types::{timestamp_now, ChunkArray, Transaction, TxID, CHUNK_SIZE};
+    use std::{cmp, sync::Arc};
     use storage::{
         log_store::{
             log_manager::{
@@ -102,32 +101,27 @@ pub mod tests {
         (tx, data, start_offset + chunk_count as u64)
     }
 
-    pub fn create_file_location_cache(peer_id: PeerId, seq_size: usize) -> Arc<FileLocationCache> {
-        let file_location_cache: Arc<FileLocationCache> = Default::default();
-        generate_announce_file(peer_id, file_location_cache.clone(), seq_size);
+    pub fn create_file_location_cache(peer_id: PeerId, txs: Vec<TxID>) -> Arc<FileLocationCache> {
+        let cache = FileLocationCache::default();
 
-        file_location_cache
+        for tx_id in txs {
+            let announcement = create_test_announcement(tx_id, peer_id);
+            cache.insert(announcement);
+        }
+
+        Arc::new(cache)
     }
 
-    fn generate_announce_file(
-        peer_id: PeerId,
-        file_location_cache: Arc<FileLocationCache>,
-        seq_size: usize,
-    ) {
-        for i in 0..seq_size {
-            let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
-            let msg = AnnounceFile {
-                tx_seq: i as u64,
-                peer_id: peer_id.into(),
-                at: address.into(),
-                timestamp: timestamp_now(),
-            };
+    fn create_test_announcement(tx_id: TxID, peer_id: PeerId) -> SignedAnnounceFile {
+        let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
+        let msg = AnnounceFile {
+            tx_id,
+            peer_id: peer_id.into(),
+            at: address.into(),
+            timestamp: timestamp_now(),
+        };
 
-            let local_private_key = identity::Keypair::generate_secp256k1();
-            let signed_msg = msg
-                .into_signed(&local_private_key)
-                .expect("Sign msg failed");
-            file_location_cache.insert(signed_msg);
-        }
+        let local_private_key = identity::Keypair::generate_secp256k1();
+        msg.into_signed(&local_private_key).unwrap()
     }
 }

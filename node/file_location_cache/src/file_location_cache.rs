@@ -4,7 +4,7 @@ use network::PeerId;
 use parking_lot::Mutex;
 use priority_queue::PriorityQueue;
 use rand::seq::IteratorRandom;
-use shared_types::timestamp_now;
+use shared_types::{timestamp_now, TxID};
 use std::cmp::Reverse;
 use std::collections::HashMap;
 
@@ -130,12 +130,12 @@ struct FileCache {
     /// Total number of announcements cached for all files.
     total_announcements: usize,
 
-    /// All cached files that mapped from `tx_seq` to `AnnouncementCache`.
-    files: HashMap<u64, AnnouncementCache>,
+    /// All cached files that mapped from `tx_id` to `AnnouncementCache`.
+    files: HashMap<TxID, AnnouncementCache>,
 
     /// All files are prioritized by timestamp.
     /// The top element is the `AnnouncementCache` that has the oldest announcement.
-    priorities: PriorityQueue<u64, Reverse<u32>>,
+    priorities: PriorityQueue<TxID, Reverse<u32>>,
 }
 
 impl FileCache {
@@ -150,9 +150,9 @@ impl FileCache {
 
     /// Insert the specified `announcement` into cache.
     fn insert(&mut self, announcement: SignedAnnounceFile) {
-        let tx_seq = announcement.tx_seq;
+        let tx_id = announcement.tx_id;
 
-        let item = self.files.entry(tx_seq).or_insert_with(|| {
+        let item = self.files.entry(tx_id).or_insert_with(|| {
             AnnouncementCache::new(
                 self.config.max_entries_per_file,
                 self.config.entry_expiration_time_secs,
@@ -166,7 +166,7 @@ impl FileCache {
         item.insert(announcement);
 
         if let Some(priority) = item.peek_priority() {
-            self.priorities.push(tx_seq, priority);
+            self.priorities.push(tx_id, priority);
         }
 
         self.total_announcements += item.len();
@@ -177,28 +177,28 @@ impl FileCache {
 
     /// Removes the oldest file announcement.
     fn pop(&mut self) -> Option<SignedAnnounceFile> {
-        let (&tx_seq, _) = self.priorities.peek()?;
-        let item = self.files.get_mut(&tx_seq)?;
+        let (&tx_id, _) = self.priorities.peek()?;
+        let item = self.files.get_mut(&tx_id)?;
 
         let result = item.pop();
 
         if item.len() == 0 {
-            self.files.remove(&tx_seq);
-            self.priorities.remove(&tx_seq);
+            self.files.remove(&tx_id);
+            self.priorities.remove(&tx_id);
         }
 
         result
     }
 
-    /// Randomly pick a announcement of specified file by `tx_seq`.
-    fn random(&mut self, tx_seq: u64) -> Option<SignedAnnounceFile> {
-        let item = self.files.get_mut(&tx_seq)?;
+    /// Randomly pick a announcement of specified file by `tx_id`.
+    fn random(&mut self, tx_id: TxID) -> Option<SignedAnnounceFile> {
+        let item = self.files.get_mut(&tx_id)?;
         let (result, collected) = item.random();
-        self.update_after_gc(tx_seq, collected);
+        self.update_after_gc(tx_id, collected);
         result
     }
 
-    fn update_after_gc(&mut self, tx_seq: u64, collected: usize) {
+    fn update_after_gc(&mut self, tx_id: TxID, collected: usize) {
         if collected == 0 {
             return;
         }
@@ -207,27 +207,27 @@ impl FileCache {
             .checked_sub(collected)
             .expect("total announcements overflow");
 
-        let item = match self.files.get_mut(&tx_seq) {
+        let item = match self.files.get_mut(&tx_id) {
             Some(v) => v,
             None => return,
         };
 
         if item.len() == 0 {
             // remove entry if empty
-            self.files.remove(&tx_seq);
-            self.priorities.remove(&tx_seq);
+            self.files.remove(&tx_id);
+            self.priorities.remove(&tx_id);
         } else {
             // update priority if garbage collected
             let new_priority = item.peek_priority().expect("should peek if not empty");
-            self.priorities.change_priority(&tx_seq, new_priority);
+            self.priorities.change_priority(&tx_id, new_priority);
         }
     }
 
-    /// Returns all the announcements of specified file by `tx_seq`.
-    fn all(&mut self, tx_seq: u64) -> Option<Vec<SignedAnnounceFile>> {
-        let item = self.files.get_mut(&tx_seq)?;
+    /// Returns all the announcements of specified file by `tx_id`.
+    fn all(&mut self, tx_id: TxID) -> Option<Vec<SignedAnnounceFile>> {
+        let item = self.files.get_mut(&tx_id)?;
         let (result, collected) = item.all();
-        self.update_after_gc(tx_seq, collected);
+        self.update_after_gc(tx_id, collected);
         Some(result)
     }
 }
@@ -249,11 +249,11 @@ impl FileLocationCache {
         self.cache.lock().insert(announcement);
     }
 
-    pub fn get_one(&self, tx_seq: u64) -> Option<SignedAnnounceFile> {
-        self.cache.lock().random(tx_seq)
+    pub fn get_one(&self, tx_id: TxID) -> Option<SignedAnnounceFile> {
+        self.cache.lock().random(tx_id)
     }
 
-    pub fn get_all(&self, tx_seq: u64) -> Vec<SignedAnnounceFile> {
-        self.cache.lock().all(tx_seq).unwrap_or_default()
+    pub fn get_all(&self, tx_id: TxID) -> Vec<SignedAnnounceFile> {
+        self.cache.lock().all(tx_id).unwrap_or_default()
     }
 }

@@ -6,6 +6,7 @@ use libp2p::{
     gossipsub::{DataTransform, GossipsubMessage, RawGossipsubMessage},
     Multiaddr, PeerId,
 };
+use shared_types::TxID;
 use snap::raw::{decompress_len, Decoder, Encoder};
 use ssz::{Decode, Encode};
 use ssz_derive::{Decode, Encode};
@@ -115,13 +116,13 @@ impl ssz::Decode for WrappedPeerId {
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct FindFile {
-    pub tx_seq: u64,
+    pub tx_id: TxID,
     pub timestamp: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]
 pub struct AnnounceFile {
-    pub tx_seq: u64,
+    pub tx_id: TxID,
     pub peer_id: WrappedPeerId,
     pub at: WrappedMultiaddr,
     pub timestamp: u32,

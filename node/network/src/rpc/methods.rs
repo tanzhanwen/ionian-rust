@@ -9,7 +9,7 @@ use ssz_types::{
 use std::ops::Deref;
 use strum::IntoStaticStr;
 pub type Hash256 = ethereum_types::H256;
-use shared_types::ChunkArrayWithProof;
+use shared_types::{ChunkArrayWithProof, TxID};
 
 pub use ssz_types::{typenum, typenum::Unsigned, BitList, BitVector, FixedVector};
 
@@ -181,7 +181,7 @@ pub struct DataByHashRequest {
 /// Request a chunk array from a peer.
 #[derive(Encode, Decode, Clone, Debug, PartialEq, Eq)]
 pub struct GetChunksRequest {
-    pub tx_seq: u64,
+    pub tx_id: TxID,
     pub index_start: u64,
     pub index_end: u64,
 }

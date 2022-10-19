@@ -7,7 +7,7 @@ use network::{
     multiaddr::Protocol, rpc::GetChunksRequest, types::FindFile, Multiaddr, NetworkMessage,
     PeerAction, PeerId, PubsubMessage, SyncId as RequestId,
 };
-use shared_types::{timestamp_now, ChunkArrayWithProof, DataRoot, CHUNK_SIZE};
+use shared_types::{timestamp_now, ChunkArrayWithProof, TxID, CHUNK_SIZE};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -45,14 +45,13 @@ pub enum SyncState {
 }
 
 pub struct SerialSyncController {
-    /// The transaction sequence number.
+    // only used for log purpose
     tx_seq: u64,
 
-    since: Instant,
+    /// The unique transaction ID.
+    tx_id: TxID,
 
-    #[allow(unused)]
-    /// The transaction data root.
-    data_root: DataRoot,
+    since: Instant,
 
     /// The size of the file to be synced.
     num_chunks: u64,
@@ -81,17 +80,16 @@ pub struct SerialSyncController {
 
 impl SerialSyncController {
     pub fn new(
-        tx_seq: u64,
-        data_root: DataRoot,
+        tx_id: TxID,
         num_chunks: u64,
         ctx: Arc<SyncNetworkContext>,
         store: Store,
         file_location_cache: Arc<FileLocationCache>,
     ) -> Self {
         SerialSyncController {
-            tx_seq,
+            tx_seq: tx_id.seq,
+            tx_id,
             since: Instant::now(),
-            data_root,
             num_chunks,
             next_chunk: 0,
             failures: 0,
@@ -132,7 +130,7 @@ impl SerialSyncController {
         // try from cache
         let mut found_new_peer = false;
 
-        for announcement in self.file_location_cache.get_all(self.tx_seq) {
+        for announcement in self.file_location_cache.get_all(self.tx_id) {
             // make sure peer_id is part of the address
             let peer_id: PeerId = announcement.peer_id.clone().into();
             let mut addr: Multiaddr = announcement.at.clone().into();
@@ -143,7 +141,7 @@ impl SerialSyncController {
 
         if !found_new_peer {
             self.ctx.publish(PubsubMessage::FindFile(FindFile {
-                tx_seq: self.tx_seq,
+                tx_id: self.tx_id,
                 timestamp: timestamp_now(),
             }));
         }
@@ -190,12 +188,10 @@ impl SerialSyncController {
         let from_chunk = self.next_chunk;
         let to_chunk = std::cmp::min(from_chunk + MAX_CHUNKS_TO_REQUEST, self.num_chunks);
 
-        let request_id = network::RequestId::Sync(RequestId::SerialSync {
-            tx_seq: self.tx_seq,
-        });
+        let request_id = network::RequestId::Sync(RequestId::SerialSync { tx_id: self.tx_id });
 
         let request = network::Request::GetChunks(GetChunksRequest {
-            tx_seq: self.tx_seq,
+            tx_id: self.tx_id,
             index_start: from_chunk,
             index_end: to_chunk,
         });
@@ -374,8 +370,17 @@ impl SerialSyncController {
         self.failures = 0;
 
         // store in db
-        if let Err(e) = self.store.put_chunks(self.tx_seq, response.chunks).await {
-            let err = format!("Unexpected DB error while storing chunks: {:?}", e);
+        let maybe_err = match self
+            .store
+            .put_chunks_with_tx_hash(self.tx_id.seq, self.tx_id.hash, response.chunks)
+            .await
+        {
+            Ok(true) => None,
+            Ok(false) => Some("Transaction reverted while storing chunks".into()),
+            Err(e) => Some(format!("Unexpected DB error while storing chunks: {:?}", e)),
+        };
+
+        if let Some(err) = maybe_err {
             error!("{}", err);
             self.state = SyncState::Failed { reason: err };
             return;
@@ -390,12 +395,22 @@ impl SerialSyncController {
         }
 
         // finalize tx if all chunks downloaded
-        if let Err(e) = self.store.finalize_tx(self.tx_seq).await {
-            let err = format!("Unexpected error during finalize_tx: {:?}", e);
+        let maybe_err = match self
+            .store
+            .finalize_tx_with_hash(self.tx_id.seq, self.tx_id.hash)
+            .await
+        {
+            Ok(true) => None,
+            Ok(false) => Some("Transaction reverted during finalize_tx".into()),
+            Err(e) => Some(format!("Unexpected error during finalize_tx: {:?}", e)),
+        };
+
+        if let Some(err) = maybe_err {
             error!("{}", err);
             self.state = SyncState::Failed { reason: err };
             return;
         }
+
         self.state = SyncState::Completed;
     }
 
@@ -505,20 +520,17 @@ impl SerialSyncController {
 
 #[cfg(test)]
 mod tests {
-    use tokio::sync::RwLock;
-
+    use super::*;
+    use crate::test_util::tests::{create_2_store, create_file_location_cache};
     use libp2p::identity;
-    use network::types::SignedAnnounceFile;
-    use network::{types::AnnounceFile, ReportSource, Request};
+    use network::{ReportSource, Request};
     use storage::log_store::log_manager::LogConfig;
     use storage::log_store::log_manager::LogManager;
     use storage::log_store::LogStoreRead;
+    use storage::H256;
     use task_executor::{test_utils::TestRuntime, TaskExecutor};
     use tokio::sync::mpsc::{self, UnboundedReceiver};
-
-    use crate::test_util::tests::create_2_store;
-
-    use super::*;
+    use tokio::sync::RwLock;
 
     #[test]
     fn test_status() {
@@ -560,7 +572,7 @@ mod tests {
 
                     match &messages[0] {
                         PubsubMessage::FindFile(data) => {
-                            assert_eq!(data.tx_seq, 0);
+                            assert_eq!(data.tx_id, controller.tx_id);
                         }
                         _ => {
                             panic!("Unexpected message type");
@@ -581,6 +593,10 @@ mod tests {
         let (mut controller, mut network_recv) = create_default_controller(task_executor, None);
 
         controller.tx_seq = 1;
+        controller.tx_id = TxID {
+            seq: 1,
+            hash: H256::random(),
+        };
         controller.try_find_peers();
 
         assert_eq!(controller.peers.count(&[PeerState::Found]), 0);
@@ -592,7 +608,7 @@ mod tests {
 
                     match &messages[0] {
                         PubsubMessage::FindFile(data) => {
-                            assert_eq!(data.tx_seq, 1);
+                            assert_eq!(data.tx_id, controller.tx_id);
                         }
                         _ => {
                             panic!("Unexpected message type");
@@ -674,7 +690,7 @@ mod tests {
                     assert_eq!(
                         request,
                         Request::GetChunks(GetChunksRequest {
-                            tx_seq: 0,
+                            tx_id: controller.tx_id,
                             index_start: 0,
                             index_end: 123,
                         })
@@ -682,8 +698,8 @@ mod tests {
 
                     match request_id {
                         network::RequestId::Sync(sync_id) => match sync_id {
-                            network::SyncId::SerialSync { tx_seq } => {
-                                assert_eq!(tx_seq, 0);
+                            network::SyncId::SerialSync { tx_id } => {
+                                assert_eq!(tx_id, controller.tx_id);
                             }
                         },
                         _ => {
@@ -953,8 +969,7 @@ mod tests {
             task_executor,
             Some(peer_id),
             store,
-            txs[0].data_merkle_root,
-            tx_seq,
+            txs[0].id(),
             chunk_count,
         );
 
@@ -988,8 +1003,7 @@ mod tests {
             task_executor,
             Some(peer_id),
             store,
-            txs[0].data_merkle_root,
-            tx_seq,
+            txs[0].id(),
             chunk_count,
         );
 
@@ -1056,8 +1070,7 @@ mod tests {
             task_executor,
             Some(peer_id),
             store,
-            txs[0].data_merkle_root,
-            tx_seq,
+            txs[0].id(),
             chunk_count,
         );
 
@@ -1123,8 +1136,7 @@ mod tests {
             task_executor,
             Some(peer_id),
             store,
-            txs[0].data_merkle_root,
-            tx_seq,
+            txs[0].id(),
             chunk_count,
         );
 
@@ -1143,6 +1155,10 @@ mod tests {
         };
 
         controller.tx_seq = 1;
+        controller.tx_id = TxID {
+            seq: 1,
+            hash: H256::random(),
+        };
 
         controller.on_response(peer_id, chunks).await;
         assert_eq!(*controller.get_status(), SyncState::Idle);
@@ -1192,8 +1208,7 @@ mod tests {
             task_executor,
             Some(peer_id),
             peer_store.clone(),
-            txs[0].data_merkle_root,
-            tx_seq,
+            txs[0].id(),
             chunk_count,
         );
 
@@ -1238,8 +1253,7 @@ mod tests {
             task_executor,
             Some(peer_id),
             store,
-            txs[0].data_merkle_root,
-            tx_seq,
+            txs[0].id(),
             chunk_count,
         );
 
@@ -1286,8 +1300,7 @@ mod tests {
             task_executor,
             Some(peer_id),
             store,
-            txs[0].data_merkle_root,
-            tx_seq,
+            txs[0].id(),
             chunk_count,
         );
 
@@ -1314,7 +1327,6 @@ mod tests {
     async fn test_handle_response_failure() {
         let init_peer_id = identity::Keypair::generate_ed25519().public().to_peer_id();
 
-        let tx_seq = 0;
         let chunk_count = 123;
         let (store, _, txs, _) = create_2_store(vec![chunk_count]);
 
@@ -1324,8 +1336,7 @@ mod tests {
             task_executor,
             Some(init_peer_id),
             store,
-            txs[0].data_merkle_root,
-            tx_seq,
+            txs[0].id(),
             chunk_count,
         );
 
@@ -1402,60 +1413,27 @@ mod tests {
         }
     }
 
-    fn create_test_announcement(tx_seq: u64, peer_id: PeerId) -> SignedAnnounceFile {
-        let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
-        let msg = AnnounceFile {
-            tx_seq,
-            peer_id: peer_id.into(),
-            at: address.into(),
-            timestamp: timestamp_now(),
-        };
-
-        let local_private_key = identity::Keypair::generate_secp256k1();
-        msg.into_signed(&local_private_key)
-            .expect("Sign msg failed")
-    }
-
     fn create_default_controller(
         task_executor: TaskExecutor,
         peer_id: Option<PeerId>,
     ) -> (SerialSyncController, UnboundedReceiver<NetworkMessage>) {
-        let tx_seq = 0;
+        let tx_id = TxID {
+            seq: 0,
+            hash: H256::random(),
+        };
         let num_chunks = 123;
-        let data_merkle_root = Default::default();
-
-        let (network_send, network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
-        let ctx = Arc::new(SyncNetworkContext::new(network_send));
 
         let config = LogConfig::default();
         let store = Arc::new(RwLock::new(LogManager::memorydb(config).unwrap()));
 
-        let peer_id = match peer_id {
-            Some(v) => v,
-            _ => identity::Keypair::generate_ed25519().public().to_peer_id(),
-        };
-
-        let file_location_cache: Arc<FileLocationCache> = Default::default();
-        file_location_cache.insert(create_test_announcement(tx_seq, peer_id));
-
-        let controller = SerialSyncController::new(
-            tx_seq,
-            data_merkle_root,
-            num_chunks,
-            ctx,
-            Store::new(store, task_executor),
-            file_location_cache,
-        );
-
-        (controller, network_recv)
+        create_controller(task_executor, peer_id, store, tx_id, num_chunks)
     }
 
     fn create_controller(
         task_executor: TaskExecutor,
         peer_id: Option<PeerId>,
         store: Arc<RwLock<LogManager>>,
-        data_merkle_root: DataRoot,
-        tx_seq: u64,
+        tx_id: TxID,
         num_chunks: usize,
     ) -> (SerialSyncController, UnboundedReceiver<NetworkMessage>) {
         let (network_send, network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
@@ -1466,12 +1444,10 @@ mod tests {
             _ => identity::Keypair::generate_ed25519().public().to_peer_id(),
         };
 
-        let file_location_cache: Arc<FileLocationCache> = Default::default();
-        file_location_cache.insert(create_test_announcement(tx_seq, peer_id));
+        let file_location_cache = create_file_location_cache(peer_id, vec![tx_id]);
 
         let controller = SerialSyncController::new(
-            tx_seq,
-            data_merkle_root,
+            tx_id,
             num_chunks as u64,
             ctx,
             Store::new(store, task_executor),

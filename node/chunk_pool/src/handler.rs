@@ -71,9 +71,7 @@ impl ChunkPoolHandler {
         // always remove file from pool after transaction finalized
         self.mem_pool.remove_file(&id.root).await;
 
-        let msg = NetworkMessage::AnnounceLocalFile {
-            tx_seq: id.tx_id.seq,
-        };
+        let msg = NetworkMessage::AnnounceLocalFile { tx_id: id.tx_id };
         if let Err(e) = self.sender.send(msg) {
             error!(
                 "Failed to send NetworkMessage::AnnounceLocalFile message, tx_seq={}, err={}",
