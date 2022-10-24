@@ -6,6 +6,7 @@ use shared_types::{
 
 use crate::error::Result;
 
+pub mod config;
 mod flow_store;
 mod load_chunk;
 pub mod log_manager;
@@ -129,20 +130,16 @@ pub trait LogStoreChunkWrite {
     fn remove_all_chunks(&self, tx_seq: u64) -> Result<()>;
 }
 
-pub trait Configurable {
-    fn get_config(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
-    fn set_config(&self, key: &[u8], value: &[u8]) -> Result<()>;
-}
-
 pub trait LogChunkStore: LogStoreChunkRead + LogStoreChunkWrite + Send + Sync + 'static {}
 impl<T: LogStoreChunkRead + LogStoreChunkWrite + Send + Sync + 'static> LogChunkStore for T {}
 
 pub trait Store:
-    LogStoreRead + LogStoreWrite + LogStoreInner + Configurable + Send + Sync + 'static
+    LogStoreRead + LogStoreWrite + LogStoreInner + config::Configurable + Send + Sync + 'static
 {
 }
-impl<T: LogStoreRead + LogStoreWrite + LogStoreInner + Configurable + Send + Sync + 'static> Store
-    for T
+impl<
+        T: LogStoreRead + LogStoreWrite + LogStoreInner + config::Configurable + Send + Sync + 'static,
+    > Store for T
 {
 }
 

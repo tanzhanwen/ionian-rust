@@ -3,7 +3,7 @@ mod serial;
 
 use serde::{Deserialize, Serialize};
 
-pub use serial::{SerialSyncController, SyncState};
+pub use serial::{FailureReason, SerialSyncController, SyncState};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

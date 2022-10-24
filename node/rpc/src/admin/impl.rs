@@ -57,7 +57,9 @@ impl RpcServer for RpcServerImpl {
             .await?;
 
         match response {
-            SyncResponse::SyncStatus { status } => Ok(status),
+            SyncResponse::SyncStatus { status } => Ok(status
+                .map(|x| format!("{:?}", x))
+                .unwrap_or_else(|| "unknown".into())),
             _ => Err(error::internal_error("unexpected response type")),
         }
     }

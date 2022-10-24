@@ -20,7 +20,13 @@ const PEER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5);
 const WAIT_OUTGOING_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FailureReason {
+    DBError(String),
+    TxReverted(TxID),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SyncState {
     Idle,
     FindingPeers {
@@ -40,7 +46,7 @@ pub enum SyncState {
     },
     Completed,
     Failed {
-        reason: String,
+        reason: FailureReason,
     },
 }
 
@@ -146,9 +152,11 @@ impl SerialSyncController {
             }));
         }
 
-        self.state = SyncState::FindingPeers {
-            since: Instant::now(),
-        };
+        if !matches!(self.state, SyncState::FindingPeers { .. }) {
+            self.state = SyncState::FindingPeers {
+                since: Instant::now(),
+            };
+        }
     }
 
     fn try_connect(&mut self) {
@@ -370,23 +378,27 @@ impl SerialSyncController {
         self.failures = 0;
 
         // store in db
-        let maybe_err = match self
+        match self
             .store
             .put_chunks_with_tx_hash(self.tx_id.seq, self.tx_id.hash, response.chunks)
             .await
         {
-            Ok(true) => None,
-            Ok(false) => Some("Transaction reverted while storing chunks".into()),
-            Err(e) => Some(format!("Unexpected DB error while storing chunks: {:?}", e)),
-        };
-
-        if let Some(err) = maybe_err {
-            error!("{}", err);
-            self.state = SyncState::Failed { reason: err };
-            return;
+            Ok(true) => self.next_chunk = to_chunk,
+            Ok(false) => {
+                warn!(?self.tx_id, "Transaction reverted while storing chunks");
+                self.state = SyncState::Failed {
+                    reason: FailureReason::TxReverted(self.tx_id),
+                };
+                return;
+            }
+            Err(err) => {
+                error!(%err, "Unexpected DB error while storing chunks");
+                self.state = SyncState::Failed {
+                    reason: FailureReason::DBError(err.to_string()),
+                };
+                return;
+            }
         }
-
-        self.next_chunk = to_chunk;
 
         // prepare to download next
         if self.next_chunk < self.num_chunks {
@@ -395,23 +407,25 @@ impl SerialSyncController {
         }
 
         // finalize tx if all chunks downloaded
-        let maybe_err = match self
+        match self
             .store
             .finalize_tx_with_hash(self.tx_id.seq, self.tx_id.hash)
             .await
         {
-            Ok(true) => None,
-            Ok(false) => Some("Transaction reverted during finalize_tx".into()),
-            Err(e) => Some(format!("Unexpected error during finalize_tx: {:?}", e)),
-        };
-
-        if let Some(err) = maybe_err {
-            error!("{}", err);
-            self.state = SyncState::Failed { reason: err };
-            return;
+            Ok(true) => self.state = SyncState::Completed,
+            Ok(false) => {
+                warn!(?self.tx_id, "Transaction reverted during finalize_tx");
+                self.state = SyncState::Failed {
+                    reason: FailureReason::TxReverted(self.tx_id),
+                };
+            }
+            Err(err) => {
+                error!(%err, "Unexpected error during finalize_tx");
+                self.state = SyncState::Failed {
+                    reason: FailureReason::DBError(err.to_string()),
+                };
+            }
         }
-
-        self.state = SyncState::Completed;
     }
 
     pub fn on_request_failed(&mut self, peer_id: PeerId) {
@@ -462,10 +476,15 @@ impl SerialSyncController {
                 SyncState::FindingPeers { since } => {
                     if self.peers.count(&[Found, Connecting, Connected]) > 0 {
                         self.state = SyncState::FoundPeers;
-                    } else if since.elapsed() >= PEER_REQUEST_TIMEOUT {
-                        warn!(%self.tx_seq, "Peer request timeout");
-                        self.state = SyncState::Idle;
                     } else {
+                        // storage node may not have the specific file when `FindFile`
+                        // gossip message received. In this case, just broadcast the
+                        // `FindFile` message again.
+                        if since.elapsed() >= PEER_REQUEST_TIMEOUT {
+                            debug!(%self.tx_seq, "Peer request timeout");
+                            self.try_find_peers();
+                        }
+
                         return;
                     }
                 }
@@ -1229,7 +1248,7 @@ mod tests {
         controller.on_response(peer_id, chunks).await;
         match controller.get_status() {
             SyncState::Failed { reason } => {
-                assert!(reason.starts_with("Unexpected DB error while storing chunks: "));
+                assert!(matches!(reason, FailureReason::DBError(..)));
             }
             _ => {
                 panic!("Not expected SyncState");
@@ -1276,7 +1295,7 @@ mod tests {
         controller.on_response(peer_id, chunks).await;
         match controller.get_status() {
             SyncState::Failed { reason } => {
-                assert!(reason.starts_with("Unexpected error during finalize_tx: "));
+                assert!(matches!(reason, FailureReason::DBError(..)));
             }
             _ => {
                 panic!("Not expected SyncState");

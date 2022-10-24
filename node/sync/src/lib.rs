@@ -1,9 +1,9 @@
 #[macro_use]
 extern crate tracing;
 
+mod auto_sync;
 mod context;
 mod controllers;
-mod manager;
 mod service;
 mod test_util;
 

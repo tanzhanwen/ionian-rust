@@ -138,7 +138,7 @@ impl ClientBuilder {
         Ok(self)
     }
 
-    pub fn with_sync(mut self) -> Result<Self, String> {
+    pub async fn with_sync(mut self) -> Result<Self, String> {
         let executor = require!("sync", self, runtime_context).clone().executor;
         let store = require!("sync", self, store).clone();
         let file_location_cache = require!("sync", self, file_location_cache).clone();
@@ -151,7 +151,9 @@ impl ClientBuilder {
             store,
             file_location_cache,
             event_recv,
-        );
+        )
+        .await
+        .map_err(|e| format!("Failed to start sync service: {:?}", e))?;
         self.sync = Some(SyncComponents { send });
 
         Ok(self)

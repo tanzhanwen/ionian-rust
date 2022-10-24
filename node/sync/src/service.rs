@@ -1,6 +1,6 @@
+use crate::auto_sync::AutoSyncManager;
 use crate::context::SyncNetworkContext;
-use crate::controllers::{FileSyncInfo, SerialSyncController, SyncState};
-use crate::manager::SyncManager;
+use crate::controllers::{FailureReason, FileSyncInfo, SerialSyncController, SyncState};
 use crate::Config;
 use anyhow::{bail, Result};
 use file_location_cache::FileLocationCache;
@@ -67,7 +67,7 @@ pub enum SyncRequest {
 
 #[derive(Debug)]
 pub enum SyncResponse {
-    SyncStatus { status: String },
+    SyncStatus { status: Option<SyncState> },
     SyncFile { err: String },
     FileSyncInfo { result: HashMap<u64, FileSyncInfo> },
     TerminateFileSync { count: usize },
@@ -93,16 +93,18 @@ pub struct SyncService {
 
     /// Heartbeat interval for executing periodic tasks.
     heartbeat: tokio::time::Interval,
+
+    manager: AutoSyncManager,
 }
 
 impl SyncService {
-    pub fn spawn(
+    pub async fn spawn(
         executor: task_executor::TaskExecutor,
         network_send: mpsc::UnboundedSender<NetworkMessage>,
         store: Arc<RwLock<dyn LogStore>>,
         file_location_cache: Arc<FileLocationCache>,
         event_recv: broadcast::Receiver<LogSyncEvent>,
-    ) -> SyncSender {
+    ) -> Result<SyncSender> {
         Self::spawn_with_config(
             Config::default(),
             executor,
@@ -111,16 +113,17 @@ impl SyncService {
             file_location_cache,
             event_recv,
         )
+        .await
     }
 
-    pub fn spawn_with_config(
+    pub async fn spawn_with_config(
         config: Config,
         executor: task_executor::TaskExecutor,
         network_send: mpsc::UnboundedSender<NetworkMessage>,
         store: Arc<RwLock<dyn LogStore>>,
         file_location_cache: Arc<FileLocationCache>,
         event_recv: broadcast::Receiver<LogSyncEvent>,
-    ) -> SyncSender {
+    ) -> Result<SyncSender> {
         let (sync_send, sync_recv) = channel::Channel::unbounded();
 
         let heartbeat =
@@ -128,10 +131,9 @@ impl SyncService {
 
         let store = Store::new(store, executor.clone());
 
+        let manager = AutoSyncManager::new(store.clone(), sync_send.clone()).await?;
         if !config.auto_sync_disabled {
-            let manager = SyncManager::new(store.clone(), sync_send.clone());
-            manager.monitor_reorg(&executor, event_recv, "sync_manager_reorg_monitor");
-            executor.spawn(manager.start(), "sync_manager_syncer");
+            manager.spwn(&executor, event_recv);
         }
 
         let mut sync = SyncService {
@@ -142,12 +144,13 @@ impl SyncService {
             file_location_cache,
             controllers: Default::default(),
             heartbeat,
+            manager,
         };
 
         debug!("Starting sync service");
         executor.spawn(async move { Box::pin(sync.main()).await }, "sync");
 
-        sync_send
+        Ok(sync_send)
     }
 
     async fn main(&mut self) {
@@ -223,10 +226,10 @@ impl SyncService {
     ) {
         match req {
             SyncRequest::SyncStatus { tx_seq } => {
-                let status = match self.controllers.get_mut(&tx_seq) {
-                    Some(controller) => format!("{:?}", controller.get_status()),
-                    None => "unknown".to_string(),
-                };
+                let status = self
+                    .controllers
+                    .get(&tx_seq)
+                    .map(|c| c.get_status().clone());
 
                 let _ = sender.send(SyncResponse::SyncStatus { status });
             }
@@ -460,6 +463,22 @@ impl SyncService {
     ) -> Result<()> {
         info!(%tx_seq, "Start to sync file");
 
+        // remove failed entry if caused by tx reverted, so as to re-sync
+        // file with latest tx_id.
+        let mut tx_reverted = false;
+        if let Some(controller) = self.controllers.get(&tx_seq) {
+            if let SyncState::Failed {
+                reason: FailureReason::TxReverted(..),
+            } = controller.get_status()
+            {
+                tx_reverted = true;
+            }
+        }
+
+        if tx_reverted {
+            self.controllers.remove(&tx_seq);
+        }
+
         let controller = match self.controllers.entry(tx_seq) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
@@ -508,6 +527,8 @@ impl SyncService {
     async fn on_announce_file_gossip(&mut self, tx_id: TxID, peer_id: PeerId, addr: Multiaddr) {
         let tx_seq = tx_id.seq;
         info!(%tx_seq, %peer_id, %addr, "Received AnnounceFile gossip");
+
+        self.manager.update_on_announcement(tx_seq).await;
 
         // File already in sync
         if let Some(controller) = self.controllers.get_mut(&tx_seq) {
@@ -640,7 +661,7 @@ mod tests {
             }
         }
 
-        fn spawn_sync_service(&self, with_peer_store: bool) -> SyncSender {
+        async fn spawn_sync_service(&self, with_peer_store: bool) -> SyncSender {
             let store = if with_peer_store {
                 self.peer_store.clone()
             } else {
@@ -655,6 +676,8 @@ mod tests {
                 self.file_location_cache.clone(),
                 self.event_send.subscribe(),
             )
+            .await
+            .unwrap()
         }
     }
 
@@ -671,9 +694,12 @@ mod tests {
             create_file_location_cache(init_peer_id, vec![txs[0].id()]);
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
-        let (_, sync_recv) = channel::Channel::unbounded();
+        let (sync_send, sync_recv) = channel::Channel::unbounded();
 
         let heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SEC));
+        let manager = AutoSyncManager::new(store.clone(), sync_send)
+            .await
+            .unwrap();
 
         let mut sync = SyncService {
             config: Config::default().disable_auto_sync(),
@@ -683,6 +709,7 @@ mod tests {
             file_location_cache,
             controllers: Default::default(),
             heartbeat,
+            manager,
         };
 
         sync.on_peer_connected(init_peer_id);
@@ -702,9 +729,12 @@ mod tests {
             create_file_location_cache(init_peer_id, vec![txs[0].id()]);
 
         let (network_send, mut network_recv) = mpsc::unbounded_channel::<NetworkMessage>();
-        let (_, sync_recv) = channel::Channel::unbounded();
+        let (sync_send, sync_recv) = channel::Channel::unbounded();
 
         let heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SEC));
+        let manager = AutoSyncManager::new(store.clone(), sync_send)
+            .await
+            .unwrap();
 
         let mut sync = SyncService {
             config: Config::default().disable_auto_sync(),
@@ -714,6 +744,7 @@ mod tests {
             file_location_cache,
             controllers: Default::default(),
             heartbeat,
+            manager,
         };
 
         sync.on_peer_disconnected(init_peer_id);
@@ -723,7 +754,7 @@ mod tests {
     #[tokio::test]
     async fn test_request_chunks() {
         let mut runtime = TestSyncRuntime::default();
-        let sync_send = runtime.spawn_sync_service(true);
+        let sync_send = runtime.spawn_sync_service(true).await;
 
         let request = GetChunksRequest {
             tx_id: runtime.txs[0].id(),
@@ -785,7 +816,7 @@ mod tests {
     #[tokio::test]
     async fn test_request_chunks_invalid_indices() {
         let mut runtime = TestSyncRuntime::default();
-        let sync_send = runtime.spawn_sync_service(true);
+        let sync_send = runtime.spawn_sync_service(true).await;
 
         let request = GetChunksRequest {
             tx_id: runtime.txs[0].id(),
@@ -835,7 +866,7 @@ mod tests {
     #[tokio::test]
     async fn test_request_chunks_tx_not_exist() {
         let mut runtime = TestSyncRuntime::default();
-        let sync_send = runtime.spawn_sync_service(true);
+        let sync_send = runtime.spawn_sync_service(true).await;
 
         let request = GetChunksRequest {
             tx_id: TxID {
@@ -888,7 +919,7 @@ mod tests {
     #[tokio::test]
     async fn test_request_chunks_index_out_bound() {
         let mut runtime = TestSyncRuntime::default();
-        let sync_send = runtime.spawn_sync_service(true);
+        let sync_send = runtime.spawn_sync_service(true).await;
 
         let request = GetChunksRequest {
             tx_id: runtime.txs[0].id(),
@@ -938,7 +969,7 @@ mod tests {
     #[tokio::test]
     async fn test_request_chunks_tx_not_finalized() {
         let mut runtime = TestSyncRuntime::default();
-        let sync_send = runtime.spawn_sync_service(false);
+        let sync_send = runtime.spawn_sync_service(false).await;
 
         let request = GetChunksRequest {
             tx_id: runtime.txs[0].id(),
@@ -1026,7 +1057,9 @@ mod tests {
             store.clone(),
             file_location_cache,
             event_recv,
-        );
+        )
+        .await
+        .unwrap();
 
         let tx_seq = 0u64;
         sync_send
@@ -1045,7 +1078,7 @@ mod tests {
     #[tokio::test]
     async fn test_sync_file_exist_in_store() {
         let mut runtime = TestSyncRuntime::default();
-        let sync_send = runtime.spawn_sync_service(true);
+        let sync_send = runtime.spawn_sync_service(true).await;
 
         let tx_seq = 0u64;
         sync_send
@@ -1080,7 +1113,7 @@ mod tests {
     #[tokio::test]
     async fn test_sync_file_success() {
         let mut runtime = TestSyncRuntime::default();
-        let sync_send = runtime.spawn_sync_service(false);
+        let sync_send = runtime.spawn_sync_service(false).await;
 
         let tx_seq = 0u64;
         sync_send
@@ -1105,7 +1138,7 @@ mod tests {
                 .request(SyncRequest::SyncStatus { tx_seq })
                 .await
                 .unwrap(),
-            SyncResponse::SyncStatus { status } if status == "Completed".to_string()
+            SyncResponse::SyncStatus { status } if status == Some(SyncState::Completed)
         ));
 
         receive_chunk_request(
@@ -1127,7 +1160,7 @@ mod tests {
             .request(SyncRequest::SyncStatus { tx_seq })
             .await
             .unwrap(),
-            SyncResponse::SyncStatus {status} if status == "unknown".to_string()
+            SyncResponse::SyncStatus {status} if status.is_none()
         ) {
             if Instant::now() >= deadline {
                 panic!("Failed to wait heartbeat");
@@ -1154,7 +1187,7 @@ mod tests {
     #[tokio::test]
     async fn test_sync_file_exceed_max_chunks_to_request() {
         let mut runtime = TestSyncRuntime::new(vec![2049], 1);
-        let sync_send = runtime.spawn_sync_service(false);
+        let sync_send = runtime.spawn_sync_service(false).await;
 
         let tx_seq = 0u64;
         sync_send
@@ -1190,7 +1223,7 @@ mod tests {
                 .request(SyncRequest::SyncStatus { tx_seq })
                 .await
                 .unwrap(),
-            SyncResponse::SyncStatus { status } if status == "Completed".to_string()
+            SyncResponse::SyncStatus { status } if status == Some(SyncState::Completed)
         ));
 
         // next batch
@@ -1211,7 +1244,7 @@ mod tests {
     #[tokio::test]
     async fn test_sync_file_multi_files() {
         let mut runtime = TestSyncRuntime::new(vec![1535, 1535, 1535], 3);
-        let sync_send = runtime.spawn_sync_service(false);
+        let sync_send = runtime.spawn_sync_service(false).await;
 
         // second file
         let tx_seq = 1u64;
@@ -1289,7 +1322,7 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_error() {
         let mut runtime = TestSyncRuntime::default();
-        let sync_send = runtime.spawn_sync_service(true);
+        let sync_send = runtime.spawn_sync_service(true).await;
 
         sync_send
             .notify(SyncMessage::RpcError {
@@ -1307,7 +1340,7 @@ mod tests {
     #[tokio::test]
     async fn test_announce_file() {
         let mut runtime = TestSyncRuntime::new(vec![1535], 0);
-        let sync_send = runtime.spawn_sync_service(false);
+        let sync_send = runtime.spawn_sync_service(false).await;
 
         let tx_seq = 0u64;
         let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
@@ -1348,7 +1381,7 @@ mod tests {
     #[tokio::test]
     async fn test_announce_file_in_sync() {
         let mut runtime = TestSyncRuntime::default();
-        let sync_send = runtime.spawn_sync_service(false);
+        let sync_send = runtime.spawn_sync_service(false).await;
 
         let tx_seq = 0u64;
         sync_send
@@ -1394,7 +1427,7 @@ mod tests {
     #[tokio::test]
     async fn test_announce_file_already_in_store() {
         let mut runtime = TestSyncRuntime::default();
-        let sync_send = runtime.spawn_sync_service(true);
+        let sync_send = runtime.spawn_sync_service(true).await;
 
         let tx_seq = 0u64;
         let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
@@ -1413,14 +1446,14 @@ mod tests {
     #[tokio::test]
     async fn test_sync_status_unknown() {
         let runtime = TestSyncRuntime::default();
-        let sync_send = runtime.spawn_sync_service(false);
+        let sync_send = runtime.spawn_sync_service(false).await;
 
         assert!(matches!(
             sync_send
                 .request(SyncRequest::SyncStatus { tx_seq: 0 })
                 .await
                 .unwrap(),
-            SyncResponse::SyncStatus { status } if status == "unknown".to_string()
+            SyncResponse::SyncStatus { status } if status.is_none()
         ));
     }
 
@@ -1446,7 +1479,7 @@ mod tests {
 
     async fn test_sync_file(chunk_count: usize) {
         let mut runtime = TestSyncRuntime::new(vec![chunk_count], 1);
-        let sync_send = runtime.spawn_sync_service(false);
+        let sync_send = runtime.spawn_sync_service(false).await;
 
         let tx_seq = 0u64;
         sync_send
@@ -1471,7 +1504,7 @@ mod tests {
                 .request(SyncRequest::SyncStatus { tx_seq })
                 .await
                 .unwrap(),
-            SyncResponse::SyncStatus { status } if status == "Completed".to_string()));
+            SyncResponse::SyncStatus { status } if status == Some(SyncState::Completed) ));
 
         receive_chunk_request(
             &mut runtime.network_recv,
