@@ -11,11 +11,36 @@ pub mod tests {
             log_manager::{
                 sub_merkle_tree, tx_subtree_root_list_padded, LogConfig, PORA_CHUNK_SIZE,
             },
-            LogStoreChunkWrite, LogStoreWrite,
+            LogStoreChunkWrite, LogStoreWrite, Store as LogStore,
         },
         LogManager,
     };
+    use storage_async::Store;
+    use task_executor::test_utils::TestRuntime;
     use tokio::sync::RwLock;
+
+    pub struct TestStoreRuntime {
+        pub runtime: TestRuntime,
+        pub store: Store,
+    }
+
+    impl Default for TestStoreRuntime {
+        fn default() -> Self {
+            let runtime = TestRuntime::default();
+            let store = Arc::new(RwLock::new(Self::new_store()));
+            let executor = runtime.task_executor.clone();
+            Self {
+                runtime,
+                store: Store::new(store, executor),
+            }
+        }
+    }
+
+    impl TestStoreRuntime {
+        pub fn new_store() -> impl LogStore {
+            LogManager::memorydb(LogConfig::default()).unwrap()
+        }
+    }
 
     pub fn create_2_store(
         chunk_count: Vec<usize>,

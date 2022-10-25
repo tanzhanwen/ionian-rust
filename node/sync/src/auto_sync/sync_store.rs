@@ -139,3 +139,130 @@ impl SyncStore {
         self.pending_txs.remove(store.deref(), None, tx_seq)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::test_util::tests::TestStoreRuntime;
+
+    use super::SyncStore;
+
+    #[tokio::test]
+    async fn test_tx_seq_range() {
+        let runtime = TestStoreRuntime::default();
+        let store = SyncStore::new(runtime.store.clone());
+
+        // check values by default
+        assert_eq!(store.get_tx_seq_range().await.unwrap(), (0, 0));
+
+        // update values
+        store.set_next_tx_seq(4).await.unwrap();
+        store.set_max_tx_seq(12).await.unwrap();
+
+        // check values again
+        assert_eq!(store.get_tx_seq_range().await.unwrap(), (4, 12));
+    }
+
+    #[tokio::test]
+    async fn test_add_pending_tx() {
+        let runtime = TestStoreRuntime::default();
+        let store = SyncStore::new(runtime.store.clone());
+
+        // add pending tx 3
+        assert_eq!(store.add_pending_tx(3).await.unwrap(), true);
+
+        // cannot add pending tx 3 again
+        assert_eq!(store.add_pending_tx(3).await.unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn test_upgrade_tx() {
+        let runtime = TestStoreRuntime::default();
+        let store = SyncStore::new(runtime.store.clone());
+
+        // cannot upgrade by default
+        assert_eq!(store.upgrade_tx_to_ready(3).await.unwrap(), false);
+
+        // add pending tx 3
+        assert_eq!(store.add_pending_tx(3).await.unwrap(), true);
+
+        // can upgrade to ready
+        assert_eq!(store.upgrade_tx_to_ready(3).await.unwrap(), true);
+
+        // cannot add pending tx 3 again event upgraded to ready
+        assert_eq!(store.add_pending_tx(3).await.unwrap(), false);
+
+        // cannot upgrade again
+        assert_eq!(store.upgrade_tx_to_ready(3).await.unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn test_downgrade_tx() {
+        let runtime = TestStoreRuntime::default();
+        let store = SyncStore::new(runtime.store.clone());
+
+        // cannot downgrade by default
+        assert_eq!(store.downgrade_tx_to_pending(3).await.unwrap(), false);
+
+        // add pending tx 3
+        assert_eq!(store.add_pending_tx(3).await.unwrap(), true);
+
+        // cannot downgrade for non-ready tx
+        assert_eq!(store.downgrade_tx_to_pending(3).await.unwrap(), false);
+
+        // upgrade tx 3 to ready
+        assert_eq!(store.upgrade_tx_to_ready(3).await.unwrap(), true);
+
+        // can downgrade now
+        assert_eq!(store.downgrade_tx_to_pending(3).await.unwrap(), true);
+
+        // cannot downgrade now
+        assert_eq!(store.downgrade_tx_to_pending(3).await.unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn test_random_tx() {
+        let runtime = TestStoreRuntime::default();
+        let store = SyncStore::new(runtime.store.clone());
+
+        // no tx by default
+        assert_eq!(store.random_tx().await.unwrap(), None);
+
+        // add pending txs 1, 2, 3
+        assert_eq!(store.add_pending_tx(1).await.unwrap(), true);
+        assert_eq!(store.add_pending_tx(2).await.unwrap(), true);
+        assert_eq!(store.add_pending_tx(3).await.unwrap(), true);
+        let tx = store.random_tx().await.unwrap().unwrap();
+        assert!(tx >= 1 && tx <= 3);
+
+        // upgrade tx 1 to ready
+        assert_eq!(store.upgrade_tx_to_ready(2).await.unwrap(), true);
+        assert_eq!(store.random_tx().await.unwrap(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn test_remove_tx() {
+        let runtime = TestStoreRuntime::default();
+        let store = SyncStore::new(runtime.store.clone());
+
+        // cannot remove by default
+        assert_eq!(store.remove_tx(1).await.unwrap(), false);
+
+        // add pending tx 1, 2
+        assert_eq!(store.add_pending_tx(1).await.unwrap(), true);
+        assert_eq!(store.add_pending_tx(2).await.unwrap(), true);
+
+        // upgrade tx 1 to ready
+        assert_eq!(store.upgrade_tx_to_ready(1).await.unwrap(), true);
+        assert_eq!(store.random_tx().await.unwrap(), Some(1));
+
+        // remove tx 1
+        assert_eq!(store.remove_tx(1).await.unwrap(), true);
+        assert_eq!(store.random_tx().await.unwrap(), Some(2));
+        assert_eq!(store.remove_tx(1).await.unwrap(), false);
+
+        // remove tx 2
+        assert_eq!(store.remove_tx(2).await.unwrap(), true);
+        assert_eq!(store.random_tx().await.unwrap(), None);
+        assert_eq!(store.remove_tx(2).await.unwrap(), false);
+    }
+}

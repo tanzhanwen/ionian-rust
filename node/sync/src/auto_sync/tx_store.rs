@@ -139,13 +139,13 @@ impl TxStore {
 
 #[cfg(test)]
 mod tests {
-    use storage::{log_store::log_manager::LogConfig, LogManager};
+    use crate::test_util::tests::TestStoreRuntime;
 
     use super::TxStore;
 
     #[test]
     fn test_add() {
-        let store = LogManager::memorydb(LogConfig::default()).unwrap();
+        let store = TestStoreRuntime::new_store();
         let tx_store = TxStore::new("foo");
 
         // count is 0 by default
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn test_random() {
-        let store = LogManager::memorydb(LogConfig::default()).unwrap();
+        let store = TestStoreRuntime::new_store();
         let tx_store = TxStore::new("foo");
 
         assert_eq!(tx_store.random(&store).unwrap(), None);
@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn test_remove_tail() {
-        let store = LogManager::memorydb(LogConfig::default()).unwrap();
+        let store = TestStoreRuntime::new_store();
         let tx_store = TxStore::new("foo");
 
         assert_eq!(tx_store.add(&store, None, 1).unwrap(), true);
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn test_remove_swap() {
-        let store = LogManager::memorydb(LogConfig::default()).unwrap();
+        let store = TestStoreRuntime::new_store();
         let tx_store = TxStore::new("foo");
 
         assert_eq!(tx_store.add(&store, None, 1).unwrap(), true);

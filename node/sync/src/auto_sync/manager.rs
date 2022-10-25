@@ -16,7 +16,7 @@ const INTERVAL_CATCHUP: Duration = Duration::from_millis(1);
 const INTERVAL: Duration = Duration::from_secs(3);
 const INTERVAL_ERROR: Duration = Duration::from_secs(10);
 
-const FIND_PEERS_TIMEOUT: Duration = Duration::from_secs(60);
+const FIND_PEERS_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Manager to synchronize files among storage nodes automatically.
 ///
@@ -80,12 +80,22 @@ impl Manager {
         );
     }
 
-    fn handle_on_reorg(&self) {
+    fn set_reverted(&self, tx_seq: u64) -> bool {
+        if tx_seq >= self.reverted_tx_seq.load(Ordering::Relaxed) {
+            return false;
+        }
+
+        self.reverted_tx_seq.store(tx_seq, Ordering::Relaxed);
+
+        true
+    }
+
+    fn handle_on_reorg(&self) -> Option<u64> {
         let reverted_tx_seq = self.reverted_tx_seq.load(Ordering::Relaxed);
 
         // no reorg happened
         if reverted_tx_seq == u64::MAX {
-            return;
+            return None;
         }
 
         self.reverted_tx_seq.store(u64::MAX, Ordering::Relaxed);
@@ -93,22 +103,19 @@ impl Manager {
         // reorg happened, but no impact on file sync
         let next_tx_seq = self.next_tx_seq.load(Ordering::Relaxed);
         if reverted_tx_seq > next_tx_seq {
-            return;
+            return None;
         }
 
         // handles on reorg
         info!(%reverted_tx_seq, %next_tx_seq, "Transaction reverted");
 
-        // request sync service to terminate the file sync immediately
-        let _ = self.sync_send.request(SyncRequest::TerminateFileSync {
-            tx_seq: next_tx_seq,
-        });
-
         // re-sync files from the reverted tx seq
         self.next_tx_seq.store(reverted_tx_seq, Ordering::Relaxed);
+
+        Some(next_tx_seq)
     }
 
-    pub async fn update_on_announcement(&mut self, announced_tx_seq: u64) {
+    pub async fn update_on_announcement(&self, announced_tx_seq: u64) {
         // new file announced
         if announced_tx_seq > self.max_tx_seq.load(Ordering::Relaxed) {
             match self.sync_store.set_max_tx_seq(announced_tx_seq).await {
@@ -127,6 +134,21 @@ impl Manager {
         if let Err(e) = self.sync_store.upgrade_tx_to_ready(announced_tx_seq).await {
             error!(%e, "Failed to promote announced tx to ready");
         }
+    }
+
+    async fn move_forward(&self, pending: bool) -> Result<()> {
+        let tx_seq = self.next_tx_seq.load(Ordering::Relaxed);
+
+        // put the tx into pending list
+        if pending && self.sync_store.add_pending_tx(tx_seq).await? {
+            debug!(%tx_seq, "Pending tx added");
+        }
+
+        let next_tx_seq = tx_seq + 1;
+        self.sync_store.set_next_tx_seq(next_tx_seq).await?;
+        self.next_tx_seq.store(next_tx_seq, Ordering::Relaxed);
+
+        Ok(())
     }
 
     /// Returns whether file sync in progress but no peers found
@@ -175,9 +197,7 @@ async fn monitor_reorg(manager: Manager, mut receiver: Receiver<LogSyncEvent>) {
             Ok(LogSyncEvent::ReorgDetected { .. }) => {}
             Ok(LogSyncEvent::Reverted { tx_seq }) => {
                 // requires to re-sync files since transaction and files removed in storage
-                if tx_seq < manager.reverted_tx_seq.load(Ordering::Relaxed) {
-                    manager.reverted_tx_seq.store(tx_seq, Ordering::Relaxed);
-                }
+                manager.set_reverted(tx_seq);
             }
             Err(RecvError::Closed) => {
                 // program terminated
@@ -204,7 +224,17 @@ async fn start_sync(manager: Manager) {
 
     loop {
         // handles reorg before file sync
-        manager.handle_on_reorg();
+        if let Some(tx_seq) = manager.handle_on_reorg() {
+            // request sync service to terminate the file sync immediately
+            if let Err(err) = manager
+                .sync_send
+                .request(SyncRequest::TerminateFileSync { tx_seq })
+                .await
+            {
+                // just log and go ahead for any error, e.g. timeout
+                error!(%err, %tx_seq, "Failed to terminate file sync");
+            }
+        }
 
         // sync file
         let sync_result = sync_once(&manager).await;
@@ -228,16 +258,14 @@ async fn start_sync(manager: Manager) {
 
 async fn sync_once(manager: &Manager) -> Result<bool> {
     // already sync to the latest file
-    let mut next_tx_seq = manager.next_tx_seq.load(Ordering::Relaxed);
+    let next_tx_seq = manager.next_tx_seq.load(Ordering::Relaxed);
     if next_tx_seq > manager.max_tx_seq.load(Ordering::Relaxed) {
         return Ok(false);
     }
 
     // already finalized
     if manager.store.check_tx_completed(next_tx_seq).await? {
-        next_tx_seq += 1;
-        manager.sync_store.set_next_tx_seq(next_tx_seq).await?;
-        manager.next_tx_seq.store(next_tx_seq, Ordering::Relaxed);
+        manager.move_forward(false).await?;
         return Ok(true);
     }
 
@@ -246,8 +274,7 @@ async fn sync_once(manager: &Manager) -> Result<bool> {
 
     // put tx to pending list if no peers found for a long time
     if no_peer_timeout {
-        manager.sync_store.add_pending_tx(next_tx_seq).await?;
-        debug!(%next_tx_seq, "No peers found for a long time, put tx to pending list");
+        manager.move_forward(true).await?;
     }
 
     Ok(no_peer_timeout)
@@ -305,4 +332,122 @@ async fn sync_pending_tx(manager: &Manager, tx_seq: u64) -> Result<bool> {
     }
 
     Ok(no_peer_timeout)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use channel::Channel;
+
+    use crate::{auto_sync::sync_store::SyncStore, test_util::tests::TestStoreRuntime};
+
+    use super::Manager;
+
+    async fn new_manager(runtime: &TestStoreRuntime, next_tx_seq: u64, max_tx_seq: u64) -> Manager {
+        let sync_store = SyncStore::new(runtime.store.clone());
+        sync_store.set_next_tx_seq(next_tx_seq).await.unwrap();
+        sync_store.set_max_tx_seq(max_tx_seq).await.unwrap();
+
+        let (sync_send, _) = Channel::unbounded();
+        Manager::new(runtime.store.clone(), sync_send)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_manager_init_values() {
+        let runtime = TestStoreRuntime::default();
+        let manager = new_manager(&runtime, 4, 12).await;
+
+        assert_eq!(manager.next_tx_seq.load(Ordering::Relaxed), 4);
+        assert_eq!(manager.max_tx_seq.load(Ordering::Relaxed), 12);
+        assert_eq!(manager.reverted_tx_seq.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn test_manager_set_reverted() {
+        let runtime = TestStoreRuntime::default();
+        let manager = new_manager(&runtime, 4, 12).await;
+
+        // reverted to tx 5
+        assert_eq!(manager.set_reverted(5), true);
+        assert_eq!(manager.reverted_tx_seq.load(Ordering::Relaxed), 5);
+
+        // no effect if tx 6 reverted again
+        assert_eq!(manager.set_reverted(6), false);
+        assert_eq!(manager.reverted_tx_seq.load(Ordering::Relaxed), 5);
+
+        // overwrite tx 5 if tx 3 reverted
+        assert_eq!(manager.set_reverted(3), true);
+        assert_eq!(manager.reverted_tx_seq.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn test_manager_handle_reorg() {
+        let runtime = TestStoreRuntime::default();
+        let manager = new_manager(&runtime, 4, 12).await;
+
+        // no effect if not reverted
+        assert_eq!(manager.handle_on_reorg(), None);
+        assert_eq!(manager.reverted_tx_seq.load(Ordering::Relaxed), u64::MAX);
+        assert_eq!(manager.next_tx_seq.load(Ordering::Relaxed), 4);
+
+        // tx 5 reverted, but sync in future
+        assert_eq!(manager.set_reverted(5), true);
+        assert_eq!(manager.handle_on_reorg(), None);
+        assert_eq!(manager.reverted_tx_seq.load(Ordering::Relaxed), u64::MAX);
+        assert_eq!(manager.next_tx_seq.load(Ordering::Relaxed), 4);
+
+        // tx 3 reverted, should terminate tx 4 and re-sync files since tx 3
+        assert_eq!(manager.set_reverted(3), true);
+        assert_eq!(manager.handle_on_reorg(), Some(4));
+        assert_eq!(manager.reverted_tx_seq.load(Ordering::Relaxed), u64::MAX);
+        assert_eq!(manager.next_tx_seq.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn test_manager_update_on_announcement() {
+        let runtime = TestStoreRuntime::default();
+        let manager = new_manager(&runtime, 4, 12).await;
+
+        // no effect if tx 10 announced
+        manager.update_on_announcement(10).await;
+        assert_eq!(manager.next_tx_seq.load(Ordering::Relaxed), 4);
+        assert_eq!(manager.max_tx_seq.load(Ordering::Relaxed), 12);
+
+        // `max_tx_seq` enlarged if tx 20 announced
+        manager.update_on_announcement(20).await;
+        assert_eq!(manager.next_tx_seq.load(Ordering::Relaxed), 4);
+        assert_eq!(manager.max_tx_seq.load(Ordering::Relaxed), 20);
+
+        // no effect if announced for a non-pending tx
+        manager.update_on_announcement(2).await;
+        assert_eq!(manager.next_tx_seq.load(Ordering::Relaxed), 4);
+        assert_eq!(manager.max_tx_seq.load(Ordering::Relaxed), 20);
+        assert_eq!(manager.sync_store.random_tx().await.unwrap(), None);
+
+        // pending tx upgraded if announcement received
+        assert_eq!(manager.sync_store.add_pending_tx(1).await.unwrap(), true);
+        assert_eq!(manager.sync_store.add_pending_tx(2).await.unwrap(), true);
+        manager.update_on_announcement(2).await;
+        assert_eq!(manager.sync_store.random_tx().await.unwrap(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn test_manager_move_forward() {
+        let runtime = TestStoreRuntime::default();
+        let manager = new_manager(&runtime, 4, 12).await;
+
+        // move forward from 4 to 5
+        manager.move_forward(false).await.unwrap();
+        assert_eq!(manager.next_tx_seq.load(Ordering::Relaxed), 5);
+        assert_eq!(manager.max_tx_seq.load(Ordering::Relaxed), 12);
+
+        // move forward and add tx 5 to pending list
+        manager.move_forward(true).await.unwrap();
+        assert_eq!(manager.next_tx_seq.load(Ordering::Relaxed), 6);
+        assert_eq!(manager.max_tx_seq.load(Ordering::Relaxed), 12);
+        assert_eq!(manager.sync_store.random_tx().await.unwrap(), Some(5));
+    }
 }
