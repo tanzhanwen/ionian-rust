@@ -146,15 +146,19 @@ impl LogSyncManager {
 
     async fn put_tx(&mut self, tx: Transaction) -> bool {
         // We call this after process chain reorg, so the sequence number should match.
-        if tx.seq == self.next_tx_seq {
-            debug!("log entry sync get entry: {:?}", tx);
-            self.put_tx_inner(tx).await
-        } else {
-            error!(
-                "Unexpected transaction seq: next={} get={}",
-                self.next_tx_seq, tx.seq
-            );
-            false
+        match tx.seq.cmp(&self.next_tx_seq) {
+            std::cmp::Ordering::Less => true,
+            std::cmp::Ordering::Equal => {
+                debug!("log entry sync get entry: {:?}", tx);
+                self.put_tx_inner(tx).await
+            }
+            std::cmp::Ordering::Greater => {
+                error!(
+                    "Unexpected transaction seq: next={} get={}",
+                    self.next_tx_seq, tx.seq
+                );
+                false
+            }
         }
     }
 
@@ -200,7 +204,29 @@ impl LogSyncManager {
             trace!("handle_data: data={:?}", data);
             match data {
                 LogFetchProgress::SyncedBlock(progress) => {
-                    self.store.write().await.put_sync_progress(progress)?;
+                    match self
+                        .log_fetcher
+                        .provider()
+                        .get_block(
+                            progress
+                                .0
+                                .saturating_sub(self.config.confirmation_block_count),
+                        )
+                        .await
+                    {
+                        Ok(Some(b)) => {
+                            if let (Some(block_number), Some(block_hash)) = (b.number, b.hash) {
+                                self.store
+                                    .write()
+                                    .await
+                                    .put_sync_progress((block_number.as_u64(), block_hash))?;
+                            }
+                        }
+                        e => {
+                            error!("log put progress check rpc fails, e={:?}", e);
+                            bail!("log sync update progress error");
+                        }
+                    }
                 }
                 LogFetchProgress::Transaction(tx) => {
                     if !self.put_tx(tx).await {
