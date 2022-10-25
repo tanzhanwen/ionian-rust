@@ -1,5 +1,5 @@
 use ethereum_types::H256;
-use ionian_spec::{BYTES_PER_SEAL, SEALS_PER_LOADING};
+use ionian_spec::{BYTES_PER_SEAL, SEALS_PER_LOAD};
 use shared_types::{
     Chunk, ChunkArray, ChunkArrayWithProof, ChunkWithProof, DataRoot, FlowRangeProof, Transaction,
 };
@@ -149,15 +149,15 @@ pub trait LogStoreInner {
 }
 
 pub struct MineLoadChunk {
-    pub loaded_chunk: [[u8; BYTES_PER_SEAL]; SEALS_PER_LOADING],
-    pub avalibilities: [bool; SEALS_PER_LOADING],
+    pub loaded_chunk: [[u8; BYTES_PER_SEAL]; SEALS_PER_LOAD],
+    pub avalibilities: [bool; SEALS_PER_LOAD],
 }
 
 impl Default for MineLoadChunk {
     fn default() -> Self {
         Self {
-            loaded_chunk: [[0u8; BYTES_PER_SEAL]; SEALS_PER_LOADING],
-            avalibilities: [false; SEALS_PER_LOADING],
+            loaded_chunk: [[0u8; BYTES_PER_SEAL]; SEALS_PER_LOAD],
+            avalibilities: [false; SEALS_PER_LOAD],
         }
     }
 }

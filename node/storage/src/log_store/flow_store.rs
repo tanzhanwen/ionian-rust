@@ -5,7 +5,7 @@ use crate::log_store::log_manager::{bytes_to_entries, COL_ENTRY_BATCH, COL_ENTRY
 use crate::log_store::{FlowRead, FlowSeal, FlowWrite};
 use crate::{try_option, IonianKeyValueDB};
 use anyhow::{anyhow, bail, Result};
-use ionian_spec::{BYTES_PER_SECTOR, SEALS_PER_LOADING, SECTORS_PER_LOADING, SECTORS_PER_SEAL};
+use ionian_spec::{BYTES_PER_SECTOR, SEALS_PER_LOAD, SECTORS_PER_LOAD, SECTORS_PER_SEAL};
 use itertools::Itertools;
 use shared_types::{ChunkArray, DataRoot};
 use ssz::{Decode, Encode};
@@ -49,7 +49,7 @@ pub struct FlowConfig {
 impl Default for FlowConfig {
     fn default() -> Self {
         Self {
-            batch_size: SECTORS_PER_LOADING,
+            batch_size: SECTORS_PER_LOAD,
         }
     }
 }
@@ -195,7 +195,7 @@ impl FlowWrite for FlowStore {
             )?;
             completed_seals.into_iter().for_each(|x| {
                 self.to_seal_set.insert(
-                    chunk_index as usize * SEALS_PER_LOADING + x as usize,
+                    chunk_index as usize * SEALS_PER_LOAD + x as usize,
                     self.to_seal_version,
                 );
             });
@@ -206,10 +206,15 @@ impl FlowWrite for FlowStore {
     }
 
     fn truncate(&mut self, start_index: u64) -> crate::error::Result<()> {
-        self.db.truncate(start_index, self.config.batch_size)?;
+        let to_reseal = self.db.truncate(start_index, self.config.batch_size)?;
+
         self.to_seal_set
             .split_off(&(start_index as usize / SECTORS_PER_SEAL));
         self.to_seal_version += 1;
+
+        to_reseal.into_iter().for_each(|x| {
+            self.to_seal_set.insert(x, self.to_seal_version);
+        });
         Ok(())
     }
 }
@@ -222,19 +227,19 @@ impl FlowSeal for FlowStore {
             return Ok(None);
         }
 
-        let mut tasks = Vec::with_capacity(SEALS_PER_LOADING);
+        let mut tasks = Vec::with_capacity(SEALS_PER_LOAD);
 
         let batch_data = self
             .db
-            .get_entry_batch((first_index / SEALS_PER_LOADING) as u64)?
+            .get_entry_batch((first_index / SEALS_PER_LOAD) as u64)?
             .expect("Lost data chunk in to_seal_set");
 
         for (&seal_index, &version) in
             std::iter::once((&first_index, &first_version)).chain(to_seal_iter.filter(|(&x, _)| {
-                first_index / SEALS_PER_LOADING == x / SEALS_PER_LOADING && x < seal_index_max
+                first_index / SEALS_PER_LOAD == x / SEALS_PER_LOAD && x < seal_index_max
             }))
         {
-            let seal_index_local = seal_index % SEALS_PER_LOADING;
+            let seal_index_local = seal_index % SEALS_PER_LOAD;
             let non_sealed_data = batch_data
                 .get_non_sealed_data(seal_index_local as u16)
                 .expect("Lost seal chunk in to_seal_set");
@@ -260,7 +265,7 @@ impl FlowSeal for FlowStore {
         for (load_index, answers_in_chunk) in &answers
             .into_iter()
             .filter(is_consistent)
-            .group_by(|answer| answer.seal_index / SEALS_PER_LOADING as u64)
+            .group_by(|answer| answer.seal_index / SEALS_PER_LOAD as u64)
         {
             let mut batch_chunk = self
                 .db
@@ -357,18 +362,27 @@ impl FlowDBStore {
         Ok(Some(BatchRoot::from_ssz_bytes(&raw).map_err(Error::from)?))
     }
 
-    fn truncate(&self, start_index: u64, batch_size: usize) -> crate::error::Result<()> {
+    fn truncate(&self, start_index: u64, batch_size: usize) -> crate::error::Result<Vec<usize>> {
         let mut tx = self.kvdb.transaction();
         let mut start_batch_index = start_index / batch_size as u64;
         let first_batch_offset = start_index as usize % batch_size;
+        let mut index_to_reseal = Vec::new();
         if first_batch_offset != 0 {
             if let Some(mut first_batch) = self.get_entry_batch(start_batch_index)? {
-                first_batch.truncate(first_batch_offset as usize);
-                tx.put(
-                    COL_ENTRY_BATCH,
-                    &start_batch_index.to_be_bytes(),
-                    &first_batch.as_ssz_bytes(),
-                );
+                index_to_reseal = first_batch
+                    .truncate(first_batch_offset as usize)
+                    .into_iter()
+                    .map(|x| start_batch_index as usize * SEALS_PER_LOAD + x as usize)
+                    .collect();
+                if !first_batch.is_empty() {
+                    tx.put(
+                        COL_ENTRY_BATCH,
+                        &start_batch_index.to_be_bytes(),
+                        &first_batch.as_ssz_bytes(),
+                    );
+                } else {
+                    tx.delete(COL_ENTRY_BATCH, &start_batch_index.to_be_bytes());
+                }
             }
 
             start_batch_index += 1;
@@ -379,7 +393,7 @@ impl FlowDBStore {
             Some((k, _)) => decode_batch_index(k.as_ref())?,
             None => {
                 // The db has no data, so we can just return;
-                return Ok(());
+                return Ok(index_to_reseal);
             }
         };
         for batch_index in start_batch_index..=end {
@@ -387,7 +401,7 @@ impl FlowDBStore {
             tx.delete(COL_ENTRY_BATCH_ROOT, &batch_index.to_be_bytes());
         }
         self.kvdb.write(tx)?;
-        Ok(())
+        Ok(index_to_reseal)
     }
 }
 

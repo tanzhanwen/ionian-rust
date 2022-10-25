@@ -1,8 +1,9 @@
 use ethereum_types::H256;
-use ionian_seal;
-use ionian_spec::{SEALS_PER_LOADING, SECTORS_PER_LOADING, SECTORS_PER_SEAL};
 use ssz_derive::{Decode as DeriveDecode, Encode as DeriveEncode};
 use static_assertions::const_assert;
+
+use ionian_seal;
+use ionian_spec::{SEALS_PER_LOAD, SECTORS_PER_LOAD, SECTORS_PER_SEAL};
 
 use super::bitmap::WrappedBitmap;
 
@@ -11,93 +12,74 @@ pub struct SealContextInfo {
     /// The context digest for this seal group
     context_digest: H256,
     /// The end position (exclusive) indexed by sectors
-    end_position: u16,
+    end_seal_index: u16,
 }
 
-type ChunkSealBitmap = WrappedBitmap<SEALS_PER_LOADING>;
-const_assert!(SEALS_PER_LOADING <= u128::BITS as usize);
+type ChunkSealBitmap = WrappedBitmap<SEALS_PER_LOAD>;
+const_assert!(SEALS_PER_LOAD <= u128::BITS as usize);
 
 #[derive(Default, DeriveEncode, DeriveDecode)]
 pub struct SealInfo {
     // a bitmap specify which sealing chunks have been sealed
     bitmap: ChunkSealBitmap,
     // the batch_offset (seal chunks) of the EntryBatch this seal info belongs to
-    load_chunk_index: u64,
+    load_index: u64,
     // the miner Id for sealing this chunk, zero representing doesn't exists
     miner_id: H256,
     // seal context information, indexed by u16. Get a position has never been set is undefined behaviour.
     seal_contexts: Vec<SealContextInfo>,
 }
 
+// Basic interfaces
 impl SealInfo {
-    pub fn new(load_chunk_index: u64) -> Self {
+    pub fn new(load_index: u64) -> Self {
         Self {
-            load_chunk_index,
+            load_index,
             ..Default::default()
         }
     }
 
-    pub fn is_sealed(&self, index: u16) -> bool {
-        self.bitmap.get(index as usize)
+    pub fn is_sealed(&self, seal_index: u16) -> bool {
+        self.bitmap.get(seal_index as usize)
     }
 
-    pub fn load_chunk_index(&self) -> u64 {
-        self.load_chunk_index
+    pub fn mark_sealed(&mut self, seal_index: u16) {
+        self.bitmap.set(seal_index as usize, true);
     }
 
-    pub fn truncate(&mut self, index: u16) {
-        self.bitmap.truncate(index);
-        if index == 0 {
-            self.seal_contexts.clear();
-        } else {
-            let context_position = self
-                .seal_contexts
-                .binary_search_by_key(&index, |x| x.end_position)
-                .expect("truncate position is not at the start of seal context");
-            self.seal_contexts.truncate(context_position + 1);
-        }
+    pub fn load_index(&self) -> u64 {
+        self.load_index
     }
 
-    /// Return the start position (inclusive, in seals), the end position (exclusive, in seals) and context hash
-    pub fn get_seal_context(&self, seal_index: u16) -> Option<H256> {
-        let index = match self
+    pub fn global_seal_sector(&self, index: u16) -> u64 {
+        (self.load_index as usize * SECTORS_PER_LOAD + index as usize * SECTORS_PER_SEAL) as u64
+    }
+}
+
+// Interfaces for maintaining context info
+impl SealInfo {
+    fn context_index(&self, seal_index: u16) -> usize {
+        match self
             .seal_contexts
-            .binary_search_by_key(&(seal_index + 1), |x| x.end_position)
+            .binary_search_by_key(&(seal_index + 1), |x| x.end_seal_index)
         {
             Ok(x) | Err(x) => x,
-        };
-
-        if index == self.seal_contexts.len() {
-            None
-        } else {
-            Some(self.seal_contexts[index].context_digest)
         }
     }
 
-    /// Return the start position (inclusive, in seals), the end position (exclusive, in seals) and context hash
-    pub fn trucate_seal_context(&self, seal_index: u16) -> u16 {
-        let index = match self
-            .seal_contexts
-            .binary_search_by_key(&(seal_index + 1), |x| x.end_position)
-        {
-            Ok(x) | Err(x) => x,
-        };
-
-        if index == 0 {
-            0
-        } else {
-            self.seal_contexts.get(index - 1).unwrap().end_position
-        }
+    pub fn get_seal_context_digest(&self, seal_index: u16) -> Option<H256> {
+        self.seal_contexts
+            .get(self.context_index(seal_index))
+            .map(|x| x.context_digest)
     }
 
     pub fn set_seal_context(
         &mut self,
-        index: u16,
         context_digest: H256,
-        end_position: u64,
+        global_end_seal_index: u64,
         miner_id: H256,
     ) {
-        self.bitmap.set(index as usize, true);
+        // 1. Check consistency of the miner id.
         if self.miner_id.is_zero() {
             self.miner_id = miner_id;
         } else {
@@ -107,63 +89,61 @@ impl SealInfo {
             );
         }
 
-        let local_end_position = std::cmp::min(
-            end_position - self.load_chunk_index * SEALS_PER_LOADING as u64,
-            SEALS_PER_LOADING as u64,
-        ) as u16;
-
-        if self.seal_contexts.is_empty() {
-            self.seal_contexts.push(SealContextInfo {
-                context_digest,
-                end_position: local_end_position,
-            });
-            return;
-        }
-
-        let insert_position = match self
-            .seal_contexts
-            .binary_search_by_key(&(index + 1), |x| x.end_position)
-        {
-            Ok(x) | Err(x) => x,
+        // 2. Compute the local end_seal_index
+        let end_seal_index = global_end_seal_index - self.load_index * SEALS_PER_LOAD as u64;
+        let end_seal_index = std::cmp::min(end_seal_index as u16, SEALS_PER_LOAD as u16);
+        let new_context = SealContextInfo {
+            context_digest,
+            end_seal_index,
         };
 
-        if insert_position >= 1
-            && self.seal_contexts[insert_position - 1].context_digest == context_digest
-        {
-            assert!(
-                self.seal_contexts
-                    .get(insert_position)
-                    .map_or(true, |x| x.end_position > index + 1),
-                "Seal context conflict"
-            );
-            let end_position = &mut self.seal_contexts[insert_position - 1].end_position;
-            *end_position = std::cmp::max(*end_position, index + 1);
-            return;
-        }
+        // 3. Update the seal context array by cases
+        let insert_position = self.context_index(end_seal_index - 1);
 
-        if insert_position < self.seal_contexts.len()
-            && self.seal_contexts[insert_position].context_digest == context_digest
-        {
-            let end_position = &mut self.seal_contexts[insert_position].end_position;
-            *end_position = std::cmp::max(*end_position, index + 1);
-            return;
+        if let Some(existing_context) = self.seal_contexts.get(insert_position) {
+            if existing_context.context_digest == new_context.context_digest {
+                // Case 1: the new context is consistent with existing contexts (nothing to do)
+            } else {
+                // Case 2: the new context should be inserted in the middle (may not happen)
+                self.seal_contexts.insert(insert_position, new_context);
+            }
+        } else {
+            // Case 3: the new context exceeds the upper bound of existing contexts
+            self.seal_contexts.push(new_context);
         }
+    }
+}
 
-        self.seal_contexts.insert(
-            insert_position,
-            SealContextInfo {
-                context_digest,
-                end_position: index + 1,
-            },
-        );
+impl SealInfo {
+    pub fn truncate(&mut self, reverted_seal_index: u16) {
+        // TODO (kevin): have issue in some cases
+        let truncated_context_index = self.context_index(reverted_seal_index);
+        let truncated_seal_index = self.truncated_seal_index(reverted_seal_index);
+
+        self.bitmap.truncate(truncated_seal_index);
+        self.seal_contexts.truncate(truncated_context_index);
     }
 
+    pub fn truncated_seal_index(&self, reverted_seal_index: u16) -> u16 {
+        let truncated_context = self.context_index(reverted_seal_index) as usize;
+        if truncated_context == 0 {
+            0
+        } else {
+            self.seal_contexts
+                .get(truncated_context - 1)
+                .unwrap()
+                .end_seal_index
+        }
+    }
+}
+
+impl SealInfo {
     pub fn unseal(&self, data: &mut [u8], index: u16) {
         if !self.is_sealed(index) {
             return;
         }
         let seal_context = self
-            .get_seal_context(index)
+            .get_seal_context_digest(index)
             .expect("cannot unseal non-sealed data");
         ionian_seal::unseal(
             data,
@@ -179,7 +159,7 @@ impl SealInfo {
             return;
         }
         let seal_context = self
-            .get_seal_context(index)
+            .get_seal_context_digest(index)
             .expect("cannot unseal non-sealed data");
         ionian_seal::seal(
             data,
@@ -187,11 +167,6 @@ impl SealInfo {
             &seal_context,
             self.global_seal_sector(index),
         );
-    }
-
-    pub fn global_seal_sector(&self, index: u16) -> u64 {
-        (self.load_chunk_index as usize * SECTORS_PER_LOADING + index as usize * SECTORS_PER_SEAL)
-            as u64
     }
 }
 
@@ -223,32 +198,32 @@ mod tests {
         let mut sealer = SealInfo::new(0);
         sealer.seal_contexts.push(SealContextInfo {
             context_digest: context1,
-            end_position: 2,
+            end_seal_index: 2,
         });
         sealer.seal_contexts.push(SealContextInfo {
             context_digest: context2,
-            end_position: 3,
+            end_seal_index: 3,
         });
         sealer.seal_contexts.push(SealContextInfo {
             context_digest: context3,
-            end_position: 6,
+            end_seal_index: 6,
         });
 
-        assert_eq!(sealer.get_seal_context(0), Some(context1));
-        assert_eq!(sealer.get_seal_context(1), Some(context1));
-        assert_eq!(sealer.get_seal_context(2), Some(context2));
-        assert_eq!(sealer.get_seal_context(3), Some(context3));
-        assert_eq!(sealer.get_seal_context(4), Some(context3));
-        assert_eq!(sealer.get_seal_context(5), Some(context3));
-        assert_eq!(sealer.get_seal_context(6), None);
+        assert_eq!(sealer.get_seal_context_digest(0), Some(context1));
+        assert_eq!(sealer.get_seal_context_digest(1), Some(context1));
+        assert_eq!(sealer.get_seal_context_digest(2), Some(context2));
+        assert_eq!(sealer.get_seal_context_digest(3), Some(context3));
+        assert_eq!(sealer.get_seal_context_digest(4), Some(context3));
+        assert_eq!(sealer.get_seal_context_digest(5), Some(context3));
+        assert_eq!(sealer.get_seal_context_digest(6), None);
 
-        assert_eq!(sealer.trucate_seal_context(0), 0);
-        assert_eq!(sealer.trucate_seal_context(1), 0);
-        assert_eq!(sealer.trucate_seal_context(2), 2);
-        assert_eq!(sealer.trucate_seal_context(3), 3);
-        assert_eq!(sealer.trucate_seal_context(4), 3);
-        assert_eq!(sealer.trucate_seal_context(5), 3);
-        assert_eq!(sealer.trucate_seal_context(6), 6);
+        assert_eq!(sealer.truncated_seal_index(0), 0);
+        assert_eq!(sealer.truncated_seal_index(1), 0);
+        assert_eq!(sealer.truncated_seal_index(2), 2);
+        assert_eq!(sealer.truncated_seal_index(3), 3);
+        assert_eq!(sealer.truncated_seal_index(4), 3);
+        assert_eq!(sealer.truncated_seal_index(5), 3);
+        assert_eq!(sealer.truncated_seal_index(6), 6);
     }
 
     #[test]
@@ -270,15 +245,15 @@ mod tests {
 
         sealer.seal_contexts.push(SealContextInfo {
             context_digest: context1,
-            end_position: 2,
+            end_seal_index: 2,
         });
         sealer.seal_contexts.push(SealContextInfo {
             context_digest: context2,
-            end_position: 5,
+            end_seal_index: 5,
         });
         sealer.seal_contexts.push(SealContextInfo {
             context_digest: context3,
-            end_position: 10,
+            end_seal_index: 10,
         });
 
         // skip seal 6, 3, 9

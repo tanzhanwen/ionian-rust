@@ -1,6 +1,7 @@
 mod bitmap;
 mod chunk_data;
 mod seal;
+mod serde;
 
 use std::cmp::min;
 
@@ -8,11 +9,11 @@ use anyhow::{bail, Result};
 use ethereum_types::H256;
 use ssz_derive::{Decode, Encode};
 
-use crate::log_store::log_manager::{data_to_merkle_leaves, sub_merkle_tree, PORA_CHUNK_SIZE};
+use crate::log_store::log_manager::{data_to_merkle_leaves, sub_merkle_tree};
 use crate::try_option;
 use append_merkle::{AppendMerkleTree, MerkleTreeRead, Sha3Algorithm};
 use ionian_spec::{
-    BYTES_PER_SEAL, BYTES_PER_SECTOR, SEALS_PER_LOADING, SECTORS_PER_LOADING, SECTORS_PER_SEAL,
+    BYTES_PER_SEAL, BYTES_PER_SECTOR, SEALS_PER_LOAD, SECTORS_PER_LOAD, SECTORS_PER_SEAL,
 };
 use shared_types::ChunkArray;
 use tracing::trace;
@@ -23,37 +24,41 @@ use seal::SealInfo;
 
 #[derive(Encode, Decode)]
 pub struct EntryBatch {
-    seal_info: SealInfo,
+    seal: SealInfo,
     // the inner data
     data: EntryBatchData,
 }
 
 impl EntryBatch {
-    pub fn new(chunk_index: u64) -> Self {
+    pub fn new(load_index_global: u64) -> Self {
         Self {
-            seal_info: SealInfo::new(chunk_index),
+            seal: SealInfo::new(load_index_global),
             data: EntryBatchData::new(),
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
     }
 }
 
 impl EntryBatch {
-    pub fn get_sealed_data(&self, seal_idx: u16) -> Option<[u8; BYTES_PER_SEAL]> {
-        if self.seal_info.is_sealed(seal_idx) {
+    pub fn get_sealed_data(&self, seal_index: u16) -> Option<[u8; BYTES_PER_SEAL]> {
+        if self.seal.is_sealed(seal_index) {
             let loaded_slice = self
                 .data
-                .get(seal_idx as usize * BYTES_PER_SEAL, BYTES_PER_SEAL)?;
+                .get(seal_index as usize * BYTES_PER_SEAL, BYTES_PER_SEAL)?;
             Some(loaded_slice.try_into().unwrap())
         } else {
             None
         }
     }
 
-    pub fn get_non_sealed_data(&self, seal_idx: u16) -> Option<[u8; BYTES_PER_SEAL]> {
-        if !self.seal_info.is_sealed(seal_idx) {
+    pub fn get_non_sealed_data(&self, seal_index: u16) -> Option<[u8; BYTES_PER_SEAL]> {
+        if !self.seal.is_sealed(seal_index) {
             let loaded_slice = self
                 .data
-                .get(seal_idx as usize * BYTES_PER_SEAL, BYTES_PER_SEAL)?;
+                .get(seal_index as usize * BYTES_PER_SEAL, BYTES_PER_SEAL)?;
             Some(loaded_slice.try_into().unwrap())
         } else {
             None
@@ -61,60 +66,56 @@ impl EntryBatch {
     }
 
     /// Get unsealed data
-    pub fn get_unsealed_data(&self, start: usize, length: usize) -> Option<Vec<u8>> {
-        // If the start position is not aligned and is sealed, we need to load one more word for unsealing
-        let advanced_by_one = if start % SECTORS_PER_SEAL == 0 {
+    pub fn get_unsealed_data(&self, start_sector: usize, length_sector: usize) -> Option<Vec<u8>> {
+        // If the start position is not aligned and is sealed, we need to load one more word (32 bytes) for unsealing
+        let advanced_by_one = if start_sector % SECTORS_PER_SEAL == 0 {
             // If the start position is not aligned, it is no need to load one more word
             false
         } else {
             // otherwise, it depends on if the given offset is seal
-            self.seal_info.is_sealed((start / SECTORS_PER_SEAL) as u16)
+            self.seal
+                .is_sealed((start_sector / SECTORS_PER_SEAL) as u16)
         };
 
-        let start_byte = start * BYTES_PER_SECTOR;
-        let length_byte = length * BYTES_PER_SECTOR;
+        let start_byte = start_sector * BYTES_PER_SECTOR;
+        let length_byte = length_sector * BYTES_PER_SECTOR;
 
         // Load data slice with the word for unsealing
-        let (mut loaded_data, unseal_hint) = if advanced_by_one {
+        let (mut loaded_data, unseal_mask_seed) = if advanced_by_one {
             let loaded_data_with_hint = self.data.get(start_byte - 32, length_byte + 32)?;
 
-            // TODO: use `split_array_ref` instead when this api is stable.
-            let (unseal_hint, loaded_data) = loaded_data_with_hint.split_at(32);
-            let unseal_hint = <[u8; 32]>::try_from(unseal_hint).unwrap();
-            (loaded_data.to_vec(), Some(unseal_hint))
+            // TODO (api stable): use `split_array_ref` instead when this api is stable.
+            let (unseal_mask_seed, loaded_data) = loaded_data_with_hint.split_at(32);
+            let unseal_mask_seed = <[u8; 32]>::try_from(unseal_mask_seed).unwrap();
+            (loaded_data.to_vec(), Some(unseal_mask_seed))
         } else {
             (self.data.get(start_byte, length_byte)?.to_vec(), None)
         };
 
-        let first_chunk_length = BYTES_PER_SEAL - start_byte % BYTES_PER_SEAL;
+        let first_seal_chunk_length = BYTES_PER_SEAL - start_byte % BYTES_PER_SEAL;
 
         // Unseal the first incomplete sealing chunk (if exists)
-        if let Some(unseal_hint) = unseal_hint {
-            // We do not need to check if this sealing chunk exists, since we have checked it before loading unseal_hint
-            assert!(first_chunk_length != 0);
-
-            if loaded_data.len() < first_chunk_length {
+        if let Some(unseal_mask_seed) = unseal_mask_seed {
+            let data_to_unseal = if loaded_data.len() < first_seal_chunk_length {
                 // The loaded data does not cross sealings
-                ionian_seal::unseal_with_mask_seed(loaded_data.as_mut(), &unseal_hint);
+                loaded_data.as_mut()
             } else {
-                ionian_seal::unseal_with_mask_seed(
-                    loaded_data[..first_chunk_length].as_mut(),
-                    &unseal_hint,
-                );
+                loaded_data[..first_seal_chunk_length].as_mut()
             };
+
+            ionian_seal::unseal_with_mask_seed(data_to_unseal, &unseal_mask_seed);
         }
 
-        if loaded_data.len() > first_chunk_length {
-            let complete_chunks = &mut loaded_data[first_chunk_length..];
-            assert!((start_byte + first_chunk_length) % BYTES_PER_SEAL == 0);
-            let start_sealing_index = (start_byte + first_chunk_length) / BYTES_PER_SEAL;
+        if loaded_data.len() > first_seal_chunk_length {
+            let complete_chunks = &mut loaded_data[first_seal_chunk_length..];
+            let start_seal = (start_byte + first_seal_chunk_length) / BYTES_PER_SEAL;
 
-            for (sealing_chunk, sealing_index) in complete_chunks
+            for (seal_index, data_to_unseal) in complete_chunks
                 .chunks_mut(BYTES_PER_SEAL)
                 .enumerate()
-                .map(|(idx, chunk)| (chunk, start_sealing_index + idx))
+                .map(|(idx, chunk)| (start_seal + idx, chunk))
             {
-                self.seal_info.unseal(sealing_chunk, sealing_index as u16);
+                self.seal.unseal(data_to_unseal, seal_index as u16);
             }
         }
 
@@ -127,11 +128,11 @@ impl EntryBatch {
         self.data.insert_data(offset * BYTES_PER_SECTOR, data)
     }
 
-    pub fn truncate(&mut self, start_offset: usize) {
-        assert!(start_offset > 0 && start_offset < PORA_CHUNK_SIZE);
+    pub fn truncate(&mut self, truncated_sector: usize) -> Vec<u16> {
+        assert!(truncated_sector > 0 && truncated_sector < SECTORS_PER_LOAD);
 
-        self.data.truncate(start_offset * BYTES_PER_SECTOR);
-        self.truncate_seal(start_offset);
+        self.data.truncate(truncated_sector * BYTES_PER_SECTOR);
+        self.truncate_seal(truncated_sector)
     }
 
     pub fn into_data_list(self, global_start_entry: u64) -> Vec<ChunkArray> {
@@ -148,30 +149,35 @@ impl EntryBatch {
             .collect()
     }
 
-    fn truncate_seal(&mut self, start_sector: usize) {
-        let first_truncate_seal = (start_sector / SECTORS_PER_SEAL) as u16;
-        let first_seal_undo = self.seal_info.trucate_seal_context(first_truncate_seal);
+    fn truncate_seal(&mut self, truncated_sector: usize) -> Vec<u16> {
+        let reverted_seal_index = (truncated_sector / SECTORS_PER_SEAL) as u16;
 
-        // last_seal_undo could be first_truncate_seal or first_truncate_seal+1
-        let last_seal_undo = (start_sector + SECTORS_PER_SEAL - 1) / SECTORS_PER_SEAL;
+        let first_unseal_index = self.seal.truncated_seal_index(reverted_seal_index);
+        let last_unseal_index = ((truncated_sector - 1) / SECTORS_PER_SEAL) as u16;
 
-        for seal_index in (first_seal_undo as usize)..last_seal_undo {
-            if !self.seal_info.is_sealed(seal_index as u16) {
+        let mut to_reseal_set = Vec::with_capacity(SEALS_PER_LOAD);
+
+        for unseal_index in first_unseal_index..=last_unseal_index {
+            if !self.seal.is_sealed(unseal_index) {
                 continue;
             }
 
-            let start_byte = seal_index * BYTES_PER_SEAL;
-            let length = min(start_sector * BYTES_PER_SEAL - start_byte, BYTES_PER_SEAL);
-
-            let chunk_to_unseal = self
+            let truncated_byte = truncated_sector * BYTES_PER_SECTOR;
+            let first_unseal_byte = unseal_index as usize * BYTES_PER_SEAL;
+            let length = min(truncated_byte - first_unseal_byte, BYTES_PER_SEAL);
+            let to_unseal = self
                 .data
-                .get_mut(start_byte, length)
+                .get_mut(first_unseal_byte, length)
                 .expect("Sealed chunk should be complete");
-            self.seal_info.unseal(chunk_to_unseal, seal_index as u16);
+            self.seal.unseal(to_unseal, unseal_index);
+
+            to_reseal_set.push(unseal_index)
         }
 
-        // trucate the bitmap
-        self.seal_info.truncate(first_seal_undo);
+        // truncate the bitmap
+        self.seal.truncate(reverted_seal_index);
+
+        to_reseal_set
     }
 
     pub fn build_root(&self, is_first_chunk: bool) -> Result<Option<H256>> {
@@ -179,7 +185,7 @@ impl EntryBatch {
             return self.build_root_for_first_chunk();
         }
         Ok(
-            if let Some(raw_data) = self.get_unsealed_data(0, SECTORS_PER_LOADING) {
+            if let Some(raw_data) = self.get_unsealed_data(0, SECTORS_PER_LOAD) {
                 // TODO(zz): Check if we want to insert here.
                 Some(sub_merkle_tree(&raw_data)?.root().into())
             } else {
@@ -193,7 +199,7 @@ impl EntryBatch {
             bail!("Unexpected first batch");
         }
 
-        let raw_data = try_option!(self.get_unsealed_data(1, SECTORS_PER_LOADING - 1));
+        let raw_data = try_option!(self.get_unsealed_data(1, SECTORS_PER_LOAD - 1));
 
         trace!("put first batch: {:x?}", &raw_data);
         let mut leaves = vec![H256::zero()];
@@ -204,28 +210,28 @@ impl EntryBatch {
     }
 
     pub fn submit_seal_result(&mut self, answer: SealAnswer) -> Result<()> {
-        let seal_index_local = answer.seal_index as usize % SEALS_PER_LOADING;
+        let local_seal_index = answer.seal_index as usize % SEALS_PER_LOAD;
         assert!(
-            !self.seal_info.is_sealed(seal_index_local as u16),
+            !self.seal.is_sealed(local_seal_index as u16),
             "Duplicated sealing"
         );
         assert_eq!(
-            answer.seal_index / SEALS_PER_LOADING as u64,
-            self.seal_info.load_chunk_index()
+            answer.seal_index / SEALS_PER_LOAD as u64,
+            self.seal.load_index()
         );
 
-        self.seal_info.set_seal_context(
-            seal_index_local as u16,
+        self.seal.set_seal_context(
             answer.seal_context,
             answer.context_end_seal,
             answer.miner_id,
         );
         let sealing_segment = self
             .data
-            .get_mut(seal_index_local * BYTES_PER_SEAL, BYTES_PER_SEAL)
+            .get_mut(local_seal_index * BYTES_PER_SEAL, BYTES_PER_SEAL)
             .expect("Sealing segment should exist");
 
         sealing_segment.copy_from_slice(&answer.sealed_data);
+        self.seal.mark_sealed(local_seal_index as u16);
 
         Ok(())
     }

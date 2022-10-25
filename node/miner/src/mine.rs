@@ -4,7 +4,7 @@ use rand::{self, Rng};
 use task_executor::TaskExecutor;
 use tokio::sync::{broadcast, mpsc};
 
-use ionian_spec::{SECTORS_PER_LOADING, SECTORS_PER_MAX_MINING_RANGE, SECTORS_PER_PRICING};
+use ionian_spec::{SECTORS_PER_LOAD, SECTORS_PER_MAX_MINING_RANGE, SECTORS_PER_PRICING};
 
 use crate::{
     pora::{AnswerWithoutProof, Miner},
@@ -44,8 +44,8 @@ impl CustomMineRange {
         if self_start_position >= self_end_position {
             return None;
         }
-        let minable_length = (context.flow_length.as_u64() / SECTORS_PER_LOADING as u64)
-            * SECTORS_PER_LOADING as u64;
+        let minable_length =
+            (context.flow_length.as_u64() / SECTORS_PER_LOAD as u64) * SECTORS_PER_LOAD as u64;
 
         let mining_length = std::cmp::min(minable_length, SECTORS_PER_MAX_MINING_RANGE as u64);
 
@@ -64,7 +64,7 @@ impl CustomMineRange {
             return Some(false);
         }
         Some(
-            self_start_position <= recall_position + SECTORS_PER_LOADING as u64
+            self_start_position <= recall_position + SECTORS_PER_LOAD as u64
                 || self_end_position > recall_position,
         )
     }

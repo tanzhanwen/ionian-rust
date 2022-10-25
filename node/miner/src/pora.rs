@@ -2,7 +2,7 @@ use crate::{CustomMineRange, PoraLoader};
 use blake2::{Blake2b512, Digest};
 use contract_interface::ionian_flow::MineContext;
 use ethereum_types::{H256, U256};
-use ionian_spec::{BYTES_PER_SCRATCHPAD, BYTES_PER_SEAL, SECTORS_PER_LOADING, SECTORS_PER_SEAL};
+use ionian_spec::{BYTES_PER_SCRATCHPAD, BYTES_PER_SEAL, SECTORS_PER_LOAD, SECTORS_PER_SEAL};
 use storage::log_store::MineLoadChunk;
 use tiny_keccak::{Hasher, Keccak};
 
@@ -43,13 +43,12 @@ impl<'a> Miner<'a> {
     pub async fn iteration(&self, nonce: H256) -> Option<AnswerWithoutProof> {
         let (scratch_pad, recall_seed) = self.make_scratch_pad(&nonce);
 
-        let (_, recall_offset) = U256::from_big_endian(&recall_seed).div_mod(U256::from(
-            (self.mining_length as usize) / SECTORS_PER_LOADING,
-        ));
+        let (_, recall_offset) = U256::from_big_endian(&recall_seed)
+            .div_mod(U256::from((self.mining_length as usize) / SECTORS_PER_LOAD));
         let recall_offset = recall_offset.as_u64();
         if !self
             .custom_mine_range
-            .is_covered(self.start_position + recall_offset * SECTORS_PER_LOADING as u64)
+            .is_covered(self.start_position + recall_offset * SECTORS_PER_LOAD as u64)
             .unwrap()
         {
             trace!(
@@ -65,7 +64,7 @@ impl<'a> Miner<'a> {
             avalibilities,
         } = self
             .loader
-            .load_sealed_data(self.start_position / SECTORS_PER_LOADING as u64 + recall_offset)
+            .load_sealed_data(self.start_position / SECTORS_PER_LOAD as u64 + recall_offset)
             .await?;
 
         let scratch_pad: [[u8; BYTES_PER_SEAL]; BYTES_PER_SCRATCHPAD / BYTES_PER_SEAL] =
@@ -98,7 +97,7 @@ impl<'a> Miner<'a> {
                     start_position: self.start_position,
                     mining_length: self.mining_length,
                     recall_position: self.start_position
-                        + recall_offset * SECTORS_PER_LOADING as u64
+                        + recall_offset * SECTORS_PER_LOAD as u64
                         + idx as u64 * SECTORS_PER_SEAL as u64,
                     seal_offset: idx,
                     sealed_data,

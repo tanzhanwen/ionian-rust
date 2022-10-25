@@ -1,15 +1,24 @@
-use contract_interface::{EpochRangeWithContextDigest, IonianFlow};
+use std::{collections::BTreeMap, sync::Arc};
+
 use ethereum_types::H256;
+use tokio::{
+    sync::RwLock,
+    time::{sleep, Duration, Instant},
+};
+
+use contract_interface::{EpochRangeWithContextDigest, IonianFlow};
 use ionian_spec::SECTORS_PER_SEAL;
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use storage::error::Result;
-use storage::log_store::{SealAnswer, SealTask, Store};
+use storage::{
+    error::Result,
+    log_store::{SealAnswer, SealTask, Store},
+};
 use task_executor::TaskExecutor;
-use tokio::sync::RwLock;
-use tokio::time::{sleep, Duration, Instant};
 
 use crate::config::{MineServiceMiddleware, MinerConfig};
+
+const DB_QUERY_PERIOD_ON_NO_TASK: u64 = 1;
+const DB_QUERY_PERIOD_ON_ERROR: u64 = 5;
+const CHAIN_STATUS_QUERY_PERIOD: u64 = 5;
 
 pub struct Sealer {
     flow_contract: IonianFlow<MineServiceMiddleware>,
@@ -59,16 +68,16 @@ impl Sealer {
                     if let Err(err) = self.update_flow_length().await{
                         warn!("Fetch onchain context failed {:?}", err);
                     }
-                    contract_checker_throttle.as_mut().reset(Instant::now() + Duration::from_secs(5));
+                    contract_checker_throttle.as_mut().reset(Instant::now() + Duration::from_secs(CHAIN_STATUS_QUERY_PERIOD));
                 }
 
                 _ = async {}, if db_checker_throttle.is_elapsed() => {
                     match self.seal_iteration().await {
                         Ok(true) => {},
-                        Ok(false) => {db_checker_throttle.as_mut().reset(Instant::now() + Duration::from_secs(1));}
+                        Ok(false) => {db_checker_throttle.as_mut().reset(Instant::now() + Duration::from_secs(DB_QUERY_PERIOD_ON_NO_TASK));}
                         Err(err) => {
                             warn!("Seal iteration failed {:?}", err);
-                            db_checker_throttle.as_mut().reset(Instant::now() + Duration::from_secs(5));
+                            db_checker_throttle.as_mut().reset(Instant::now() + Duration::from_secs(DB_QUERY_PERIOD_ON_ERROR));
                         }
                     }
                 }
@@ -78,7 +87,8 @@ impl Sealer {
 
     async fn update_flow_length(&mut self) -> Result<()> {
         let recent_context = self.flow_contract.make_context_with_result().call().await?;
-        debug!("Recent context is {:?}", recent_context);
+        debug!(target: "seal", "Recent context is {:?}", recent_context);
+
         let recent_flow_length = recent_context.flow_length.as_u64();
         if self.last_context_flow_length < recent_flow_length {
             let epoch_range = self
@@ -95,7 +105,7 @@ impl Sealer {
                 },
             );
             self.last_context_flow_length = recent_flow_length;
-            info!("Update sealable flow length: {}", recent_flow_length)
+            info!(target: "seal", "Update sealable flow length: {}", recent_flow_length)
         }
         Ok(())
     }
@@ -128,7 +138,7 @@ impl Sealer {
             }
         };
         info!(
-            "Fetch new context: range {} -> {}",
+            target:"seal", "Fetch new context: range {} -> {}",
             context.start, context.end
         );
         self.context_cache.insert(context.start, context.clone());
@@ -176,7 +186,7 @@ impl Sealer {
                 if let Some(context) = self.fetch_context(task.seal_index).await? {
                     context
                 } else {
-                    debug!("Index {} is not ready for seal", task.seal_index);
+                    trace!(target: "seal", "Index {} is not ready for seal", task.seal_index);
                     continue;
                 };
             let mut data = task.non_sealed_data;
