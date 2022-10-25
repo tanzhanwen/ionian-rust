@@ -24,7 +24,7 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn upload_segment(&self, segment: SegmentWithProof) -> RpcResult<()> {
-        debug!("ionian_uploadSegment()");
+        debug!(root = %segment.root, index = %segment.index, "ionian_uploadSegment");
 
         let _ = self.ctx.chunk_pool.validate_segment_size(&segment.data)?;
 
@@ -79,7 +79,7 @@ impl RpcServer for RpcServerImpl {
         start_index: usize,
         end_index: usize,
     ) -> RpcResult<Option<Segment>> {
-        debug!("ionian_downloadSegment()");
+        debug!(%data_root, %start_index, %end_index, "ionian_downloadSegment");
 
         if start_index >= end_index {
             return Err(error::invalid_params("end_index", "invalid chunk index"));
@@ -116,7 +116,7 @@ impl RpcServer for RpcServerImpl {
         data_root: DataRoot,
         index: usize,
     ) -> RpcResult<Option<SegmentWithProof>> {
-        debug!("ionian_downloadSegmentWithProof()");
+        debug!(%data_root, %index, "ionian_downloadSegmentWithProof");
 
         let tx = try_option!(self.ctx.log_store.get_tx_by_data_root(&data_root).await?);
 
@@ -162,21 +162,19 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn get_file_info(&self, data_root: DataRoot) -> RpcResult<Option<FileInfo>> {
-        debug!("get_file_info()");
+        debug!(%data_root, "ionian_getFileInfo");
 
         let tx = try_option!(self.ctx.log_store.get_tx_by_data_root(&data_root).await?);
 
-        let (uploaded_seg_num, is_cached) =
-            self.ctx.chunk_pool.get_uploaded_seg_num(&data_root).await;
+        Ok(Some(self.get_file_info_by_tx(tx).await?))
+    }
 
-        let finalized = self.ctx.log_store.check_tx_completed(tx.seq).await?;
+    async fn get_file_info_by_tx_seq(&self, tx_seq: u64) -> RpcResult<Option<FileInfo>> {
+        debug!(%tx_seq, "ionian_getFileInfoByTxSeq");
 
-        Ok(Some(FileInfo {
-            tx,
-            finalized,
-            is_cached,
-            uploaded_seg_num,
-        }))
+        let tx = try_option!(self.ctx.log_store.get_tx_by_seq_number(tx_seq).await?);
+
+        Ok(Some(self.get_file_info_by_tx(tx).await?))
     }
 }
 
@@ -214,5 +212,22 @@ impl RpcServerImpl {
 
             Ok(true)
         }
+    }
+
+    async fn get_file_info_by_tx(&self, tx: Transaction) -> RpcResult<FileInfo> {
+        let (uploaded_seg_num, is_cached) = self
+            .ctx
+            .chunk_pool
+            .get_uploaded_seg_num(&tx.data_merkle_root)
+            .await;
+
+        let finalized = self.ctx.log_store.check_tx_completed(tx.seq).await?;
+
+        Ok(FileInfo {
+            tx,
+            finalized,
+            is_cached,
+            uploaded_seg_num,
+        })
     }
 }

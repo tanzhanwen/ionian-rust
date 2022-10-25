@@ -28,4 +28,7 @@ pub trait Rpc {
 
     #[method(name = "getFileInfo")]
     async fn get_file_info(&self, data_root: DataRoot) -> RpcResult<Option<FileInfo>>;
+
+    #[method(name = "getFileInfoByTxSeq")]
+    async fn get_file_info_by_tx_seq(&self, tx_seq: u64) -> RpcResult<Option<FileInfo>>;
 }
