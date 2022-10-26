@@ -35,7 +35,7 @@ pub struct Manager {
     /// The next `tx_seq` to sync in sequence.
     next_tx_seq: Arc<AtomicU64>,
 
-    /// The maximum `tx_seq` to sync in sequence.
+    /// The maximum `tx_seq` to sync in sequence, `u64::MAX` means unlimited.
     /// Generally, it is updated when file announcement received.
     max_tx_seq: Arc<AtomicU64>,
 
@@ -55,6 +55,8 @@ impl Manager {
         let sync_store = SyncStore::new(store.clone());
 
         let (next_tx_seq, max_tx_seq) = sync_store.get_tx_seq_range().await?;
+        let next_tx_seq = next_tx_seq.unwrap_or(0);
+        let max_tx_seq = max_tx_seq.unwrap_or(u64::MAX);
 
         Ok(Self {
             next_tx_seq: Arc::new(AtomicU64::new(next_tx_seq)),
@@ -117,7 +119,8 @@ impl Manager {
 
     pub async fn update_on_announcement(&self, announced_tx_seq: u64) {
         // new file announced
-        if announced_tx_seq > self.max_tx_seq.load(Ordering::Relaxed) {
+        let max_tx_seq = self.max_tx_seq.load(Ordering::Relaxed);
+        if max_tx_seq == u64::MAX || announced_tx_seq > max_tx_seq {
             match self.sync_store.set_max_tx_seq(announced_tx_seq).await {
                 Ok(()) => self.max_tx_seq.store(announced_tx_seq, Ordering::Relaxed),
                 Err(e) => error!(%e, "Failed to set max_tx_seq in store"),
@@ -136,8 +139,11 @@ impl Manager {
         }
     }
 
-    async fn move_forward(&self, pending: bool) -> Result<()> {
+    async fn move_forward(&self, pending: bool) -> Result<bool> {
         let tx_seq = self.next_tx_seq.load(Ordering::Relaxed);
+        if tx_seq > self.max_tx_seq.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
 
         // put the tx into pending list
         if pending && self.sync_store.add_pending_tx(tx_seq).await? {
@@ -148,7 +154,7 @@ impl Manager {
         self.sync_store.set_next_tx_seq(next_tx_seq).await?;
         self.next_tx_seq.store(next_tx_seq, Ordering::Relaxed);
 
-        Ok(())
+        Ok(true)
     }
 
     /// Returns whether file sync in progress but no peers found
@@ -265,7 +271,7 @@ async fn sync_once(manager: &Manager) -> Result<bool> {
 
     // already finalized
     if manager.store.check_tx_completed(next_tx_seq).await? {
-        manager.move_forward(false).await?;
+        assert!(manager.move_forward(false).await?);
         return Ok(true);
     }
 
@@ -274,7 +280,7 @@ async fn sync_once(manager: &Manager) -> Result<bool> {
 
     // put tx to pending list if no peers found for a long time
     if no_peer_timeout {
-        manager.move_forward(true).await?;
+        assert!(manager.move_forward(true).await?);
     }
 
     Ok(no_peer_timeout)
@@ -347,7 +353,9 @@ mod tests {
     async fn new_manager(runtime: &TestStoreRuntime, next_tx_seq: u64, max_tx_seq: u64) -> Manager {
         let sync_store = SyncStore::new(runtime.store.clone());
         sync_store.set_next_tx_seq(next_tx_seq).await.unwrap();
-        sync_store.set_max_tx_seq(max_tx_seq).await.unwrap();
+        if max_tx_seq < u64::MAX {
+            sync_store.set_max_tx_seq(max_tx_seq).await.unwrap();
+        }
 
         let (sync_send, _) = Channel::unbounded();
         Manager::new(runtime.store.clone(), sync_send)
@@ -440,14 +448,30 @@ mod tests {
         let manager = new_manager(&runtime, 4, 12).await;
 
         // move forward from 4 to 5
-        manager.move_forward(false).await.unwrap();
+        assert_eq!(manager.move_forward(false).await.unwrap(), true);
         assert_eq!(manager.next_tx_seq.load(Ordering::Relaxed), 5);
         assert_eq!(manager.max_tx_seq.load(Ordering::Relaxed), 12);
 
         // move forward and add tx 5 to pending list
-        manager.move_forward(true).await.unwrap();
+        assert_eq!(manager.move_forward(true).await.unwrap(), true);
         assert_eq!(manager.next_tx_seq.load(Ordering::Relaxed), 6);
         assert_eq!(manager.max_tx_seq.load(Ordering::Relaxed), 12);
         assert_eq!(manager.sync_store.random_tx().await.unwrap(), Some(5));
+    }
+
+    #[tokio::test]
+    async fn test_manager_move_forward_failed() {
+        let runtime = TestStoreRuntime::default();
+        let manager = new_manager(&runtime, 5, 5).await;
+
+        // 5 -> 6
+        assert_eq!(manager.move_forward(false).await.unwrap(), true);
+        assert_eq!(manager.next_tx_seq.load(Ordering::Relaxed), 6);
+        assert_eq!(manager.max_tx_seq.load(Ordering::Relaxed), 5);
+
+        // cannot move forward anymore
+        assert_eq!(manager.move_forward(false).await.unwrap(), false);
+        assert_eq!(manager.next_tx_seq.load(Ordering::Relaxed), 6);
+        assert_eq!(manager.max_tx_seq.load(Ordering::Relaxed), 5);
     }
 }

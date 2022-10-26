@@ -28,19 +28,14 @@ impl SyncStore {
         }
     }
 
-    pub async fn get_tx_seq_range(&self) -> Result<(u64, u64)> {
+    pub async fn get_tx_seq_range(&self) -> Result<(Option<u64>, Option<u64>)> {
         let store = self.store.get_store().read().await;
 
         // load next_tx_seq
-        let next_tx_seq = store.get_config_decoded(&KEY_NEXT_TX_SEQ)?.unwrap_or(0);
+        let next_tx_seq = store.get_config_decoded(&KEY_NEXT_TX_SEQ)?;
 
         // load max_tx_seq
-        let max_tx_seq = match store.get_config_decoded(&KEY_MAX_TX_SEQ)? {
-            Some(val) => val,
-            // use the next_tx_seq for log sync by default
-            // TODO(qhz) what if storage node fall behind a lot?
-            None => store.next_tx_seq()?,
-        };
+        let max_tx_seq = store.get_config_decoded(&KEY_MAX_TX_SEQ)?;
 
         Ok((next_tx_seq, max_tx_seq))
     }
@@ -152,14 +147,14 @@ mod tests {
         let store = SyncStore::new(runtime.store.clone());
 
         // check values by default
-        assert_eq!(store.get_tx_seq_range().await.unwrap(), (0, 0));
+        assert_eq!(store.get_tx_seq_range().await.unwrap(), (None, None));
 
         // update values
         store.set_next_tx_seq(4).await.unwrap();
         store.set_max_tx_seq(12).await.unwrap();
 
         // check values again
-        assert_eq!(store.get_tx_seq_range().await.unwrap(), (4, 12));
+        assert_eq!(store.get_tx_seq_range().await.unwrap(), (Some(4), Some(12)));
     }
 
     #[tokio::test]
