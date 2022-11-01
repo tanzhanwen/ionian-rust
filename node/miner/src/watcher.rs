@@ -120,7 +120,12 @@ impl MineContextWatcher {
             try_join!(context_call.call(), epoch_call.call(), quality_call.call())
                 .map_err(|e| format!("Failed to query mining context: {:?}", e))?;
         let report = if context.epoch > epoch && context.digest != EMPTY_HASH.0 {
-            Some((context, quality))
+            if context.block_digest == [0; 32] {
+                warn!("Mine Context is not updated on time.");
+                None
+            } else {
+                Some((context, quality))
+            }
         } else {
             None
         };

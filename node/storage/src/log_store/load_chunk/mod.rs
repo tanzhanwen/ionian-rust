@@ -92,23 +92,23 @@ impl EntryBatch {
             (self.data.get(start_byte, length_byte)?.to_vec(), None)
         };
 
-        let first_seal_chunk_length = BYTES_PER_SEAL - start_byte % BYTES_PER_SEAL;
+        let incomplete_seal_chunk_length = (BYTES_PER_SEAL - start_byte) % BYTES_PER_SEAL;
 
         // Unseal the first incomplete sealing chunk (if exists)
         if let Some(unseal_mask_seed) = unseal_mask_seed {
-            let data_to_unseal = if loaded_data.len() < first_seal_chunk_length {
+            let data_to_unseal = if loaded_data.len() < incomplete_seal_chunk_length {
                 // The loaded data does not cross sealings
                 loaded_data.as_mut()
             } else {
-                loaded_data[..first_seal_chunk_length].as_mut()
+                loaded_data[..incomplete_seal_chunk_length].as_mut()
             };
 
             ionian_seal::unseal_with_mask_seed(data_to_unseal, &unseal_mask_seed);
         }
 
-        if loaded_data.len() > first_seal_chunk_length {
-            let complete_chunks = &mut loaded_data[first_seal_chunk_length..];
-            let start_seal = (start_byte + first_seal_chunk_length) / BYTES_PER_SEAL;
+        if loaded_data.len() > incomplete_seal_chunk_length {
+            let complete_chunks = &mut loaded_data[incomplete_seal_chunk_length..];
+            let start_seal = (start_byte + incomplete_seal_chunk_length) / BYTES_PER_SEAL;
 
             for (seal_index, data_to_unseal) in complete_chunks
                 .chunks_mut(BYTES_PER_SEAL)
@@ -234,5 +234,161 @@ impl EntryBatch {
         self.seal.mark_sealed(local_seal_index as u16);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EntryBatch, SealAnswer};
+    use ethereum_types::H256;
+    use ionian_spec::{
+        BYTES_PER_SEAL, BYTES_PER_SECTOR, SEALS_PER_LOAD, SECTORS_PER_LOAD, SECTORS_PER_SEAL,
+    };
+    const LOAD_INDEX: u64 = 1;
+    fn seal(
+        batch: &mut EntryBatch,
+        seal_index: u16,
+        context_digest: H256,
+        context_end_seal_local: u64,
+    ) {
+        let miner_id = H256([33u8; 32]);
+        let mut data = batch.get_non_sealed_data(seal_index).unwrap();
+        ionian_seal::seal(
+            &mut data,
+            &miner_id,
+            &context_digest,
+            LOAD_INDEX * SECTORS_PER_LOAD as u64 + seal_index as u64 * SECTORS_PER_SEAL as u64,
+        );
+        batch
+            .submit_seal_result(SealAnswer {
+                seal_index: LOAD_INDEX * SEALS_PER_LOAD as u64 + seal_index as u64,
+                version: 0,
+                sealed_data: data,
+                miner_id: miner_id,
+                seal_context: context_digest,
+                context_end_seal: LOAD_INDEX * SEALS_PER_LOAD as u64 + context_end_seal_local,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_seal_single() {
+        let mut batch = EntryBatch::new(LOAD_INDEX);
+        batch.insert_data(0, vec![11; BYTES_PER_SEAL]).unwrap();
+
+        const DIGEST: H256 = H256([22u8; 32]);
+        seal(&mut batch, 0, DIGEST, 1);
+
+        assert_eq!(
+            batch.get_unsealed_data(0, SECTORS_PER_SEAL).unwrap(),
+            vec![11; SECTORS_PER_SEAL * BYTES_PER_SECTOR]
+        );
+        assert_eq!(
+            batch.get_unsealed_data(1, SECTORS_PER_SEAL - 1).unwrap(),
+            vec![11; (SECTORS_PER_SEAL - 1) * BYTES_PER_SECTOR]
+        );
+    }
+
+    fn check_two_seals(batch: &EntryBatch) {
+        assert_eq!(
+            batch.get_unsealed_data(0, SECTORS_PER_SEAL).unwrap(),
+            vec![11; SECTORS_PER_SEAL * BYTES_PER_SECTOR]
+        );
+        assert_eq!(
+            batch
+                .get_unsealed_data(SECTORS_PER_SEAL, SECTORS_PER_SEAL)
+                .unwrap(),
+            vec![11; SECTORS_PER_SEAL * BYTES_PER_SECTOR]
+        );
+        assert_eq!(
+            batch.get_unsealed_data(1, SECTORS_PER_SEAL - 1).unwrap(),
+            vec![11; (SECTORS_PER_SEAL - 1) * BYTES_PER_SECTOR]
+        );
+        assert_eq!(
+            batch.get_unsealed_data(1, SECTORS_PER_SEAL).unwrap(),
+            vec![11; SECTORS_PER_SEAL * BYTES_PER_SECTOR]
+        );
+        assert_eq!(
+            batch
+                .get_unsealed_data(1, 2 * SECTORS_PER_SEAL - 1)
+                .unwrap(),
+            vec![11; (2 * SECTORS_PER_SEAL - 1) * BYTES_PER_SECTOR]
+        );
+    }
+
+    #[test]
+    fn test_seal_mono_context() {
+        let mut batch = EntryBatch::new(LOAD_INDEX);
+        batch.insert_data(0, vec![11; BYTES_PER_SEAL * 2]).unwrap();
+
+        const DIGEST: H256 = H256([22u8; 32]);
+        seal(&mut batch, 0, DIGEST, 2);
+        seal(&mut batch, 1, DIGEST, 2);
+
+        check_two_seals(&batch);
+    }
+
+    #[test]
+    fn test_seal_mono_context_reorder() {
+        let mut batch = EntryBatch::new(LOAD_INDEX);
+        batch.insert_data(0, vec![11; BYTES_PER_SEAL * 2]).unwrap();
+
+        const DIGEST: H256 = H256([22u8; 32]);
+        seal(&mut batch, 1, DIGEST, 2);
+        seal(&mut batch, 0, DIGEST, 2);
+
+        check_two_seals(&batch);
+    }
+
+    #[test]
+    fn test_seal_mono_context_partial() {
+        let mut batch = EntryBatch::new(LOAD_INDEX);
+        batch.insert_data(0, vec![11; BYTES_PER_SEAL * 2]).unwrap();
+
+        const DIGEST: H256 = H256([22u8; 32]);
+        seal(&mut batch, 1, DIGEST, 2);
+
+        check_two_seals(&batch);
+    }
+
+    #[test]
+    fn test_seal_hete_context() {
+        let mut batch = EntryBatch::new(LOAD_INDEX);
+        batch.insert_data(0, vec![11; BYTES_PER_SEAL * 2]).unwrap();
+
+        const DIGEST0: H256 = H256([22u8; 32]);
+        const DIGEST1: H256 = H256([33u8; 32]);
+
+        seal(&mut batch, 0, DIGEST0, 1);
+        seal(&mut batch, 1, DIGEST1, 2);
+
+        check_two_seals(&batch);
+    }
+
+    #[test]
+    fn test_seal_hete_context_reord() {
+        let mut batch = EntryBatch::new(LOAD_INDEX);
+        batch.insert_data(0, vec![11; BYTES_PER_SEAL * 2]).unwrap();
+
+        const DIGEST0: H256 = H256([22u8; 32]);
+        const DIGEST1: H256 = H256([33u8; 32]);
+
+        seal(&mut batch, 1, DIGEST1, 2);
+        seal(&mut batch, 0, DIGEST0, 1);
+
+        check_two_seals(&batch);
+    }
+
+    #[test]
+    fn test_seal_hete_context_partial() {
+        let mut batch = EntryBatch::new(LOAD_INDEX);
+        batch.insert_data(0, vec![11; BYTES_PER_SEAL * 2]).unwrap();
+
+        // const DIGEST0: H256 = H256([22u8; 32]);
+        const DIGEST1: H256 = H256([33u8; 32]);
+
+        seal(&mut batch, 1, DIGEST1, 2);
+
+        check_two_seals(&batch);
     }
 }
