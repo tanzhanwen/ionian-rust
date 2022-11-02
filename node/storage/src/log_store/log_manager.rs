@@ -173,6 +173,11 @@ impl LogStoreWrite for LogManager {
     }
 
     fn finalize_tx_with_hash(&mut self, tx_seq: u64, tx_hash: H256) -> crate::error::Result<bool> {
+        trace!(
+            "finalize_tx_with_hash: tx_seq={} tx_hash={:?}",
+            tx_seq,
+            tx_hash
+        );
         let tx = self
             .tx_store
             .get_tx_by_seq_number(tx_seq)?
@@ -192,6 +197,13 @@ impl LogStoreWrite for LogManager {
             .is_some()
         {
             self.tx_store.finalize_tx(tx_seq)?;
+            let same_root_seq_list = self
+                .tx_store
+                .get_tx_seq_list_by_data_root(&tx.data_merkle_root)?;
+            // Check if there are other same-root transaction not finalized.
+            if same_root_seq_list.first() == Some(&tx_seq) {
+                self.copy_tx_data(tx_seq, same_root_seq_list[1..].to_vec())?;
+            }
             Ok(true)
         } else {
             bail!("finalize tx with data missing: tx_seq={}", tx_seq)

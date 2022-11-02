@@ -86,6 +86,9 @@ class IonianNode(TestNode):
     def ionian_get_file_info(self, data_root):
         return self.rpc.ionian_getFileInfo([data_root])
 
+    def ionian_get_file_info_by_tx_seq(self, tx_seq):
+        return self.rpc.ionian_getFileInfoByTxSeq([tx_seq])
+
     def shutdown(self):
         self.rpc.admin_shutdown()
         self.wait_until_stopped()
