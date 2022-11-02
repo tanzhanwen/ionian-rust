@@ -134,20 +134,31 @@ fn test_root() {
 #[test]
 fn test_multi_tx() {
     let mut store = create_store();
-    put_tx(&mut store, 3, 0, 2);
-    put_tx(&mut store, 3, 1, 6);
-    put_tx(&mut store, 5, 2, 12);
+    put_tx(&mut store, 3, 0);
+    put_tx(&mut store, 3, 1);
+    put_tx(&mut store, 5, 2);
 }
 
 #[test]
 fn test_revert() {
     let mut store = create_store();
-    put_tx(&mut store, 1, 0, 1);
+    put_tx(&mut store, 1, 0);
     store.revert_to(0u64.wrapping_sub(1)).unwrap();
-    put_tx(&mut store, 1, 0, 1);
-    put_tx(&mut store, 1, 1, 2);
+    put_tx(&mut store, 1, 0);
+    put_tx(&mut store, 1, 1);
     store.revert_to(0).unwrap();
-    put_tx(&mut store, 1, 1, 2);
+    put_tx(&mut store, 1, 1);
+
+    // Test revert across the last chunk.
+    put_tx(&mut store, 1024 + 1, 2);
+    store.revert_to(1).unwrap();
+
+    // Test with chunk boundary within a tx.
+    put_tx(&mut store, 256, 2);
+    put_tx(&mut store, 512 + 1, 3);
+    put_tx(&mut store, 1, 4);
+    store.revert_to(1).unwrap();
+    put_tx(&mut store, 1, 1);
 }
 
 fn create_store() -> LogManager {
@@ -156,13 +167,17 @@ fn create_store() -> LogManager {
     LogManager::memorydb(config).unwrap()
 }
 
-fn put_tx(store: &mut LogManager, chunk_count: usize, seq: u64, start_entry_index: u64) {
+fn put_tx(store: &mut LogManager, chunk_count: usize, seq: u64) {
     let data_size = CHUNK_SIZE * chunk_count;
     let mut data = vec![0u8; data_size];
     for i in 0..chunk_count {
         data[i * CHUNK_SIZE] = random();
     }
     let tx_merkle = sub_merkle_tree(&data).unwrap();
+    let merkle_nodes = tx_subtree_root_list_padded(&data);
+    let flow_len = store.get_context().unwrap().1;
+    let first_subtree_size = 1 << (merkle_nodes.first().unwrap().0 - 1);
+    let start_entry_index = ((flow_len - 1) / first_subtree_size + 1) * first_subtree_size;
     let tx = Transaction {
         stream_ids: vec![],
         size: data_size as u64,
@@ -171,7 +186,7 @@ fn put_tx(store: &mut LogManager, chunk_count: usize, seq: u64, start_entry_inde
         data: vec![],
         start_entry_index,
         // TODO: This can come from `tx_merkle`.
-        merkle_nodes: tx_subtree_root_list_padded(&data),
+        merkle_nodes,
     };
     store.put_tx(tx.clone()).unwrap();
     for start_index in (0..chunk_count).step_by(PORA_CHUNK_SIZE) {

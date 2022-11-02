@@ -116,6 +116,7 @@ impl FlowRead for FlowStore {
                 if data_list.is_empty() {
                     continue;
                 }
+                // This will not happen for now because we only get entries for the last chunk.
                 if let Some(last) = entry_list.last_mut() {
                     if last.start_index + bytes_to_entries(last.data.len() as u64)
                         == data_list[0].start_index

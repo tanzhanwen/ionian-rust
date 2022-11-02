@@ -247,13 +247,15 @@ impl LogStoreWrite for LogManager {
     }
 
     /// Return the reverted Transactions in order.
+    /// `tx_seq == u64::MAX` is a special case for reverting all transactions.
     fn revert_to(&mut self, tx_seq: u64) -> Result<Vec<Transaction>> {
         self.revert_merkle_tree(tx_seq)?;
         let start_index = self.last_chunk_start_index() * PORA_CHUNK_SIZE as u64
             + self.last_chunk_merkle.leaves() as u64;
         self.flow_store.truncate(start_index)?;
         let mut transactions = Vec::new();
-        for seq in (tx_seq + 1)..self.next_tx_seq()? {
+        let start = if tx_seq != u64::MAX { tx_seq + 1 } else { 0 };
+        for seq in start..self.next_tx_seq()? {
             match self.tx_store.remove_tx_by_seq_number(seq)? {
                 None => {
                     // All transactions are supposed to exist before we revert them.
@@ -564,8 +566,14 @@ impl LogManager {
             for e in last_chunk_data {
                 let start_index = e.start_index - last_chunk_start_index;
                 for i in 0..e.data.len() / ENTRY_SIZE {
+                    let index = i + start_index as usize;
+                    if index >= self.last_chunk_merkle.leaves() {
+                        // We revert the merkle tree before truncate the flow store,
+                        // so last_chunk_data may include data that should have been truncated.
+                        break;
+                    }
                     self.last_chunk_merkle.fill_leaf(
-                        i + start_index as usize,
+                        index,
                         Sha3Algorithm::leaf(&e.data[i * ENTRY_SIZE..(i + 1) * ENTRY_SIZE]),
                     );
                 }

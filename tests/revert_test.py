@@ -47,7 +47,7 @@ class RevertTest(TestFramework):
         self.log.info("Node 1 epoch {}".format(blockchain_client1.cfx_epochNumber()))
         self.log.info("Node 2 epoch {}".format(blockchain_client2.cfx_epochNumber()))
 
-        self.log.info("===== submit tx to seconde node =====")
+        self.log.info("===== submit tx to second node =====")
         chunk_data = b"\x10" * 256
         submissions, data_root1 = create_submission(chunk_data)
         tx_hash = self.contract.submit(submissions, 1, tx_prarams=TX_PARAMS1)
