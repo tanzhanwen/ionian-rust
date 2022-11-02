@@ -3,7 +3,7 @@
 from test_framework.test_framework import TestFramework
 from test_framework.blockchain_node import BlockChainNodeType
 from test_framework.conflux_node import connect_nodes, disconnect_nodes, sync_blocks
-from config.node_config import TX_PARAMS1
+from config.node_config import CONFLUX_CONFIG, TX_PARAMS1
 from utility.submission import create_submission, submit_data
 from utility.utils import wait_until
 
@@ -12,6 +12,8 @@ class RevertTest(TestFramework):
     def setup_params(self):
         self.num_blockchain_nodes = 2
         self.num_nodes = 1
+
+        del CONFLUX_CONFIG["dev_block_interval_ms"]
 
     def run_test(self):
         blockchain_client1 = self.blockchain_nodes[0]

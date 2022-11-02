@@ -2,6 +2,7 @@
 
 from test_framework.test_framework import TestFramework
 from config.node_config import MINER_ID, GENESIS_PRIV_KEY
+from test_framework.blockchain_node import BlockChainNodeType
 from utility.submission import create_submission, submit_data
 from utility.utils import wait_until
 
@@ -64,4 +65,4 @@ class MineTest(TestFramework):
 
 
 if __name__ == "__main__":
-    MineTest().main()
+    MineTest(blockchain_node_type=BlockChainNodeType.BSC).main()
