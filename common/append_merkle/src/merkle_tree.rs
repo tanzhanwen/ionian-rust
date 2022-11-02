@@ -109,3 +109,23 @@ pub trait MerkleTreeRead {
         Ok(Proof::new(lemma, path))
     }
 }
+
+/// This includes the data to reconstruct an `AppendMerkleTree` root where some nodes
+/// are `null`. Other intermediate nodes will be computed based on these known nodes.
+pub struct MerkleTreeInitialData<E: HashElement> {
+    /// A list of `(subtree_depth, root)`.
+    /// The subtrees are continuous so we can compute the tree root with these subtree roots.
+    pub subtree_list: Vec<(usize, E)>,
+    /// A list of `(index, leaf_hash)`.
+    /// These leaves are in some large subtrees of `subtree_list`. 1-node subtrees are also leaves,
+    /// but they will not be duplicated in `known_leaves`.
+    pub known_leaves: Vec<(usize, E)>,
+}
+
+impl<E: HashElement> MerkleTreeInitialData<E> {
+    pub fn leaves(&self) -> usize {
+        self.subtree_list.iter().fold(0, |acc, (subtree_depth, _)| {
+            acc + (1 << (subtree_depth - 1))
+        })
+    }
+}

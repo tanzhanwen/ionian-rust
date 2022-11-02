@@ -22,7 +22,7 @@ CONFLUX_CONFIG = dict(
     public_address="127.0.0.1",
     poll_lifetime_in_seconds=60,
     dev_allow_phase_change_without_peer="true",
-    dev_block_interval_ms=50,
+    dev_block_interval_ms=200,
 )
 
 BLOCK_SIZE_LIMIT = 200 * 1024

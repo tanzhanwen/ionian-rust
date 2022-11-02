@@ -7,8 +7,9 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::marker::PhantomData;
+use tracing::warn;
 
-pub use crate::merkle_tree::{Algorithm, HashElement, MerkleTreeRead};
+pub use crate::merkle_tree::{Algorithm, HashElement, MerkleTreeInitialData, MerkleTreeRead};
 pub use proof::{Proof, RangeProof};
 pub use sha3::Sha3Algorithm;
 
@@ -59,7 +60,7 @@ impl<E: HashElement, A: Algorithm<E>> AppendMerkleTree<E, A> {
     }
 
     pub fn new_with_subtrees(
-        subtree_root_list: Vec<(usize, E)>,
+        initial_data: MerkleTreeInitialData<E>,
         leaf_height: usize,
         start_tx_seq: Option<u64>,
     ) -> Result<Self> {
@@ -71,7 +72,7 @@ impl<E: HashElement, A: Algorithm<E>> AppendMerkleTree<E, A> {
             leaf_height,
             _a: Default::default(),
         };
-        if subtree_root_list.is_empty() {
+        if initial_data.subtree_list.is_empty() {
             if let Some(seq) = start_tx_seq {
                 merkle.delta_nodes_map.insert(
                     seq,
@@ -82,8 +83,11 @@ impl<E: HashElement, A: Algorithm<E>> AppendMerkleTree<E, A> {
             }
             return Ok(merkle);
         }
-        merkle.append_subtree_list(subtree_root_list)?;
+        merkle.append_subtree_list(initial_data.subtree_list)?;
         merkle.commit(start_tx_seq);
+        for (index, h) in initial_data.known_leaves {
+            merkle.fill_leaf(index, h);
+        }
         Ok(merkle)
     }
 
@@ -152,11 +156,11 @@ impl<E: HashElement, A: Algorithm<E>> AppendMerkleTree<E, A> {
     }
 
     pub fn append_subtree_list(&mut self, subtree_list: Vec<(usize, E)>) -> Result<()> {
-        let start_index = self.leaves();
         for (subtree_depth, subtree_root) in subtree_list {
+            let start_index = self.leaves();
             self.append_subtree_inner(subtree_depth, subtree_root)?;
+            self.recompute_after_append(start_index);
         }
-        self.recompute_after_append(start_index);
         Ok(())
     }
 
@@ -317,7 +321,8 @@ impl<E: HashElement, A: Algorithm<E>> AppendMerkleTree<E, A> {
                             {
                                 // Recompute changes a node in the middle. This should be impossible
                                 // if the inputs are valid.
-                                panic!("Invalid append merkle tree!")
+                                panic!("Invalid append merkle tree! height={} index={} expected={:?} get={:?}", 
+                                       height+1, parent_index, self.layers[height + 1][parent_index], parent);
                             }
                             self.layers[height + 1][parent_index] = parent;
                             last_changed_parent_index = Some(parent_index);
@@ -347,8 +352,9 @@ impl<E: HashElement, A: Algorithm<E>> AppendMerkleTree<E, A> {
             bail!("Subtree depth should not be zero!");
         }
         if self.leaves() % (1 << (subtree_depth - 1)) != 0 {
-            bail!(
-                "The current leaves count is aligned with the merged subtree, leaves={}",
+            warn!(
+                "The current leaves count is not aligned with the merged subtree, \
+                this is only possible during recovery, leaves={}",
                 self.leaves()
             );
         }

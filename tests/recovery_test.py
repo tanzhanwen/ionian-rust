@@ -36,6 +36,23 @@ class RecoveryTest(TestFramework):
         self.nodes[0].wait_for_rpc_connection()
         wait_until(lambda: client.ionian_get_file_info(data_root)["finalized"])
 
+        # Test with larger data.
+        chunk_data = b"\x03" * 256 * 1024 * 19
+        submissions, data_root = create_submission(chunk_data)
+        self.contract.submit(submissions)
+        wait_until(lambda: self.contract.num_submissions() == 3)
+        wait_until(lambda: client.ionian_get_file_info(data_root) is not None)
+        self.stop_storage_node(0)
+        self.start_storage_node(0)
+        self.nodes[0].wait_for_rpc_connection()
+        submit_data(client, chunk_data)
+        wait_until(lambda: client.ionian_get_file_info(data_root)["finalized"])
+        self.stop_storage_node(0)
+        self.start_storage_node(0)
+        self.nodes[0].wait_for_rpc_connection()
+        wait_until(lambda: client.ionian_get_file_info(data_root)["finalized"])
+
+
 
 if __name__ == "__main__":
     RecoveryTest().main()

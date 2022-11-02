@@ -1,3 +1,4 @@
+use append_merkle::MerkleTreeInitialData;
 use ethereum_types::H256;
 use ionian_spec::{BYTES_PER_SEAL, SEALS_PER_LOAD};
 use shared_types::{
@@ -172,7 +173,7 @@ pub trait FlowRead {
     /// For simplicity, `index_start` and `index_end` must be at the batch boundaries.
     fn get_available_entries(&self, index_start: u64, index_end: u64) -> Result<Vec<ChunkArray>>;
 
-    fn get_chunk_root_list(&self) -> Result<Vec<(usize, DataRoot)>>;
+    fn get_chunk_root_list(&self) -> Result<MerkleTreeInitialData<DataRoot>>;
 
     fn load_sealed_data(&self, chunk_index: u64) -> Result<Option<MineLoadChunk>>;
 }
