@@ -531,6 +531,8 @@ impl LogManager {
         );
         if last_chunk_merkle.leaves() != 0 {
             pora_chunks_merkle.append(*last_chunk_merkle.root());
+            // update the merkle root
+            pora_chunks_merkle.commit(start_tx_seq);
         }
         let mut log_manager = Self {
             db,

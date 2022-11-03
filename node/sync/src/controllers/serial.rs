@@ -19,6 +19,7 @@ const MAX_REQUEST_FAILURES: usize = 3;
 const PEER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5);
 const WAIT_OUTGOING_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+const NEXT_REQUEST_WAIT_TIME: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FailureReason {
@@ -37,7 +38,9 @@ pub enum SyncState {
     AwaitingOutgoingConnection {
         since: Instant,
     },
-    AwaitingDownload,
+    AwaitingDownload {
+        since: Instant,
+    },
     Downloading {
         peer_id: PeerId,
         from_chunk: u64,
@@ -364,7 +367,9 @@ impl SerialSyncController {
             Ok(true) => {}
             Ok(false) => {
                 info!("Failed to validate chunks response due to no root found");
-                self.state = SyncState::AwaitingDownload;
+                self.state = SyncState::AwaitingDownload {
+                    since: Instant::now() + NEXT_REQUEST_WAIT_TIME,
+                };
                 return;
             }
             Err(err) => {
@@ -447,7 +452,9 @@ impl SerialSyncController {
 
         if self.failures <= MAX_REQUEST_FAILURES {
             // try again
-            self.state = SyncState::AwaitingDownload;
+            self.state = SyncState::AwaitingDownload {
+                since: Instant::now() + NEXT_REQUEST_WAIT_TIME,
+            };
         } else {
             // ban and find new peer to download
             self.ban_peer(peer_id, reason);
@@ -499,7 +506,9 @@ impl SerialSyncController {
 
                 SyncState::ConnectingPeers => {
                     if self.peers.count(&[Connected]) > 0 {
-                        self.state = SyncState::AwaitingDownload;
+                        self.state = SyncState::AwaitingDownload {
+                            since: Instant::now(),
+                        };
                     } else if self.peers.count(&[Connecting]) == 0 {
                         self.state = SyncState::Idle;
                     } else {
@@ -516,7 +525,11 @@ impl SerialSyncController {
                     self.state = SyncState::Idle;
                 }
 
-                SyncState::AwaitingDownload => {
+                SyncState::AwaitingDownload { since } => {
+                    if Instant::now() < since {
+                        return;
+                    }
+
                     self.try_request_next();
                 }
 
@@ -684,7 +697,9 @@ mod tests {
         let task_executor = runtime.task_executor.clone();
         let (mut controller, mut network_recv) = create_default_controller(task_executor, None);
 
-        controller.state = SyncState::AwaitingDownload;
+        controller.state = SyncState::AwaitingDownload {
+            since: Instant::now(),
+        };
         controller.try_request_next();
         assert_eq!(controller.state, SyncState::Idle);
         assert_eq!(network_recv.try_recv().is_err(), true);
@@ -1427,7 +1442,10 @@ mod tests {
                     }
                 }
             } else {
-                assert_eq!(*controller.get_status(), SyncState::AwaitingDownload);
+                assert!(matches!(
+                    *controller.get_status(),
+                    SyncState::AwaitingDownload { .. }
+                ));
             }
         }
     }
