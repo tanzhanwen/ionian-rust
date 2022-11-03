@@ -13,7 +13,8 @@ use crate::log_store::log_manager::{data_to_merkle_leaves, sub_merkle_tree};
 use crate::try_option;
 use append_merkle::{AppendMerkleTree, MerkleTreeRead, Sha3Algorithm};
 use ionian_spec::{
-    BYTES_PER_SEAL, BYTES_PER_SECTOR, SEALS_PER_LOAD, SECTORS_PER_LOAD, SECTORS_PER_SEAL,
+    BYTES_PER_LOAD, BYTES_PER_SEAL, BYTES_PER_SECTOR, SEALS_PER_LOAD, SECTORS_PER_LOAD,
+    SECTORS_PER_SEAL,
 };
 use shared_types::ChunkArray;
 use tracing::trace;
@@ -92,7 +93,7 @@ impl EntryBatch {
             (self.data.get(start_byte, length_byte)?.to_vec(), None)
         };
 
-        let incomplete_seal_chunk_length = (BYTES_PER_SEAL - start_byte) % BYTES_PER_SEAL;
+        let incomplete_seal_chunk_length = (BYTES_PER_LOAD - start_byte) % BYTES_PER_SEAL;
 
         // Unseal the first incomplete sealing chunk (if exists)
         if let Some(unseal_mask_seed) = unseal_mask_seed {

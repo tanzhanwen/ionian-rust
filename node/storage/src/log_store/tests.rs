@@ -158,7 +158,7 @@ fn test_revert() {
     put_tx(&mut store, 512 + 1, 3);
     put_tx(&mut store, 1, 4);
     store.revert_to(1).unwrap();
-    put_tx(&mut store, 1, 1);
+    put_tx(&mut store, 1, 2);
 }
 
 fn create_store() -> LogManager {
