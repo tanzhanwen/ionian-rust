@@ -5464,6 +5464,7 @@ dependencies = [
 name = "router"
 version = "0.1.0"
 dependencies = [
+ "channel",
  "chrono",
  "error-chain",
  "file_location_cache",

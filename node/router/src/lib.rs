@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate tracing;
 
+mod libp2p_event_handler;
 mod peer_manager;
 mod service;
 

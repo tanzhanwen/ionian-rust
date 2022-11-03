@@ -113,3 +113,109 @@ impl PeerManager {
             .choose_multiple(&mut rand::thread_rng(), num_expired)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        ops::Sub,
+        time::{Duration, Instant},
+    };
+
+    use network::PeerId;
+
+    use crate::Config;
+
+    use super::PeerManager;
+
+    impl PeerManager {
+        pub fn size(&self) -> usize {
+            self.peers.len()
+        }
+    }
+
+    #[test]
+    fn test_add() {
+        let mut manager = PeerManager::new(Config::default());
+
+        let peer1 = PeerId::random();
+        assert_eq!(manager.add(peer1, false), true);
+        assert_eq!(manager.add(peer1, false), false);
+        assert_eq!(manager.add(peer1, true), false);
+        assert_eq!(manager.size(), 1);
+
+        let peer2 = PeerId::random();
+        assert_eq!(manager.add(peer2, false), true);
+        assert_eq!(manager.size(), 2);
+    }
+
+    #[test]
+    fn test_remove() {
+        let mut manager = PeerManager::new(Config::default());
+
+        let peer1 = PeerId::random();
+        assert_eq!(manager.add(peer1, false), true);
+        let peer2 = PeerId::random();
+        assert_eq!(manager.add(peer2, true), true);
+
+        let peer3 = PeerId::random();
+        assert_eq!(manager.remove(&peer3), false);
+        assert_eq!(manager.remove(&peer1), true);
+        assert_eq!(manager.remove(&peer2), true);
+        assert_eq!(manager.size(), 0);
+    }
+
+    #[test]
+    fn test_update() {
+        let mut manager = PeerManager::new(Config::default());
+
+        let peer1 = PeerId::random();
+        assert_eq!(manager.add(peer1, false), true);
+        let ts1 = manager.peers.get(&peer1).unwrap().since;
+
+        let peer2 = PeerId::random();
+        assert_eq!(manager.update(&peer2), false);
+        assert_eq!(manager.update(&peer1), true);
+
+        let ts2 = manager.peers.get(&peer1).unwrap().since;
+        assert!(ts2 > ts1);
+    }
+
+    #[test]
+    fn test_expired() {
+        let config = Config::default();
+        let mut manager = PeerManager::new(config.clone());
+
+        let mut peers = vec![];
+
+        // setup incoming peers: max + 3
+        for _ in 0..(config.max_idle_incoming_peers + 3) {
+            let peer_id = PeerId::random();
+            peers.push(peer_id);
+            assert_eq!(manager.add(peer_id, false), true);
+        }
+
+        // setup outgoing peers: max + 2
+        for _ in 0..(config.max_idle_outgoing_peers + 2) {
+            let peer_id = PeerId::random();
+            peers.push(peer_id);
+            assert_eq!(manager.add(peer_id, true), true);
+        }
+
+        // change timestamp for all peers
+        let idle_timeout = Duration::from_secs(config.idle_time_secs);
+        for peer_id in peers.iter() {
+            let peer = manager.peers.get_mut(peer_id).unwrap();
+            peer.since = Instant::now().sub(idle_timeout);
+        }
+
+        assert_eq!(
+            manager.expired(false, config.max_idle_incoming_peers).len(),
+            3
+        );
+        assert_eq!(
+            manager.expired(true, config.max_idle_outgoing_peers).len(),
+            2
+        );
+        assert_eq!(manager.expired_peers().len(), 5);
+    }
+}

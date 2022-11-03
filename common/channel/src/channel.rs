@@ -1,5 +1,6 @@
 use crate::error::Error;
 use std::time::Duration;
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
@@ -64,6 +65,10 @@ pub struct Receiver<N, Req, Res> {
 impl<N, Req, Res> Receiver<N, Req, Res> {
     pub async fn recv(&mut self) -> Option<Message<N, Req, Res>> {
         self.chan.recv().await
+    }
+
+    pub fn try_recv(&mut self) -> Result<Message<N, Req, Res>, TryRecvError> {
+        self.chan.try_recv()
     }
 }
 
