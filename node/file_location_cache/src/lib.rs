@@ -1,4 +1,5 @@
 mod file_location_cache;
+pub mod test_util;
 
 pub use crate::file_location_cache::FileLocationCache;
 

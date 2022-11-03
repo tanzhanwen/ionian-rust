@@ -1,10 +1,9 @@
 #[cfg(test)]
 pub mod tests {
-    use file_location_cache::FileLocationCache;
-    use libp2p::{identity, Multiaddr, PeerId};
-    use network::types::{AnnounceFile, SignedAnnounceFile};
+    use file_location_cache::{test_util::AnnounceFileBuilder, FileLocationCache};
+    use libp2p::PeerId;
     use rand::random;
-    use shared_types::{timestamp_now, ChunkArray, Transaction, TxID, CHUNK_SIZE};
+    use shared_types::{ChunkArray, Transaction, TxID, CHUNK_SIZE};
     use std::{cmp, sync::Arc};
     use storage::{
         log_store::{
@@ -130,23 +129,13 @@ pub mod tests {
         let cache = FileLocationCache::default();
 
         for tx_id in txs {
-            let announcement = create_test_announcement(tx_id, peer_id);
+            let announcement = AnnounceFileBuilder::default()
+                .with_tx_id(tx_id)
+                .with_peer_id(peer_id)
+                .build();
             cache.insert(announcement);
         }
 
         Arc::new(cache)
-    }
-
-    fn create_test_announcement(tx_id: TxID, peer_id: PeerId) -> SignedAnnounceFile {
-        let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
-        let msg = AnnounceFile {
-            tx_id,
-            peer_id: peer_id.into(),
-            at: address.into(),
-            timestamp: timestamp_now(),
-        };
-
-        let local_private_key = identity::Keypair::generate_secp256k1();
-        msg.into_signed(&local_private_key).unwrap()
     }
 }

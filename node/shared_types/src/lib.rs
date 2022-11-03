@@ -78,6 +78,15 @@ pub struct TxID {
     pub hash: H256,
 }
 
+impl TxID {
+    pub fn random_hash(seq: u64) -> Self {
+        Self {
+            seq,
+            hash: H256::random(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, DeriveDecode, DeriveEncode, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Transaction {
