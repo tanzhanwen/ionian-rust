@@ -45,6 +45,7 @@ build_config! {
 
     // misc
     (log_config_file, (String), "log_config".to_string())
+    (log_directory, (String), "log".to_string())
 
     // mine
     (mine_contract_address, (String), "".to_string())

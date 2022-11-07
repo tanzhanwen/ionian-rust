@@ -29,6 +29,7 @@ tokio-stream = { version = "0.1.9", features = ["sync"] }
 toml = "0.5.9"
 tracing = "0.1.35"
 tracing-subscriber = { version = "0.3.11", features = ["env-filter"] }
+tracing-appender = { version = "0.2.2" }
 chunk_pool = { path = "./chunk_pool" }
 itertools = "0.10.5"
 

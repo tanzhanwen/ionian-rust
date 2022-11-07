@@ -94,7 +94,7 @@ def initialize_ionian_config(data_dir, config_parameters):
     local_conf.update(config_parameters)
     initialize_config(config_path, local_conf)
     with open(log_config_path, "w") as f:
-        f.write("trace")
+        f.write("debug")
 
 
 def create_proof_and_segment(chunk_data, data_root, index=0):

@@ -57,7 +57,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     // CLI, config, and logs
     let matches = cli::cli_app().get_matches();
     let config = IonianConfig::parse(&matches)?;
-    log::configure(&config.log_config_file, executor.clone());
+    log::configure(
+        &config.log_config_file,
+        &config.log_directory,
+        executor.clone(),
+    );
 
     // start services
     executor.clone().spawn(

@@ -63,7 +63,7 @@ class IonianNode(TestNode):
         os.mkdir(self.data_dir)
         log_config_path = os.path.join(self.data_dir, self.config["log_config_file"])
         with open(log_config_path, "w") as f:
-            f.write("trace")
+            f.write("debug")
         initialize_config(self.config_file, self.config)
 
     def wait_for_rpc_connection(self):
