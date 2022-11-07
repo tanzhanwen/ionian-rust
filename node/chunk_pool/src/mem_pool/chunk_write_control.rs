@@ -81,6 +81,7 @@ pub struct FileWriteCtrl {
     pub id: FileID,
     total_segments: usize,
     window: CtrlWindow,
+    recover_from_store: bool,
 }
 
 impl FileWriteCtrl {

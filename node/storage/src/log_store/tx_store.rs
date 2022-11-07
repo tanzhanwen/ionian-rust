@@ -1,7 +1,7 @@
 use crate::error::Error;
 use crate::log_store::log_manager::{
     data_to_merkle_leaves, sub_merkle_tree, COL_MISC, COL_TX, COL_TX_COMPLETED,
-    COL_TX_DATA_ROOT_INDEX, ENTRY_SIZE, PORA_CHUNK_SIZE,
+    COL_TX_DATA_ROOT_INDEX, COL_UPLOAD_SEG_NUM, ENTRY_SIZE, PORA_CHUNK_SIZE,
 };
 use crate::{try_option, IonianKeyValueDB, LogManager};
 use anyhow::{anyhow, Result};
@@ -237,6 +237,16 @@ impl TransactionStore {
             merkle.commit(Some(tx_seq));
         }
         Ok(merkle)
+    }
+
+    pub fn put_seg_upload_progress(&self, tx_seq: u64, seg_num: usize) -> Result<()> {
+        Ok(self
+            .kvdb
+            .put(COL_UPLOAD_SEG_NUM, &tx_seq.to_be_bytes(), &seg_num.to_be_bytes())?)
+    }
+
+    pub fn get_seg_upload_progress(&self, tx_seq: u64) -> Result<usize> {
+        Ok(self.kvdb.get(COL_UPLOAD_SEG_NUM, &tx_seq.to_be_bytes())?)
     }
 }
 

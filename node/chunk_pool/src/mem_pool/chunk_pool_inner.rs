@@ -202,6 +202,9 @@ impl MemoryChunkPool {
             .write_control
             .on_write_succeeded(&seg_info.root, seg_info.seg_index);
 
+        //Update the segment upload progress if put chunk successful
+        self.log_store.tx_store.put_seg_upload_progress(tx_seq, seg_num)?;
+
         // Notify to finalize transaction asynchronously.
         if all_uploaded {
             if let Err(e) = self.sender.send(file_id) {
