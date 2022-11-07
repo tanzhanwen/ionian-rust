@@ -104,7 +104,7 @@ impl EntryBatch {
                 loaded_data[..incomplete_seal_chunk_length].as_mut()
             };
 
-            ionian_seal::unseal_with_mask_seed(data_to_unseal, &unseal_mask_seed);
+            ionian_seal::unseal_with_mask_seed(data_to_unseal, unseal_mask_seed);
         }
 
         if loaded_data.len() > incomplete_seal_chunk_length {

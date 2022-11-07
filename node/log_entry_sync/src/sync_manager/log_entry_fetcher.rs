@@ -250,7 +250,7 @@ impl LogConfirmationQueue {
     fn push(&mut self, logs: Vec<Log>) -> Result<Option<u64>> {
         let mut revert_to = None;
         // First merge logs according to the block number.
-        let mut block_logs = BTreeMap::new();
+        let mut block_logs: BTreeMap<u64, Vec<Log>> = BTreeMap::new();
         let mut removed_block_logs = BTreeMap::new();
         for log in logs {
             let set = if log.removed.unwrap_or(false) {
@@ -262,7 +262,7 @@ impl LogConfirmationQueue {
                 .block_number
                 .ok_or_else(|| anyhow!("block number missing"))?
                 .as_u64();
-            set.entry(block_number).or_insert(Vec::new()).push(log);
+            set.entry(block_number).or_default().push(log);
         }
 
         // Handle revert if it happens.

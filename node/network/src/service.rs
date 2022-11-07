@@ -31,6 +31,7 @@ const MAX_CONNECTIONS_PER_PEER: u32 = 1;
 /// The types of events than can be obtained from polling the libp2p service.
 ///
 /// This is a subset of the events that a libp2p swarm emits.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Libp2pEvent<AppReqId: ReqId> {
     /// A behaviour event

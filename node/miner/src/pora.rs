@@ -117,10 +117,10 @@ impl<'a> Miner<'a> {
             hasher.update(nonce);
             hasher.update(self.context.digest);
 
-            hasher.update(&[0u8; 24]);
+            hasher.update([0u8; 24]);
             hasher.update(self.start_position.to_be_bytes());
 
-            hasher.update(&[0u8; 24]);
+            hasher.update([0u8; 24]);
             hasher.update(self.mining_length.to_be_bytes());
 
             hasher.finalize().into()
@@ -129,7 +129,7 @@ impl<'a> Miner<'a> {
         let mut scratch_pad =
             [[0u8; BLAKE2B_OUTPUT_BYTES]; BYTES_PER_SCRATCHPAD / BLAKE2B_OUTPUT_BYTES];
         for scratch_pad_cell in scratch_pad.iter_mut() {
-            digest = Blake2b512::new().chain_update(&digest).finalize().into();
+            digest = Blake2b512::new().chain_update(digest).finalize().into();
             *scratch_pad_cell = digest;
         }
 
@@ -142,20 +142,20 @@ impl<'a> Miner<'a> {
     #[inline]
     fn pora(&self, seal_index: usize, nonce: &H256, mixed_data: &[u8; BYTES_PER_SEAL]) -> U256 {
         let mut hasher = Blake2b512::new();
-        hasher.update(&[0u8; 24]);
+        hasher.update([0u8; 24]);
         hasher.update(seal_index.to_be_bytes());
 
         hasher.update(self.miner_id);
         hasher.update(nonce);
         hasher.update(self.context.digest);
 
-        hasher.update(&[0u8; 24]);
+        hasher.update([0u8; 24]);
         hasher.update(self.start_position.to_be_bytes());
 
-        hasher.update(&[0u8; 24]);
+        hasher.update([0u8; 24]);
         hasher.update(self.mining_length.to_be_bytes());
 
-        hasher.update(&[0u8; 64]);
+        hasher.update([0u8; 64]);
         hasher.update(mixed_data);
 
         let digest = hasher.finalize();
