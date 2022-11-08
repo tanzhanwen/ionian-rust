@@ -95,13 +95,14 @@ def run():
     ]
 
     slow_tests = {}
+    long_manual_tests = {"fuzz_test.py"}
 
     for subdir in test_subdirs:
         subdir_path = os.path.join(test_dir, subdir)
         for file in os.listdir(subdir_path):
             if file.endswith("_test.py"):
                 rel_path = os.path.join(subdir, file)
-                if rel_path not in slow_tests:
+                if rel_path not in slow_tests and rel_path not in long_manual_tests:
                     TEST_SCRIPTS.append(rel_path)
 
     executor = ProcessPoolExecutor(max_workers=options.max_workers)

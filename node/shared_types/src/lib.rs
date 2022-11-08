@@ -10,6 +10,7 @@ use merkle_tree::RawLeafSha3Algorithm;
 use serde::{Deserialize, Serialize};
 use ssz::Encode;
 use ssz_derive::{Decode as DeriveDecode, Encode as DeriveEncode};
+use std::fmt;
 use std::hash::Hasher;
 use tiny_keccak::{Hasher as KeccakHasher, Keccak};
 use tracing::debug;
@@ -142,11 +143,22 @@ pub struct ChunkArrayWithProof {
     pub proof: FlowRangeProof,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, DeriveEncode, DeriveDecode)]
+#[derive(Clone, Eq, PartialEq, DeriveEncode, DeriveDecode)]
 pub struct ChunkArray {
     // The length is exactly a multiple of `CHUNK_SIZE`
     pub data: Vec<u8>,
     pub start_index: u64,
+}
+
+impl fmt::Debug for ChunkArray {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "ChunkArray: start_index={} data_len={}",
+            self.start_index,
+            self.data.len()
+        )
+    }
 }
 
 impl ChunkArray {
