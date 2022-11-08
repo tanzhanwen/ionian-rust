@@ -32,6 +32,7 @@ pub enum SyncState {
     Idle,
     FindingPeers {
         since: Instant,
+        updated: Instant,
     },
     FoundPeers,
     ConnectingPeers,
@@ -155,11 +156,14 @@ impl SerialSyncController {
             }));
         }
 
-        if !matches!(self.state, SyncState::FindingPeers { .. }) {
-            self.state = SyncState::FindingPeers {
-                since: Instant::now(),
-            };
-        }
+        let now = Instant::now();
+
+        let (since, updated) = match self.state {
+            SyncState::FindingPeers { since, .. } => (since, now),
+            _ => (now, now),
+        };
+
+        self.state = SyncState::FindingPeers { since, updated };
     }
 
     fn try_connect(&mut self) {
@@ -472,22 +476,20 @@ impl SerialSyncController {
             match self.state {
                 SyncState::Idle => {
                     if self.peers.count(&[Found, Connecting, Connected]) > 0 {
-                        self.state = SyncState::FindingPeers {
-                            since: Instant::now(),
-                        };
+                        self.state = SyncState::FoundPeers;
                     } else {
                         self.try_find_peers();
                     }
                 }
 
-                SyncState::FindingPeers { since } => {
+                SyncState::FindingPeers { updated, .. } => {
                     if self.peers.count(&[Found, Connecting, Connected]) > 0 {
                         self.state = SyncState::FoundPeers;
                     } else {
                         // storage node may not have the specific file when `FindFile`
                         // gossip message received. In this case, just broadcast the
                         // `FindFile` message again.
-                        if since.elapsed() >= PEER_REQUEST_TIMEOUT {
+                        if updated.elapsed() >= PEER_REQUEST_TIMEOUT {
                             debug!(%self.tx_seq, "Peer request timeout");
                             self.try_find_peers();
                         }

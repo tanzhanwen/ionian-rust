@@ -183,13 +183,25 @@ impl Manager {
             return Ok(false);
         }
 
-        if matches!(state, Some(SyncState::FindingPeers { since }) if since.elapsed() > FIND_PEERS_TIMEOUT)
+        if matches!(state, Some(SyncState::FindingPeers { since, .. }) if since.elapsed() > FIND_PEERS_TIMEOUT)
         {
             // no peers found for a long time
+            self.terminate_file_sync(tx_seq).await;
             Ok(true)
         } else {
             // otherwise, continue to wait for file sync that already in progress
             Ok(false)
+        }
+    }
+
+    async fn terminate_file_sync(&self, tx_seq: u64) {
+        if let Err(err) = self
+            .sync_send
+            .request(SyncRequest::TerminateFileSync { tx_seq })
+            .await
+        {
+            // just log and go ahead for any error, e.g. timeout
+            error!(%err, %tx_seq, "Failed to terminate file sync");
         }
     }
 }
@@ -232,14 +244,7 @@ async fn start_sync(manager: Manager) {
         // handles reorg before file sync
         if let Some(tx_seq) = manager.handle_on_reorg() {
             // request sync service to terminate the file sync immediately
-            if let Err(err) = manager
-                .sync_send
-                .request(SyncRequest::TerminateFileSync { tx_seq })
-                .await
-            {
-                // just log and go ahead for any error, e.g. timeout
-                error!(%err, %tx_seq, "Failed to terminate file sync");
-            }
+            manager.terminate_file_sync(tx_seq).await;
         }
 
         // sync file
@@ -290,33 +295,41 @@ async fn sync_once(manager: &Manager) -> Result<bool> {
 async fn start_sync_pending_txs(manager: Manager) {
     info!("Start to sync pending files");
 
+    let mut tx_seq = 0;
+    let mut next = true;
+
     loop {
-        let tx_seq = match manager.sync_store.random_tx().await {
-            Ok(Some(seq)) => seq,
-            Ok(None) => {
-                trace!("No pending file to sync");
-                sleep(INTERVAL).await;
-                continue;
+        if next {
+            match manager.sync_store.random_tx().await {
+                Ok(Some(seq)) => tx_seq = seq,
+                Ok(None) => {
+                    trace!("No pending file to sync");
+                    sleep(INTERVAL).await;
+                    continue;
+                }
+                Err(err) => {
+                    warn!(%err, "Failed to pick pending file to sync");
+                    sleep(INTERVAL_ERROR).await;
+                    continue;
+                }
             }
-            Err(err) => {
-                warn!(%err, "Failed to pick pending file to sync");
-                sleep(INTERVAL_ERROR).await;
-                continue;
-            }
-        };
+        }
 
         match sync_pending_tx(&manager, tx_seq).await {
             Ok(true) => {
                 debug!(%tx_seq, "Completed to sync pending file");
                 sleep(INTERVAL_CATCHUP).await;
+                next = true;
             }
             Ok(false) => {
                 trace!(%tx_seq, "Pending file in sync or tx unavailable");
                 sleep(INTERVAL).await;
+                next = false;
             }
             Err(err) => {
                 warn!(%err, %tx_seq, "Failed to sync pending file");
                 sleep(INTERVAL_ERROR).await;
+                next = false;
             }
         }
     }
