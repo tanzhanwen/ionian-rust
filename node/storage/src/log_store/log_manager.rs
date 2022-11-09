@@ -1051,7 +1051,7 @@ pub fn tx_subtree_root_list_padded(data: &[u8]) -> Vec<(usize, DataRoot)> {
         };
 
         root_list.push((log2_pow2(tree_size) + 1, submerkle_root.into()));
-        start_index += end;
+        start_index = end;
     }
 
     root_list

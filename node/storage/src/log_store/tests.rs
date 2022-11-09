@@ -161,6 +161,15 @@ fn test_revert() {
     put_tx(&mut store, 1, 2);
 }
 
+#[test]
+fn test_put_tx() {
+    for i in 0..12 {
+        let chunk_count = 0xF << i;
+        let mut store = create_store();
+        put_tx(&mut store, chunk_count, 0);
+    }
+}
+
 fn create_store() -> LogManager {
     let config = LogConfig::default();
 
@@ -171,7 +180,7 @@ fn put_tx(store: &mut LogManager, chunk_count: usize, seq: u64) {
     let data_size = CHUNK_SIZE * chunk_count;
     let mut data = vec![0u8; data_size];
     for i in 0..chunk_count {
-        data[i * CHUNK_SIZE..(i * CHUNK_SIZE + 8)].copy_from_slice(&seq.to_be_bytes());
+        data[i * CHUNK_SIZE..(i * CHUNK_SIZE + 8)].copy_from_slice(&(seq + 1).to_be_bytes());
     }
     let tx_merkle = sub_merkle_tree(&data).unwrap();
     let merkle_nodes = tx_subtree_root_list_padded(&data);
