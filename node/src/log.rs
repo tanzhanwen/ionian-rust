@@ -11,6 +11,7 @@ pub fn configure(log_level_file: &str, log_directory: &str, executor: TaskExecut
         .with_max_level(Level::TRACE)
         .with_env_filter(EnvFilter::default())
         .with_writer(non_blocking)
+        .with_ansi(false)
         // .with_file(true)
         // .with_line_number(true)
         // .with_thread_names(true)

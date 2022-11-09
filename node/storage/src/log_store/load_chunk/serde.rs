@@ -1,5 +1,6 @@
 use super::{chunk_data::PartialBatch, EntryBatchData};
 
+use crate::log_store::load_chunk::chunk_data::IncompleteData;
 use ssz::{Decode, DecodeError, Encode};
 use std::mem;
 
@@ -41,7 +42,7 @@ impl Decode for EntryBatchData {
         match *bytes.first().ok_or(DecodeError::ZeroLengthItem)? {
             COMPLETE_BATCH_TYPE => Ok(EntryBatchData::Complete(bytes[1..].to_vec())),
             INCOMPLETE_BATCH_TYPE => Ok(EntryBatchData::Incomplete(
-                <Vec<PartialBatch> as Decode>::from_ssz_bytes(&bytes[1..])?,
+                IncompleteData::from_ssz_bytes(&bytes[1..])?,
             )),
             unknown => Err(DecodeError::BytesInvalid(format!(
                 "Unrecognized EntryBatchData indentifier {}",

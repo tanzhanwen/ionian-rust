@@ -52,6 +52,8 @@ build_config! {
     (miner_id, (Option<String>), None)
     (miner_key, (Option<String>), None)
 
+    // sync
+    (find_peer_timeout_secs, (u64), 30)
 }
 
 #[derive(Debug)]

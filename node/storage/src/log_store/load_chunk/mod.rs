@@ -5,18 +5,18 @@ mod serde;
 
 use std::cmp::min;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use ethereum_types::H256;
 use ssz_derive::{Decode, Encode};
 
-use crate::log_store::log_manager::{data_to_merkle_leaves, sub_merkle_tree};
+use crate::log_store::log_manager::data_to_merkle_leaves;
 use crate::try_option;
-use append_merkle::{AppendMerkleTree, MerkleTreeRead, Sha3Algorithm};
+use append_merkle::{Algorithm, MerkleTreeRead, Sha3Algorithm};
 use ionian_spec::{
     BYTES_PER_LOAD, BYTES_PER_SEAL, BYTES_PER_SECTOR, SEALS_PER_LOAD, SECTORS_PER_LOAD,
     SECTORS_PER_SEAL,
 };
-use shared_types::ChunkArray;
+use shared_types::{ChunkArray, DataRoot, Merkle};
 use tracing::trace;
 
 use super::SealAnswer;
@@ -182,32 +182,9 @@ impl EntryBatch {
     }
 
     pub fn build_root(&self, is_first_chunk: bool) -> Result<Option<H256>> {
-        if is_first_chunk {
-            return self.build_root_for_first_chunk();
-        }
-        Ok(
-            if let Some(raw_data) = self.get_unsealed_data(0, SECTORS_PER_LOAD) {
-                // TODO(zz): Check if we want to insert here.
-                Some(sub_merkle_tree(&raw_data)?.root().into())
-            } else {
-                None
-            },
-        )
-    }
-
-    fn build_root_for_first_chunk(&self) -> Result<Option<H256>> {
-        if matches!(self.data, EntryBatchData::Complete(_)) {
-            bail!("Unexpected first batch");
-        }
-
-        let raw_data = try_option!(self.get_unsealed_data(1, SECTORS_PER_LOAD - 1));
-
-        trace!("put first batch: {:x?}", &raw_data);
-        let mut leaves = vec![H256::zero()];
-        leaves.append(&mut data_to_merkle_leaves(&raw_data)?);
-        let root = *AppendMerkleTree::<H256, Sha3Algorithm>::new(leaves, 0, None).root();
-
-        Ok(Some(root))
+        Ok(Some(
+            *try_option!(self.to_merkle_tree(is_first_chunk)?).root(),
+        ))
     }
 
     pub fn submit_seal_result(&mut self, answer: SealAnswer) -> Result<()> {
@@ -235,6 +212,45 @@ impl EntryBatch {
         self.seal.mark_sealed(local_seal_index as u16);
 
         Ok(())
+    }
+
+    /// This is only called once when the batch is removed from the memory and fully stored in db.
+    pub fn set_subtree_list(&mut self, subtree_list: Vec<(usize, usize, DataRoot)>) {
+        self.data.set_subtree_list(subtree_list)
+    }
+
+    pub fn to_merkle_tree(&self, is_first_chunk: bool) -> Result<Option<Merkle>> {
+        let initial_leaves = if is_first_chunk {
+            vec![H256::zero()]
+        } else {
+            vec![]
+        };
+        let mut merkle = Merkle::new(initial_leaves, 0, None);
+        for subtree in self.data.get_subtree_list() {
+            trace!(?subtree, "get subtree, leaves={}", merkle.leaves());
+            if subtree.start_sector != merkle.leaves() {
+                let leaf_data = try_option!(
+                    self.get_unsealed_data(merkle.leaves(), subtree.start_sector - merkle.leaves())
+                );
+                merkle.append_list(data_to_merkle_leaves(&leaf_data).expect("aligned"));
+            }
+            merkle.append_subtree(subtree.subtree_height, subtree.root)?;
+        }
+        if merkle.leaves() != SECTORS_PER_LOAD {
+            let leaf_data = try_option!(
+                self.get_unsealed_data(merkle.leaves(), SECTORS_PER_LOAD - merkle.leaves())
+            );
+            merkle.append_list(data_to_merkle_leaves(&leaf_data).expect("aligned"));
+        }
+        // TODO(zz): Optimize.
+        for index in 0..merkle.leaves() {
+            if merkle.leaf_at(index)?.is_none() {
+                if let Some(leaf_data) = self.get_unsealed_data(index, 1) {
+                    merkle.fill_leaf(index, Sha3Algorithm::leaf(&leaf_data));
+                }
+            }
+        }
+        Ok(Some(merkle))
     }
 }
 

@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 
 from config.node_config import IONIAN_CONFIG
@@ -102,3 +103,6 @@ class IonianNode(TestNode):
     def sycn_status_is_completed_or_unknown(self, tx_seq):
         status = self.rpc.admin_getSyncStatus([tx_seq])
         return status == "Completed" or status == "unknown"
+
+    def clean_data(self):
+        shutil.rmtree(os.path.join(self.data_dir, "db"))

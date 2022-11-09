@@ -49,6 +49,7 @@ impl SyncStore {
     }
 
     pub async fn set_max_tx_seq(&self, tx_seq: u64) -> Result<()> {
+        debug!(%tx_seq, "set_max_tx_seq");
         self.store
             .get_store()
             .write()

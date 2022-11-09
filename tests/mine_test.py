@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-
+from test_framework.blockchain_node import BlockChainNodeType
 from test_framework.test_framework import TestFramework
 from config.node_config import MINER_ID, GENESIS_PRIV_KEY
 from test_framework.blockchain_node import BlockChainNodeType

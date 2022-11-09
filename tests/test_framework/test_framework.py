@@ -363,8 +363,11 @@ class TestFramework:
         for node in self.blockchain_nodes:
             node.stop()
 
-    def stop_storage_node(self, index):
+    def stop_storage_node(self, index, clean=False):
         self.nodes[index].stop()
+        if clean:
+            self.nodes[index].clean_data()
+
 
     def start_storage_node(self, index):
         self.nodes[index].start()

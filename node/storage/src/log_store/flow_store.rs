@@ -5,10 +5,10 @@ use crate::log_store::log_manager::{bytes_to_entries, COL_ENTRY_BATCH, COL_ENTRY
 use crate::log_store::{FlowRead, FlowSeal, FlowWrite};
 use crate::{try_option, IonianKeyValueDB};
 use anyhow::{anyhow, bail, Result};
-use append_merkle::MerkleTreeInitialData;
+use append_merkle::{MerkleTreeInitialData, MerkleTreeRead};
 use ionian_spec::{BYTES_PER_SECTOR, SEALS_PER_LOAD, SECTORS_PER_LOAD, SECTORS_PER_SEAL};
 use itertools::Itertools;
-use shared_types::{ChunkArray, DataRoot};
+use shared_types::{ChunkArray, DataRoot, FlowProof};
 use ssz::{Decode, Encode};
 use ssz_derive::{Decode as DeriveDecode, Encode as DeriveEncode};
 use std::cmp::Ordering;
@@ -38,8 +38,37 @@ impl FlowStore {
         }
     }
 
-    pub fn put_batch_root_list(&self, root_map: BTreeMap<u64, (DataRoot, usize)>) -> Result<()> {
+    pub fn put_batch_root_list(&self, root_map: BTreeMap<usize, (DataRoot, usize)>) -> Result<()> {
         self.db.put_batch_root_list(root_map)
+    }
+
+    pub fn insert_subtree_list_for_batch(
+        &self,
+        batch_index: usize,
+        subtree_list: Vec<(usize, usize, DataRoot)>,
+    ) -> Result<()> {
+        let mut batch = self
+            .db
+            .get_entry_batch(batch_index as u64)?
+            .unwrap_or_else(|| EntryBatch::new(batch_index as u64));
+        batch.set_subtree_list(subtree_list);
+        self.db.put_entry_raw(vec![(batch_index as u64, batch)])?;
+
+        Ok(())
+    }
+
+    pub fn gen_proof_in_batch(&self, batch_index: usize, sector_index: usize) -> Result<FlowProof> {
+        let batch = self
+            .db
+            .get_entry_batch(batch_index as u64)?
+            .ok_or_else(|| anyhow!("batch missing, index={}", batch_index))?;
+        let merkle = batch.to_merkle_tree(batch_index == 0)?.ok_or_else(|| {
+            anyhow!(
+                "batch data incomplete for building a merkle tree, index={}",
+                batch_index
+            )
+        })?;
+        merkle.gen_proof(sector_index)
     }
 }
 
@@ -305,6 +334,7 @@ impl FlowDBStore {
                 &batch.as_ssz_bytes(),
             );
             if let Some(root) = batch.build_root(batch_index == 0)? {
+                trace!("complete batch: index={}", batch_index);
                 tx.put(
                     COL_ENTRY_BATCH_ROOT,
                     // (batch_index, subtree_depth)
@@ -336,12 +366,12 @@ impl FlowDBStore {
         Ok(Some(EntryBatch::from_ssz_bytes(&raw).map_err(Error::from)?))
     }
 
-    fn put_batch_root_list(&self, root_map: BTreeMap<u64, (DataRoot, usize)>) -> Result<()> {
+    fn put_batch_root_list(&self, root_map: BTreeMap<usize, (DataRoot, usize)>) -> Result<()> {
         let mut tx = self.kvdb.transaction();
         for (batch_index, (root, subtree_depth)) in root_map {
             tx.put(
                 COL_ENTRY_BATCH_ROOT,
-                &encode_batch_root_key(batch_index as usize, subtree_depth),
+                &encode_batch_root_key(batch_index, subtree_depth),
                 root.as_bytes(),
             );
         }

@@ -43,7 +43,9 @@ class FlowContractProxy(ContractProxy):
         receipt = self.blockchain_nodes[node_idx].wait_for_transaction_receipt(
             contract.web3, tx_hash, parent_hash=parent_hash
         )
-        assert_equal(receipt["status"], 1)
+        if receipt["status"] != 1:
+            print(receipt)
+            assert_equal(receipt["status"], 1)
         return tx_hash
 
     def num_submissions(self, node_idx=0):

@@ -259,7 +259,9 @@ class BlockchainNode(TestNode):
                 abi=contract_interface["abi"],
                 bytecode=contract_interface["bytecode"],
             )
-            tx_hash = contract.constructor(*args).transact(TX_PARAMS)
+            tx_params = TX_PARAMS.copy()
+            del tx_params["gas"]
+            tx_hash = contract.constructor(*args).transact(tx_params)
             tx_receipt = self.wait_for_transaction_receipt(w3, tx_hash)
             contract = w3.eth.contract(
                 address=tx_receipt.contractAddress,

@@ -454,7 +454,7 @@ impl PeerManager {
                     PeerAction::Fatal
                 }
                 RPCResponseErrorCode::ServerError => PeerAction::MidToleranceError,
-                RPCResponseErrorCode::InvalidRequest => PeerAction::LowToleranceError,
+                RPCResponseErrorCode::InvalidRequest => PeerAction::HighToleranceError,
                 RPCResponseErrorCode::RateLimited => match protocol {
                     Protocol::Ping => PeerAction::MidToleranceError,
                     Protocol::Goodbye => PeerAction::LowToleranceError,

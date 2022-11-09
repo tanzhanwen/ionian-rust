@@ -6,6 +6,7 @@ use log_entry_sync::{CacheConfig, ContractAddress, LogSyncConfig};
 use miner::MinerConfig;
 use network::NetworkConfig;
 use rpc::RPCConfig;
+use std::time::Duration;
 use storage::StorageConfig;
 
 impl IonianConfig {
@@ -142,5 +143,11 @@ impl IonianConfig {
         let mut router_config = router::Config::default();
         router_config.libp2p_nodes = network_config.libp2p_nodes.to_vec();
         Ok(router_config)
+    }
+
+    pub fn sync_config(&self) -> sync::Config {
+        let mut config = sync::Config::default();
+        config.find_peer_timeout = Duration::from_secs(self.find_peer_timeout_secs);
+        config
     }
 }

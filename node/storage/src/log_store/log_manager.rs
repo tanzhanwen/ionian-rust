@@ -5,7 +5,7 @@ use crate::log_store::{
 };
 use crate::{try_option, IonianKeyValueDB};
 use anyhow::{anyhow, bail, Result};
-use append_merkle::{Algorithm, AppendMerkleTree, MerkleTreeRead, Sha3Algorithm};
+use append_merkle::{Algorithm, MerkleTreeRead, Sha3Algorithm};
 use ethereum_types::H256;
 use kvdb_rocksdb::{Database, DatabaseConfig};
 use merkle_light::merkle::{log2_pow2, MerkleTree};
@@ -14,13 +14,13 @@ use rayon::iter::ParallelIterator;
 use rayon::prelude::ParallelSlice;
 use shared_types::{
     bytes_to_chunks, compute_padded_chunk_size, compute_segment_size, Chunk, ChunkArray,
-    ChunkArrayWithProof, ChunkWithProof, DataRoot, FlowProof, FlowRangeProof, Transaction,
+    ChunkArrayWithProof, ChunkWithProof, DataRoot, FlowProof, FlowRangeProof, Merkle, Transaction,
 };
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
-use tracing::{debug, error, info, instrument, trace};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 use super::LogStoreInner;
 
@@ -37,8 +37,6 @@ pub const COL_TX_COMPLETED: u32 = 4;
 pub const COL_MISC: u32 = 5;
 pub const COL_SEAL_CONTEXT: u32 = 6;
 pub const COL_NUM: u32 = 7;
-
-type Merkle = AppendMerkleTree<H256, Sha3Algorithm>;
 
 pub struct LogManager {
     pub(crate) db: Arc<dyn IonianKeyValueDB>,
@@ -214,6 +212,7 @@ impl LogStoreWrite for LogManager {
             .tx_store
             .get_tx_by_seq_number(tx_seq)?
             .ok_or_else(|| anyhow!("finalize_tx with tx missing: tx_seq={}", tx_seq))?;
+        debug!("finalize_tx_with_hash: tx={:?}", tx);
         if tx.hash() != tx_hash {
             return Ok(false);
         }
@@ -249,6 +248,7 @@ impl LogStoreWrite for LogManager {
     /// Return the reverted Transactions in order.
     /// `tx_seq == u64::MAX` is a special case for reverting all transactions.
     fn revert_to(&mut self, tx_seq: u64) -> Result<Vec<Transaction>> {
+        // FIXME(zz): If this revert is triggered by chain reorg after restarts, this will fail.
         self.revert_merkle_tree(tx_seq)?;
         let start_index = self.last_chunk_start_index() * PORA_CHUNK_SIZE as u64
             + self.last_chunk_merkle.leaves() as u64;
@@ -545,7 +545,11 @@ impl LogManager {
         if let Some(tx) = last_tx_to_insert {
             log_manager.put_tx(tx)?;
             for (index, h) in extra_leaves {
-                log_manager.pora_chunks_merkle.fill_leaf(index, h);
+                if index < log_manager.pora_chunks_merkle.leaves() {
+                    log_manager.pora_chunks_merkle.fill_leaf(index, h);
+                } else {
+                    error!("out of range extra leaf: index={} hash={:?}", index, h);
+                }
             }
         } else {
             assert!(extra_leaves.is_empty());
@@ -604,33 +608,8 @@ impl LogManager {
         let sub_proof = if chunk_index as usize != self.pora_chunks_merkle.leaves() - 1
             || self.last_chunk_merkle.leaves() == 0
         {
-            // TODO(zz）: Even if the data is incomplete, given the intermediate merkle roots
-            // it's still possible to generate needed proofs. These merkle roots may be stored
-            // within `EntryBatch::Incomplete`.
-            let pora_chunk = self
-                .flow_store
-                .get_entries(
-                    chunk_index * PORA_CHUNK_SIZE as u64,
-                    (chunk_index + 1) * PORA_CHUNK_SIZE as u64,
-                )?
-                .ok_or_else(|| {
-                    anyhow!(
-                        "data incomplete for generating proof of index {}",
-                        flow_index
-                    )
-                })?;
-
-            // Tempfix: for first chunk, its data is not complete, the hash of first entry is H256::zero()
-            let leaves =
-                if chunk_index == 0 && pora_chunk.data.len() / ENTRY_SIZE == PORA_CHUNK_SIZE - 1 {
-                    let mut leaves = vec![H256::zero()];
-                    leaves.append(&mut data_to_merkle_leaves(&pora_chunk.data)?);
-                    leaves
-                } else {
-                    data_to_merkle_leaves(&pora_chunk.data)?
-                };
-            let chunk_merkle = Merkle::new_with_depth(leaves, log2_pow2(PORA_CHUNK_SIZE) + 1, None);
-            chunk_merkle.gen_proof(flow_index as usize % PORA_CHUNK_SIZE)?
+            self.flow_store
+                .gen_proof_in_batch(chunk_index as usize, flow_index as usize % PORA_CHUNK_SIZE)?
         } else {
             match maybe_root {
                 None => self
@@ -669,11 +648,10 @@ impl LogManager {
                 }
                 if self.last_chunk_merkle.leaves() == PORA_CHUNK_SIZE {
                     batch_root_map.insert(
-                        (self.pora_chunks_merkle.leaves() - 1) as u64,
+                        self.pora_chunks_merkle.leaves() - 1,
                         (*self.last_chunk_merkle.root(), 1),
                     );
-                    self.last_chunk_merkle =
-                        Merkle::new_with_depth(vec![], log2_pow2(PORA_CHUNK_SIZE) + 1, None);
+                    self.complete_last_chunk_merkle(self.pora_chunks_merkle.leaves() - 1)?;
                 }
             } else {
                 // `last_chunk_merkle` has been padded here, so a subtree should not be across
@@ -681,7 +659,7 @@ impl LogManager {
                 assert_eq!(self.last_chunk_merkle.leaves(), 0);
                 assert!(subtree_size >= PORA_CHUNK_SIZE);
                 batch_root_map.insert(
-                    self.pora_chunks_merkle.leaves() as u64,
+                    self.pora_chunks_merkle.leaves(),
                     (subtree_root, subtree_depth - log2_pow2(PORA_CHUNK_SIZE)),
                 );
                 self.pora_chunks_merkle
@@ -705,13 +683,16 @@ impl LogManager {
         );
         if extra != 0 {
             let pad_data = Self::padding((first_subtree_size - extra) as usize);
+
+            // Update the in-memory merkle tree.
+            let mut root_map = BTreeMap::new();
             let last_chunk_pad = if self.last_chunk_merkle.leaves() == 0 {
                 0
             } else {
                 (PORA_CHUNK_SIZE - self.last_chunk_merkle.leaves()) * ENTRY_SIZE
             };
 
-            // Update the in-memory merkle tree.
+            let mut completed_chunk_index = None;
             if pad_data.len() < last_chunk_pad {
                 self.last_chunk_merkle
                     .append_list(data_to_merkle_leaves(&pad_data)?);
@@ -724,8 +705,11 @@ impl LogManager {
                         .append_list(data_to_merkle_leaves(&pad_data[..last_chunk_pad])?);
                     self.pora_chunks_merkle
                         .update_last(*self.last_chunk_merkle.root());
-                    self.last_chunk_merkle =
-                        Merkle::new_with_depth(vec![], log2_pow2(PORA_CHUNK_SIZE) + 1, None);
+                    root_map.insert(
+                        self.pora_chunks_merkle.leaves() - 1,
+                        (*self.last_chunk_merkle.root(), 1),
+                    );
+                    completed_chunk_index = Some(self.pora_chunks_merkle.leaves() - 1);
                 }
 
                 // Pad with more complete chunks.
@@ -734,18 +718,26 @@ impl LogManager {
                     let data = pad_data
                         [start_index * ENTRY_SIZE..(start_index + PORA_CHUNK_SIZE) * ENTRY_SIZE]
                         .to_vec();
-                    self.pora_chunks_merkle
-                        .append(*Merkle::new(data_to_merkle_leaves(&data)?, 0, None).root());
+                    let root = *Merkle::new(data_to_merkle_leaves(&data)?, 0, None).root();
+                    self.pora_chunks_merkle.append(root);
+                    root_map.insert(self.pora_chunks_merkle.leaves() - 1, (root, 1));
                     start_index += PORA_CHUNK_SIZE;
                 }
                 assert_eq!(pad_data.len(), start_index * ENTRY_SIZE);
             }
 
+            // Update the root index.
+            self.flow_store.put_batch_root_list(root_map)?;
             // Update the flow database.
+            // This should be called before `complete_last_chunk_merkle` so that we do not save
+            // subtrees with data known.
             self.flow_store.append_entries(ChunkArray {
                 data: pad_data,
                 start_index: tx_start_flow_index,
             })?;
+            if let Some(index) = completed_chunk_index {
+                self.complete_last_chunk_merkle(index)?;
+            }
         }
         trace!(
             "after pad_tx {} {}",
@@ -947,6 +939,26 @@ impl LogManager {
             self.tx_store.finalize_tx(seq)?;
         }
         Ok(())
+    }
+
+    /// Here we persist the subtrees with the incomplete data of the last chunk merkle so that
+    /// we can still provide proof for known data in it.
+    /// Another choice is to insert these subtrees earlier in `put_tx`. To insert them here can
+    /// batch them and avoid inserting for the subtrees with all data known.
+    fn complete_last_chunk_merkle(&mut self, index: usize) -> Result<()> {
+        let subtree_list = self.last_chunk_merkle.get_subtrees();
+        self.last_chunk_merkle =
+            Merkle::new_with_depth(vec![], log2_pow2(PORA_CHUNK_SIZE) + 1, None);
+
+        // Only insert non-leave subtrees. The leave data should have been available.
+        let mut to_insert_subtrees = Vec::new();
+        let mut start_index = 0;
+        for (subtree_height, root) in subtree_list {
+            to_insert_subtrees.push((start_index, subtree_height, root));
+            start_index += 1 << (subtree_height - 1);
+        }
+        self.flow_store
+            .insert_subtree_list_for_batch(index, to_insert_subtrees)
     }
 }
 

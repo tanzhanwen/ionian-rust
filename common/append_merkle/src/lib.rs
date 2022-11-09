@@ -220,6 +220,31 @@ impl<E: HashElement, A: Algorithm<E>> AppendMerkleTree<E, A> {
             Ok(None)
         }
     }
+
+    /// Return a list of subtrees that can be used to rebuild the tree.
+    pub fn get_subtrees(&self) -> Vec<(usize, E)> {
+        let mut next_index = 0;
+        let mut subtree_list: Vec<(usize, E)> = Vec::new();
+        while next_index < self.leaves() {
+            let root_tuple = self.first_known_root_at(next_index);
+            let subtree_size = 1 << (root_tuple.0 - 1);
+            let root_start_index = next_index / subtree_size * subtree_size;
+
+            // Previous subtrees are included within the new subtree.
+            // Pop them out and replace with the new one.
+            if root_start_index < next_index {
+                while let Some(last) = subtree_list.pop() {
+                    next_index -= 1 << (last.0 - 1);
+                    if next_index == root_start_index {
+                        break;
+                    }
+                }
+            }
+            next_index += subtree_size;
+            subtree_list.push(root_tuple);
+        }
+        subtree_list
+    }
 }
 
 impl<E: HashElement, A: Algorithm<E>> AppendMerkleTree<E, A> {
@@ -431,6 +456,22 @@ impl<E: HashElement, A: Algorithm<E>> AppendMerkleTree<E, A> {
             }
             tx_seq += 1;
         }
+    }
+
+    /// Return the height and the root hash of the first available node from the leaf to the root.
+    /// The caller should ensure that `index` is within range.
+    fn first_known_root_at(&self, index: usize) -> (usize, E) {
+        let mut height = 0;
+        let mut index_in_layer = index;
+        while height < self.layers.len() {
+            let node = self.node(height, index_in_layer);
+            if !node.is_null() {
+                return (height + 1, node.clone());
+            }
+            height += 1;
+            index_in_layer /= 2;
+        }
+        unreachable!("root is always available")
     }
 }
 

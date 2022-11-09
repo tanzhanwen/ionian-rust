@@ -1,5 +1,5 @@
 use super::sync_store::SyncStore;
-use crate::{controllers::SyncState, SyncRequest, SyncResponse, SyncSender};
+use crate::{controllers::SyncState, Config, SyncRequest, SyncResponse, SyncSender};
 use anyhow::{bail, Result};
 use log_entry_sync::LogSyncEvent;
 use std::sync::{
@@ -13,10 +13,8 @@ use tokio::sync::broadcast::{error::RecvError, Receiver};
 use tokio::time::sleep;
 
 const INTERVAL_CATCHUP: Duration = Duration::from_millis(1);
-const INTERVAL: Duration = Duration::from_secs(3);
+const INTERVAL: Duration = Duration::from_secs(1);
 const INTERVAL_ERROR: Duration = Duration::from_secs(10);
-
-const FIND_PEERS_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Manager to synchronize files among storage nodes automatically.
 ///
@@ -32,6 +30,8 @@ const FIND_PEERS_TIMEOUT: Duration = Duration::from_secs(30);
 /// 2. Synchronize the missed files in sequential synchronization.
 #[derive(Clone)]
 pub struct Manager {
+    config: Config,
+
     /// The next `tx_seq` to sync in sequence.
     next_tx_seq: Arc<AtomicU64>,
 
@@ -51,7 +51,7 @@ pub struct Manager {
 }
 
 impl Manager {
-    pub async fn new(store: Store, sync_send: SyncSender) -> Result<Self> {
+    pub async fn new(store: Store, sync_send: SyncSender, config: Config) -> Result<Self> {
         let sync_store = SyncStore::new(store.clone());
 
         let (next_tx_seq, max_tx_seq) = sync_store.get_tx_seq_range().await?;
@@ -59,6 +59,7 @@ impl Manager {
         let max_tx_seq = max_tx_seq.unwrap_or(u64::MAX);
 
         Ok(Self {
+            config,
             next_tx_seq: Arc::new(AtomicU64::new(next_tx_seq)),
             max_tx_seq: Arc::new(AtomicU64::new(max_tx_seq)),
             reverted_tx_seq: Arc::new(AtomicU64::new(u64::MAX)),
@@ -173,6 +174,7 @@ impl Manager {
             SyncResponse::SyncStatus { status } => status,
             _ => bail!("invalid sync response type"),
         };
+        trace!(?tx_seq, ?state, "sync_tx tx status");
 
         // notify service to sync file if not started or failed
         if matches!(state, None | Some(SyncState::Failed { .. })) {
@@ -183,7 +185,7 @@ impl Manager {
             return Ok(false);
         }
 
-        if matches!(state, Some(SyncState::FindingPeers { since, .. }) if since.elapsed() > FIND_PEERS_TIMEOUT)
+        if matches!(state, Some(SyncState::FindingPeers { since, .. }) if since.elapsed() > self.config.find_peer_timeout)
         {
             // no peers found for a long time
             self.terminate_file_sync(tx_seq).await;
@@ -350,7 +352,8 @@ async fn sync_pending_tx(manager: &Manager, tx_seq: u64) -> Result<bool> {
         debug!(%tx_seq, "No peers found for pending file and downgraded");
     }
 
-    Ok(no_peer_timeout)
+    //FIXME(zz): What should this be?
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -359,7 +362,7 @@ mod tests {
 
     use channel::Channel;
 
-    use crate::{auto_sync::sync_store::SyncStore, test_util::tests::TestStoreRuntime};
+    use crate::{auto_sync::sync_store::SyncStore, test_util::tests::TestStoreRuntime, Config};
 
     use super::Manager;
 
@@ -371,7 +374,7 @@ mod tests {
         }
 
         let (sync_send, _) = Channel::unbounded();
-        Manager::new(runtime.store.clone(), sync_send)
+        Manager::new(runtime.store.clone(), sync_send, Config::default())
             .await
             .unwrap()
     }

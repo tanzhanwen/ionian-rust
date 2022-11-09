@@ -138,14 +138,15 @@ impl ClientBuilder {
         Ok(self)
     }
 
-    pub async fn with_sync(mut self) -> Result<Self, String> {
+    pub async fn with_sync(mut self, config: sync::Config) -> Result<Self, String> {
         let executor = require!("sync", self, runtime_context).clone().executor;
         let store = require!("sync", self, store).clone();
         let file_location_cache = require!("sync", self, file_location_cache).clone();
         let network_send = require!("sync", self, network).send.clone();
         let event_recv = require!("sync", self, log_sync).send.subscribe();
 
-        let send = SyncService::spawn(
+        let send = SyncService::spawn_with_config(
+            config,
             executor,
             network_send,
             store,
