@@ -5,7 +5,7 @@ mod auto_sync;
 mod context;
 mod controllers;
 mod service;
-mod test_util;
+pub mod test_util;
 
 pub use controllers::FileSyncInfo;
 pub use service::{SyncMessage, SyncRequest, SyncResponse, SyncSender, SyncService};

@@ -594,7 +594,8 @@ impl SyncService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::tests::{create_2_store, create_file_location_cache};
+    use crate::test_util::create_2_store;
+    use crate::test_util::tests::create_file_location_cache;
     use libp2p::identity;
     use network::discovery::ConnectionId;
     use network::rpc::SubstreamId;

@@ -357,7 +357,7 @@ mod tests {
         log_store::{log_manager::LogConfig, Store},
         LogManager,
     };
-    use sync::{SyncMessage, SyncRequest, SyncResponse, SyncSender};
+    use sync::{test_util::create_2_store, SyncMessage, SyncRequest, SyncResponse, SyncSender};
     use task_executor::test_utils::TestRuntime;
     use tokio::sync::{
         mpsc::{self, error::TryRecvError},
@@ -646,28 +646,38 @@ mod tests {
         }
     }
 
+    async fn handle_find_file_msg(
+        handler: &Libp2pEventHandler,
+        tx_id: TxID,
+        timestamp: u32,
+    ) -> MessageAcceptance {
+        let (alice, bob) = (PeerId::random(), PeerId::random());
+        let id = MessageId::new(b"dummy message");
+        let message = PubsubMessage::FindFile(FindFile { tx_id, timestamp });
+        handler.on_pubsub_message(alice, bob, &id, message).await
+    }
+
     #[tokio::test]
     async fn test_on_pubsub_find_file_invalid_timestamp() {
         let ctx = Context::default();
         let handler = ctx.new_handler();
 
-        let (alice, bob) = (PeerId::random(), PeerId::random());
-        let id = MessageId::new(b"dummy message");
-
         // message too future
-        let message = PubsubMessage::FindFile(FindFile {
-            tx_id: TxID::random_hash(412),
-            timestamp: timestamp_now() + 1 + TOLERABLE_DRIFT.num_seconds() as u32,
-        });
-        let result = handler.on_pubsub_message(alice, bob, &id, message).await;
+        let result = handle_find_file_msg(
+            &handler,
+            TxID::random_hash(412),
+            timestamp_now() + 10 + TOLERABLE_DRIFT.num_seconds() as u32,
+        )
+        .await;
         assert!(matches!(result, MessageAcceptance::Ignore));
 
         // message too old
-        let message = PubsubMessage::FindFile(FindFile {
-            tx_id: TxID::random_hash(412),
-            timestamp: timestamp_now() - 1 - FIND_FILE_TIMEOUT.num_seconds() as u32,
-        });
-        let result = handler.on_pubsub_message(alice, bob, &id, message).await;
+        let result = handle_find_file_msg(
+            &handler,
+            TxID::random_hash(412),
+            timestamp_now() - 10 - FIND_FILE_TIMEOUT.num_seconds() as u32,
+        )
+        .await;
         assert!(matches!(result, MessageAcceptance::Ignore));
     }
 
@@ -676,14 +686,24 @@ mod tests {
         let ctx = Context::default();
         let handler = ctx.new_handler();
 
-        let (alice, bob) = (PeerId::random(), PeerId::random());
-        let id = MessageId::new(b"dummy message");
-        let message = PubsubMessage::FindFile(FindFile {
-            tx_id: TxID::random_hash(412),
-            timestamp: timestamp_now(),
-        });
-        let result = handler.on_pubsub_message(alice, bob, &id, message).await;
+        let result = handle_find_file_msg(&handler, TxID::random_hash(412), timestamp_now()).await;
         assert!(matches!(result, MessageAcceptance::Accept));
+    }
+
+    #[tokio::test]
+    async fn test_on_pubsub_find_file_in_store() {
+        let mut ctx = Context::default();
+
+        // prepare store with txs
+        let (_, store, txs, _) = create_2_store(vec![1314]);
+        ctx.store = store;
+
+        let handler = ctx.new_handler();
+
+        // receive find file request
+        let result = handle_find_file_msg(&handler, txs[0].id(), timestamp_now()).await;
+        assert!(matches!(result, MessageAcceptance::Ignore));
+        ctx.assert_file_announcement_published(txs[0].id());
     }
 
     #[tokio::test]
@@ -700,13 +720,7 @@ mod tests {
         ctx.file_location_cache.insert(signed);
 
         // receive find file request
-        let (alice, bob) = (PeerId::random(), PeerId::random());
-        let id = MessageId::new(b"dummy message");
-        let message = PubsubMessage::FindFile(FindFile {
-            tx_id,
-            timestamp: timestamp_now() - 1,
-        });
-        let result = handler.on_pubsub_message(alice, bob, &id, message).await;
+        let result = handle_find_file_msg(&handler, tx_id, timestamp_now()).await;
         assert!(matches!(result, MessageAcceptance::Ignore));
         ctx.assert_file_announcement_published(tx_id);
     }
