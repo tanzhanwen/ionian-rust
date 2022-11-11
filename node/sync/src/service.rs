@@ -63,7 +63,7 @@ pub enum SyncRequest {
     SyncStatus { tx_seq: u64 },
     SyncFile { tx_seq: u64 },
     FileSyncInfo { tx_seq: Option<u64> },
-    TerminateFileSync { tx_seq: u64 },
+    TerminateFileSync { tx_seq: u64, is_reverted: bool },
 }
 
 #[derive(Debug)]
@@ -276,8 +276,12 @@ impl SyncService {
                 let _ = sender.send(SyncResponse::FileSyncInfo { result });
             }
 
-            SyncRequest::TerminateFileSync { tx_seq } => {
-                let count = self.on_terminate_file_sync(tx_seq);
+            SyncRequest::TerminateFileSync {
+                tx_seq,
+                is_reverted,
+            } => {
+                debug!(?tx_seq, "terminate file sync");
+                let count = self.on_terminate_file_sync(tx_seq, is_reverted);
                 let _ = sender.send(SyncResponse::TerminateFileSync { count });
             }
         }
@@ -557,25 +561,30 @@ impl SyncService {
         }
     }
 
-    /// Terminate all file sync that `tx_seq` greater than `min_tx_seq`
-    /// when confirmed transactions reverted.
+    /// Terminate file sync of `min_tx_seq`.
+    /// If `is_reverted` is `true` (means confirmed transactions reverted),
+    /// also terminate `tx_seq` greater than `min_tx_seq`
     ///
     /// Note, this function should be as fast as possible to avoid
     /// message lagged in channel.
-    fn on_terminate_file_sync(&mut self, min_tx_seq: u64) -> usize {
-        let mut reverted = vec![];
+    fn on_terminate_file_sync(&mut self, min_tx_seq: u64, is_reverted: bool) -> usize {
+        let mut to_terminate = vec![];
 
-        for (tx_seq, _) in self.controllers.iter() {
-            if *tx_seq >= min_tx_seq {
-                reverted.push(*tx_seq);
+        if is_reverted {
+            for (tx_seq, _) in self.controllers.iter() {
+                if *tx_seq >= min_tx_seq {
+                    to_terminate.push(*tx_seq);
+                }
             }
+        } else {
+            to_terminate.push(min_tx_seq);
         }
 
-        for tx_seq in reverted.iter() {
+        for tx_seq in to_terminate.iter() {
             self.controllers.remove(tx_seq);
         }
 
-        reverted.len()
+        to_terminate.len()
     }
 
     fn on_heartbeat(&mut self) {

@@ -192,7 +192,7 @@ impl Manager {
         if matches!(state, Some(SyncState::FindingPeers { since, .. }) if since.elapsed() > self.config.find_peer_timeout)
         {
             // no peers found for a long time
-            self.terminate_file_sync(tx_seq).await;
+            self.terminate_file_sync(tx_seq, false).await;
             Ok(true)
         } else {
             // otherwise, continue to wait for file sync that already in progress
@@ -200,10 +200,13 @@ impl Manager {
         }
     }
 
-    async fn terminate_file_sync(&self, tx_seq: u64) {
+    async fn terminate_file_sync(&self, tx_seq: u64, is_reverted: bool) {
         if let Err(err) = self
             .sync_send
-            .request(SyncRequest::TerminateFileSync { tx_seq })
+            .request(SyncRequest::TerminateFileSync {
+                tx_seq,
+                is_reverted,
+            })
             .await
         {
             // just log and go ahead for any error, e.g. timeout
@@ -249,7 +252,7 @@ impl Manager {
             // handles reorg before file sync
             if let Some(tx_seq) = self.handle_on_reorg() {
                 // request sync service to terminate the file sync immediately
-                self.terminate_file_sync(tx_seq).await;
+                self.terminate_file_sync(tx_seq, true).await;
             }
 
             // sync file
