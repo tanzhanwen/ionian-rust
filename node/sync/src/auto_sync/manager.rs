@@ -71,14 +71,14 @@ impl Manager {
 
     pub fn spwn(&self, executor: &TaskExecutor, receiver: Receiver<LogSyncEvent>) {
         executor.spawn(
-            monitor_reorg(self.clone(), receiver),
+            self.clone().monitor_reorg(receiver),
             "sync_manager_reorg_monitor",
         );
 
-        executor.spawn(start_sync(self.clone()), "sync_manager_sequential_syncer");
+        executor.spawn(self.clone().start_sync(), "sync_manager_sequential_syncer");
 
         executor.spawn(
-            start_sync_pending_txs(self.clone()),
+            self.clone().start_sync_pending_txs(),
             "sync_manager_pending_syncer",
         );
     }
@@ -172,17 +172,21 @@ impl Manager {
             .await?
         {
             SyncResponse::SyncStatus { status } => status,
-            _ => bail!("invalid sync response type"),
+            _ => bail!("Invalid sync response type"),
         };
         trace!(?tx_seq, ?state, "sync_tx tx status");
 
         // notify service to sync file if not started or failed
         if matches!(state, None | Some(SyncState::Failed { .. })) {
-            self.sync_send
+            match self
+                .sync_send
                 .request(SyncRequest::SyncFile { tx_seq })
-                .await?;
-
-            return Ok(false);
+                .await?
+            {
+                SyncResponse::SyncFile { err } if err.is_empty() => return Ok(false),
+                SyncResponse::SyncFile { err } => bail!("Failed to sync file: {:?}", err),
+                _ => bail!("Invalid sync response type"),
+            }
         }
 
         if matches!(state, Some(SyncState::FindingPeers { since, .. }) if since.elapsed() > self.config.find_peer_timeout)
@@ -206,183 +210,200 @@ impl Manager {
             error!(%err, %tx_seq, "Failed to terminate file sync");
         }
     }
-}
 
-/// Starts to monitor reorg and handle on transaction reverted.
-async fn monitor_reorg(manager: Manager, mut receiver: Receiver<LogSyncEvent>) {
-    info!("Start to monitor reorg");
+    /// Starts to monitor reorg and handle on transaction reverted.
+    async fn monitor_reorg(self, mut receiver: Receiver<LogSyncEvent>) {
+        info!("Start to monitor reorg");
 
-    loop {
-        match receiver.recv().await {
-            Ok(LogSyncEvent::ReorgDetected { .. }) => {}
-            Ok(LogSyncEvent::Reverted { tx_seq }) => {
-                // requires to re-sync files since transaction and files removed in storage
-                manager.set_reverted(tx_seq);
-            }
-            Err(RecvError::Closed) => {
-                // program terminated
-                info!("Completed to monitor reorg");
-                return;
-            }
-            Err(RecvError::Lagged(lagged)) => {
-                // Generally, such error should not happen since confirmed block
-                // reorg rarely happen, and the buffer size of broadcast channel
-                // is big enough.
-                error!(%lagged, "Failed to receive reverted tx (Lagged)");
-            }
-        }
-    }
-}
-
-/// Starts to synchronize files in sequence.
-async fn start_sync(manager: Manager) {
-    info!(
-        "Start to sync files periodically, next = {}, max = {}",
-        manager.next_tx_seq.load(Ordering::Relaxed),
-        manager.max_tx_seq.load(Ordering::Relaxed)
-    );
-
-    loop {
-        // handles reorg before file sync
-        if let Some(tx_seq) = manager.handle_on_reorg() {
-            // request sync service to terminate the file sync immediately
-            manager.terminate_file_sync(tx_seq).await;
-        }
-
-        // sync file
-        let sync_result = sync_once(&manager).await;
-        let next_tx_seq = manager.next_tx_seq.load(Ordering::Relaxed);
-        match sync_result {
-            Ok(true) => {
-                debug!(%next_tx_seq, "Completed to sync file");
-                sleep(INTERVAL_CATCHUP).await;
-            }
-            Ok(false) => {
-                trace!(%next_tx_seq, "File in sync or log entry unavailable");
-                sleep(INTERVAL).await;
-            }
-            Err(err) => {
-                warn!(%err, %next_tx_seq, "Failed to sync file");
-                sleep(INTERVAL_ERROR).await;
+        loop {
+            match receiver.recv().await {
+                Ok(LogSyncEvent::ReorgDetected { .. }) => {}
+                Ok(LogSyncEvent::Reverted { tx_seq }) => {
+                    // requires to re-sync files since transaction and files removed in storage
+                    self.set_reverted(tx_seq);
+                }
+                Err(RecvError::Closed) => {
+                    // program terminated
+                    info!("Completed to monitor reorg");
+                    return;
+                }
+                Err(RecvError::Lagged(lagged)) => {
+                    // Generally, such error should not happen since confirmed block
+                    // reorg rarely happen, and the buffer size of broadcast channel
+                    // is big enough.
+                    error!(%lagged, "Failed to receive reverted tx (Lagged)");
+                }
             }
         }
     }
-}
 
-async fn sync_once(manager: &Manager) -> Result<bool> {
-    // already sync to the latest file
-    let next_tx_seq = manager.next_tx_seq.load(Ordering::Relaxed);
-    if next_tx_seq > manager.max_tx_seq.load(Ordering::Relaxed) {
-        return Ok(false);
-    }
+    /// Starts to synchronize files in sequence.
+    async fn start_sync(self) {
+        info!(
+            "Start to sync files periodically, next = {}, max = {}",
+            self.next_tx_seq.load(Ordering::Relaxed),
+            self.max_tx_seq.load(Ordering::Relaxed)
+        );
 
-    // already finalized
-    if manager.store.check_tx_completed(next_tx_seq).await? {
-        assert!(manager.move_forward(false).await?);
-        return Ok(true);
-    }
+        loop {
+            // handles reorg before file sync
+            if let Some(tx_seq) = self.handle_on_reorg() {
+                // request sync service to terminate the file sync immediately
+                self.terminate_file_sync(tx_seq).await;
+            }
 
-    // try sync tx
-    let no_peer_timeout = manager.sync_tx(next_tx_seq).await?;
-
-    // put tx to pending list if no peers found for a long time
-    if no_peer_timeout {
-        assert!(manager.move_forward(true).await?);
-    }
-
-    Ok(no_peer_timeout)
-}
-
-/// Starts to synchronize pending files that unavailable during sequential synchronization.
-async fn start_sync_pending_txs(manager: Manager) {
-    info!("Start to sync pending files");
-
-    let mut tx_seq = 0;
-    let mut next = true;
-
-    loop {
-        if next {
-            match manager.sync_store.random_tx().await {
-                Ok(Some(seq)) => tx_seq = seq,
-                Ok(None) => {
-                    trace!("No pending file to sync");
+            // sync file
+            let sync_result = self.sync_once().await;
+            let next_tx_seq = self.next_tx_seq.load(Ordering::Relaxed);
+            match sync_result {
+                Ok(true) => {
+                    debug!(%next_tx_seq, "Completed to sync file");
+                    sleep(INTERVAL_CATCHUP).await;
+                }
+                Ok(false) => {
+                    trace!(%next_tx_seq, "File in sync or log entry unavailable");
                     sleep(INTERVAL).await;
-                    continue;
                 }
                 Err(err) => {
-                    warn!(%err, "Failed to pick pending file to sync");
+                    warn!(%err, %next_tx_seq, "Failed to sync file");
                     sleep(INTERVAL_ERROR).await;
-                    continue;
                 }
             }
         }
+    }
 
-        match sync_pending_tx(&manager, tx_seq).await {
-            Ok(true) => {
-                debug!(%tx_seq, "Completed to sync pending file");
-                sleep(INTERVAL_CATCHUP).await;
-                next = true;
+    async fn sync_once(&self) -> Result<bool> {
+        // already sync to the latest file
+        let next_tx_seq = self.next_tx_seq.load(Ordering::Relaxed);
+        if next_tx_seq > self.max_tx_seq.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+
+        // already finalized
+        if self.store.check_tx_completed(next_tx_seq).await? {
+            self.move_forward(false).await?;
+            return Ok(true);
+        }
+
+        // try sync tx
+        let no_peer_timeout = self.sync_tx(next_tx_seq).await?;
+
+        // put tx to pending list if no peers found for a long time
+        if no_peer_timeout {
+            self.move_forward(true).await?;
+        }
+
+        Ok(no_peer_timeout)
+    }
+
+    /// Starts to synchronize pending files that unavailable during sequential synchronization.
+    async fn start_sync_pending_txs(self) {
+        info!("Start to sync pending files");
+
+        let mut tx_seq = 0;
+        let mut next = true;
+
+        loop {
+            if next {
+                match self.sync_store.random_tx().await {
+                    Ok(Some(seq)) => tx_seq = seq,
+                    Ok(None) => {
+                        trace!("No pending file to sync");
+                        sleep(INTERVAL).await;
+                        continue;
+                    }
+                    Err(err) => {
+                        warn!(%err, "Failed to pick pending file to sync");
+                        sleep(INTERVAL_ERROR).await;
+                        continue;
+                    }
+                }
             }
-            Ok(false) => {
-                trace!(%tx_seq, "Pending file in sync or tx unavailable");
-                sleep(INTERVAL).await;
-                next = false;
-            }
-            Err(err) => {
-                warn!(%err, %tx_seq, "Failed to sync pending file");
-                sleep(INTERVAL_ERROR).await;
-                next = false;
+
+            match self.sync_pending_tx(tx_seq).await {
+                Ok(true) => {
+                    debug!(%tx_seq, "Completed to sync pending file");
+                    sleep(INTERVAL_CATCHUP).await;
+                    next = true;
+                }
+                Ok(false) => {
+                    trace!(%tx_seq, "Pending file in sync or tx unavailable");
+                    sleep(INTERVAL).await;
+                    next = false;
+                }
+                Err(err) => {
+                    warn!(%err, %tx_seq, "Failed to sync pending file");
+                    sleep(INTERVAL_ERROR).await;
+                    next = false;
+                }
             }
         }
     }
-}
 
-async fn sync_pending_tx(manager: &Manager, tx_seq: u64) -> Result<bool> {
-    // already finalized
-    if manager.store.check_tx_completed(tx_seq).await? {
-        manager.sync_store.remove_tx(tx_seq).await?;
-        return Ok(true);
+    async fn sync_pending_tx(&self, tx_seq: u64) -> Result<bool> {
+        // already finalized
+        if self.store.check_tx_completed(tx_seq).await? {
+            self.sync_store.remove_tx(tx_seq).await?;
+            return Ok(true);
+        }
+
+        // try sync tx
+        let no_peer_timeout = self.sync_tx(tx_seq).await?;
+
+        // downgrade if no peers found for a long time
+        if no_peer_timeout && self.sync_store.downgrade_tx_to_pending(tx_seq).await? {
+            debug!(%tx_seq, "No peers found for pending file and downgraded");
+        }
+
+        Ok(no_peer_timeout)
     }
-
-    // try sync tx
-    let no_peer_timeout = manager.sync_tx(tx_seq).await?;
-
-    // downgrade if no peers found for a long time
-    if no_peer_timeout && manager.sync_store.downgrade_tx_to_pending(tx_seq).await? {
-        debug!(%tx_seq, "No peers found for pending file and downgraded");
-    }
-
-    //FIXME(zz): What should this be?
-    Ok(false)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
+    use std::{
+        ops::Sub,
+        sync::atomic::Ordering,
+        time::{Duration, Instant},
+    };
 
-    use channel::Channel;
+    use channel::{test_util::TestReceiver, Channel};
+    use tokio::sync::mpsc::error::TryRecvError;
 
-    use crate::{auto_sync::sync_store::SyncStore, test_util::tests::TestStoreRuntime, Config};
+    use crate::{
+        auto_sync::sync_store::SyncStore,
+        controllers::SyncState,
+        test_util::{create_2_store, tests::TestStoreRuntime},
+        Config, SyncMessage, SyncRequest, SyncResponse,
+    };
 
     use super::Manager;
 
-    async fn new_manager(runtime: &TestStoreRuntime, next_tx_seq: u64, max_tx_seq: u64) -> Manager {
+    async fn new_manager(
+        runtime: &TestStoreRuntime,
+        next_tx_seq: u64,
+        max_tx_seq: u64,
+    ) -> (
+        Manager,
+        TestReceiver<SyncMessage, SyncRequest, SyncResponse>,
+    ) {
         let sync_store = SyncStore::new(runtime.store.clone());
         sync_store.set_next_tx_seq(next_tx_seq).await.unwrap();
         if max_tx_seq < u64::MAX {
             sync_store.set_max_tx_seq(max_tx_seq).await.unwrap();
         }
 
-        let (sync_send, _) = Channel::unbounded();
-        Manager::new(runtime.store.clone(), sync_send, Config::default())
+        let (sync_send, sync_recv) = Channel::unbounded();
+        let manager = Manager::new(runtime.store.clone(), sync_send, Config::default())
             .await
-            .unwrap()
+            .unwrap();
+        (manager, sync_recv.into())
     }
 
     #[tokio::test]
     async fn test_manager_init_values() {
         let runtime = TestStoreRuntime::default();
-        let manager = new_manager(&runtime, 4, 12).await;
+        let (manager, _sync_recv) = new_manager(&runtime, 4, 12).await;
 
         assert_eq!(manager.next_tx_seq.load(Ordering::Relaxed), 4);
         assert_eq!(manager.max_tx_seq.load(Ordering::Relaxed), 12);
@@ -392,7 +413,7 @@ mod tests {
     #[tokio::test]
     async fn test_manager_set_reverted() {
         let runtime = TestStoreRuntime::default();
-        let manager = new_manager(&runtime, 4, 12).await;
+        let (manager, _sync_recv) = new_manager(&runtime, 4, 12).await;
 
         // reverted to tx 5
         assert_eq!(manager.set_reverted(5), true);
@@ -410,7 +431,7 @@ mod tests {
     #[tokio::test]
     async fn test_manager_handle_reorg() {
         let runtime = TestStoreRuntime::default();
-        let manager = new_manager(&runtime, 4, 12).await;
+        let (manager, _sync_recv) = new_manager(&runtime, 4, 12).await;
 
         // no effect if not reverted
         assert_eq!(manager.handle_on_reorg(), None);
@@ -433,7 +454,7 @@ mod tests {
     #[tokio::test]
     async fn test_manager_update_on_announcement() {
         let runtime = TestStoreRuntime::default();
-        let manager = new_manager(&runtime, 4, 12).await;
+        let (manager, _sync_recv) = new_manager(&runtime, 4, 12).await;
 
         // no effect if tx 10 announced
         manager.update_on_announcement(10).await;
@@ -461,24 +482,32 @@ mod tests {
     #[tokio::test]
     async fn test_manager_move_forward() {
         let runtime = TestStoreRuntime::default();
-        let manager = new_manager(&runtime, 4, 12).await;
+        let (manager, _sync_recv) = new_manager(&runtime, 4, 12).await;
 
         // move forward from 4 to 5
         assert_eq!(manager.move_forward(false).await.unwrap(), true);
         assert_eq!(manager.next_tx_seq.load(Ordering::Relaxed), 5);
         assert_eq!(manager.max_tx_seq.load(Ordering::Relaxed), 12);
+        assert_eq!(
+            manager.sync_store.get_tx_seq_range().await.unwrap(),
+            (Some(5), Some(12))
+        );
 
         // move forward and add tx 5 to pending list
         assert_eq!(manager.move_forward(true).await.unwrap(), true);
         assert_eq!(manager.next_tx_seq.load(Ordering::Relaxed), 6);
         assert_eq!(manager.max_tx_seq.load(Ordering::Relaxed), 12);
+        assert_eq!(
+            manager.sync_store.get_tx_seq_range().await.unwrap(),
+            (Some(6), Some(12))
+        );
         assert_eq!(manager.sync_store.random_tx().await.unwrap(), Some(5));
     }
 
     #[tokio::test]
     async fn test_manager_move_forward_failed() {
         let runtime = TestStoreRuntime::default();
-        let manager = new_manager(&runtime, 5, 5).await;
+        let (manager, _sync_recv) = new_manager(&runtime, 5, 5).await;
 
         // 5 -> 6
         assert_eq!(manager.move_forward(false).await.unwrap(), true);
@@ -489,5 +518,152 @@ mod tests {
         assert_eq!(manager.move_forward(false).await.unwrap(), false);
         assert_eq!(manager.next_tx_seq.load(Ordering::Relaxed), 6);
         assert_eq!(manager.max_tx_seq.load(Ordering::Relaxed), 5);
+        assert_eq!(
+            manager.sync_store.get_tx_seq_range().await.unwrap(),
+            (Some(6), Some(5))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_manager_sync_tx_unavailable() {
+        let runtime = TestStoreRuntime::default();
+        let (manager, _sync_recv) = new_manager(&runtime, 4, 12).await;
+
+        assert_eq!(manager.sync_tx(4).await.unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn test_manager_sync_tx_status_none() {
+        let (_, store, _, _) = create_2_store(vec![1314, 1324]);
+        let runtime = TestStoreRuntime::new(store);
+        let (manager, mut sync_recv) = new_manager(&runtime, 1, 5).await;
+
+        let (_, sync_result) = tokio::join!(
+            sync_recv.expect_responses(vec![
+                SyncResponse::SyncStatus { status: None },
+                // cause to file sync started
+                SyncResponse::SyncFile { err: String::new() },
+            ]),
+            manager.sync_tx(1)
+        );
+        assert_eq!(sync_result.unwrap(), false);
+        assert!(matches!(sync_recv.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn test_manager_sync_tx_in_progress() {
+        let (_, store, _, _) = create_2_store(vec![1314, 1324]);
+        let runtime = TestStoreRuntime::new(store);
+        let (manager, mut sync_recv) = new_manager(&runtime, 1, 5).await;
+
+        let (_, sync_result) = tokio::join!(
+            // unnecessary to start file sync again
+            sync_recv.expect_response(SyncResponse::SyncStatus {
+                status: Some(SyncState::ConnectingPeers)
+            }),
+            manager.sync_tx(1)
+        );
+        assert_eq!(sync_result.unwrap(), false);
+        assert!(matches!(sync_recv.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    async fn expect_no_peer_found(
+        sync_recv: &mut TestReceiver<SyncMessage, SyncRequest, SyncResponse>,
+    ) {
+        let responses = vec![
+            // no peers for file sync for a long time
+            SyncResponse::SyncStatus {
+                status: Some(SyncState::FindingPeers {
+                    since: Instant::now().sub(Duration::from_secs(10000)),
+                    updated: Instant::now(),
+                }),
+            },
+            // required to terminate the file sync
+            SyncResponse::TerminateFileSync { count: 1 },
+        ];
+        sync_recv.expect_responses(responses).await
+    }
+
+    #[tokio::test]
+    async fn test_manager_sync_tx_no_peer_found() {
+        let (_, store, _, _) = create_2_store(vec![1314, 1324]);
+        let runtime = TestStoreRuntime::new(store);
+        let (manager, mut sync_recv) = new_manager(&runtime, 1, 5).await;
+
+        let (_, sync_result) =
+            tokio::join!(expect_no_peer_found(&mut sync_recv), manager.sync_tx(1));
+        assert_eq!(sync_result.unwrap(), true);
+        assert!(matches!(sync_recv.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn test_manager_sync_once_already_latest() {
+        let runtime = TestStoreRuntime::default();
+        let (manager, _sync_recv) = new_manager(&runtime, 6, 5).await;
+
+        assert_eq!(manager.sync_once().await.unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn test_manager_sync_once_finalized() {
+        let (_, store, _, _) = create_2_store(vec![1314, 1324]);
+        let runtime = TestStoreRuntime::new(store);
+        let (manager, _sync_recv) = new_manager(&runtime, 1, 5).await;
+
+        assert_eq!(manager.sync_once().await.unwrap(), true);
+        assert_eq!(manager.next_tx_seq.load(Ordering::Relaxed), 2);
+        assert_eq!(manager.sync_store.random_tx().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_manager_sync_once_no_peer_found() {
+        let (store, _, _, _) = create_2_store(vec![1314]);
+        let runtime = TestStoreRuntime::new(store);
+        let (manager, mut sync_recv) = new_manager(&runtime, 0, 5).await;
+
+        let (_, sync_result) =
+            tokio::join!(expect_no_peer_found(&mut sync_recv), manager.sync_once(),);
+        assert_eq!(sync_result.unwrap(), true);
+        assert!(matches!(sync_recv.try_recv(), Err(TryRecvError::Empty)));
+        assert_eq!(manager.sync_store.random_tx().await.unwrap(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_manager_sync_pending_tx_finalized() {
+        let (_, store, _, _) = create_2_store(vec![1314, 1324]);
+        let runtime = TestStoreRuntime::new(store);
+        let (manager, _sync_recv) = new_manager(&runtime, 4, 12).await;
+
+        assert_eq!(manager.sync_store.add_pending_tx(0).await.unwrap(), true);
+        assert_eq!(manager.sync_store.add_pending_tx(1).await.unwrap(), true);
+
+        assert_eq!(manager.sync_pending_tx(1).await.unwrap(), true);
+        assert_eq!(manager.sync_store.random_tx().await.unwrap(), Some(0));
+        assert_eq!(manager.sync_store.add_pending_tx(1).await.unwrap(), true);
+    }
+
+    #[tokio::test]
+    async fn test_manager_sync_pending_tx_no_peer_found() {
+        let (store, _, _, _) = create_2_store(vec![1314, 1324]);
+        let runtime = TestStoreRuntime::new(store);
+        let (manager, mut sync_recv) = new_manager(&runtime, 4, 12).await;
+
+        assert_eq!(manager.sync_store.add_pending_tx(0).await.unwrap(), true);
+        assert_eq!(manager.sync_store.add_pending_tx(1).await.unwrap(), true);
+        assert_eq!(
+            manager.sync_store.upgrade_tx_to_ready(1).await.unwrap(),
+            true
+        );
+
+        let (_, sync_result) = tokio::join!(
+            expect_no_peer_found(&mut sync_recv),
+            manager.sync_pending_tx(1),
+        );
+        assert_eq!(sync_result.unwrap(), true);
+        assert!(matches!(sync_recv.try_recv(), Err(TryRecvError::Empty)));
+        assert_eq!(
+            manager.sync_store.upgrade_tx_to_ready(1).await.unwrap(),
+            true
+        );
     }
 }

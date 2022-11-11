@@ -23,6 +23,7 @@ use tokio::sync::{broadcast, mpsc, RwLock};
 const HEARTBEAT_INTERVAL_SEC: u64 = 5;
 
 pub type SyncSender = channel::Sender<SyncMessage, SyncRequest, SyncResponse>;
+pub type SyncReceiver = channel::Receiver<SyncMessage, SyncRequest, SyncResponse>;
 
 #[derive(Debug)]
 pub enum SyncMessage {

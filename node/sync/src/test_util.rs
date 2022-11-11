@@ -113,19 +113,23 @@ pub mod tests {
 
     impl Default for TestStoreRuntime {
         fn default() -> Self {
-            let runtime = TestRuntime::default();
             let store = Arc::new(RwLock::new(Self::new_store()));
-            let executor = runtime.task_executor.clone();
-            Self {
-                runtime,
-                store: Store::new(store, executor),
-            }
+            Self::new(store)
         }
     }
 
     impl TestStoreRuntime {
         pub fn new_store() -> impl LogStore {
             LogManager::memorydb(LogConfig::default()).unwrap()
+        }
+
+        pub fn new(store: Arc<RwLock<dyn LogStore>>) -> TestStoreRuntime {
+            let runtime = TestRuntime::default();
+            let executor = runtime.task_executor.clone();
+            Self {
+                runtime,
+                store: Store::new(store, executor),
+            }
         }
     }
 

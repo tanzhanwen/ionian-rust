@@ -357,7 +357,7 @@ mod tests {
         log_store::{log_manager::LogConfig, Store},
         LogManager,
     };
-    use sync::{test_util::create_2_store, SyncMessage, SyncRequest, SyncResponse, SyncSender};
+    use sync::{test_util::create_2_store, SyncMessage, SyncReceiver, SyncSender};
     use task_executor::test_utils::TestRuntime;
     use tokio::sync::{
         mpsc::{self, error::TryRecvError},
@@ -367,8 +367,6 @@ mod tests {
     use crate::{peer_manager::PeerManager, Config};
 
     use super::*;
-
-    type SyncReceiver = channel::Receiver<SyncMessage, SyncRequest, SyncResponse>;
 
     struct Context {
         runtime: TestRuntime,

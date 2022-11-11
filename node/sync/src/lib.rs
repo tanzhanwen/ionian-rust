@@ -8,7 +8,7 @@ mod service;
 pub mod test_util;
 
 pub use controllers::FileSyncInfo;
-pub use service::{SyncMessage, SyncRequest, SyncResponse, SyncSender, SyncService};
+pub use service::{SyncMessage, SyncReceiver, SyncRequest, SyncResponse, SyncSender, SyncService};
 use std::time::Duration;
 
 #[derive(Clone)]
