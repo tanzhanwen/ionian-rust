@@ -8,14 +8,17 @@ mod service;
 pub mod test_util;
 
 pub use controllers::FileSyncInfo;
+use duration_str::deserialize_duration;
+use serde::Deserialize;
 pub use service::{SyncMessage, SyncReceiver, SyncRequest, SyncResponse, SyncSender, SyncService};
 use std::time::Duration;
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub auto_sync_disabled: bool,
     pub max_sync_files: usize,
-
+    #[serde(deserialize_with = "deserialize_duration")]
     pub find_peer_timeout: Duration,
 }
 

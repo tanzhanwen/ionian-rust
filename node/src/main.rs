@@ -6,8 +6,8 @@ mod client;
 mod config;
 mod log;
 
+use crate::config::IonianConfig;
 use client::{Client, ClientBuilder, RuntimeContext};
-use config::IonianConfig;
 use std::error::Error;
 
 async fn start_node(context: RuntimeContext, config: IonianConfig) -> Result<Client, String> {

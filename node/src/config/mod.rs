@@ -2,6 +2,7 @@ mod config_macro;
 
 mod convert;
 use config_macro::*;
+use serde::Deserialize;
 use std::ops::Deref;
 
 build_config! {
@@ -56,9 +57,12 @@ build_config! {
     (find_peer_timeout_secs, (u64), 30)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct IonianConfig {
     pub raw_conf: RawConfiguration,
+
+    pub sync: sync::Config,
 }
 
 impl Deref for IonianConfig {
@@ -71,8 +75,20 @@ impl Deref for IonianConfig {
 
 impl IonianConfig {
     pub fn parse(matches: &clap::ArgMatches) -> Result<IonianConfig, String> {
-        Ok(IonianConfig {
-            raw_conf: RawConfiguration::parse(matches)?,
-        })
+        let config_file = match matches.get_one::<String>("config") {
+            Some(file) => file.as_str(),
+            None => return Err("config file not specified".to_string()),
+        };
+
+        let mut config = config::Config::builder()
+            .add_source(config::File::with_name(config_file))
+            .build()
+            .map_err(|e| format!("Failed to build config: {:?}", e))?
+            .try_deserialize::<IonianConfig>()
+            .map_err(|e| format!("Failed to deserialize config: {:?}", e))?;
+
+        config.raw_conf = RawConfiguration::parse(matches)?;
+
+        Ok(config)
     }
 }

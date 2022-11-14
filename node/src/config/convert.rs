@@ -146,7 +146,7 @@ impl IonianConfig {
     }
 
     pub fn sync_config(&self) -> sync::Config {
-        let mut config = sync::Config::default();
+        let mut config = self.sync.clone();
         config.find_peer_timeout = Duration::from_secs(self.find_peer_timeout_secs);
         config
     }

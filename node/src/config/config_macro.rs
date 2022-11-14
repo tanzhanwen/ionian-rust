@@ -28,7 +28,7 @@ macro_rules! underscore_to_hyphen {
 
 macro_rules! build_config{
     ($(($name:ident, ($($type:tt)+), $default:expr))*) => {
-        #[derive(Debug, PartialEq, Eq, Clone)]
+        #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize)]
         pub struct RawConfiguration {
             $(pub $name: $($type)+,)*
         }
