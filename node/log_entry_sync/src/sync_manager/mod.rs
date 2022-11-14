@@ -45,7 +45,7 @@ impl LogSyncManager {
         executor: TaskExecutor,
         store: Arc<RwLock<dyn Store>>,
     ) -> Result<broadcast::Sender<LogSyncEvent>> {
-        let next_tx_seq = store.read().await.next_tx_seq()?;
+        let next_tx_seq = store.read().await.next_tx_seq();
 
         let executor_clone = executor.clone();
         let mut shutdown_sender = executor.shutdown_sender();

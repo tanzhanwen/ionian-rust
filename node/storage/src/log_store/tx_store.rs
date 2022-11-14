@@ -11,18 +11,31 @@ use merkle_light::merkle::log2_pow2;
 use shared_types::{DataRoot, Transaction};
 use ssz::{Decode, Encode};
 use std::cmp;
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tracing::instrument;
+use tracing::{error, instrument};
 
 const LOG_SYNC_PROGRESS_KEY: &str = "log_sync_progress";
+const NEXT_TX_KEY: &str = "next_tx_seq";
 
 pub struct TransactionStore {
     kvdb: Arc<dyn IonianKeyValueDB>,
+    /// This is always updated before writing the database to ensure no intermediate states.
+    next_tx_seq: AtomicU64,
 }
 
 impl TransactionStore {
-    pub fn new(kvdb: Arc<dyn IonianKeyValueDB>) -> Self {
-        Self { kvdb }
+    pub fn new(kvdb: Arc<dyn IonianKeyValueDB>) -> Result<Self> {
+        let next_tx_seq = kvdb
+            .get(COL_TX, NEXT_TX_KEY.as_bytes())?
+            .map(|a| decode_tx_seq(&a))
+            .unwrap_or(Ok(0))?;
+        Ok(Self {
+            kvdb,
+            next_tx_seq: AtomicU64::new(next_tx_seq),
+        })
     }
 
     #[instrument(skip(self))]
@@ -42,6 +55,7 @@ impl TransactionStore {
         }
 
         db_tx.put(COL_TX, &tx.seq.to_be_bytes(), &tx.as_ssz_bytes());
+        db_tx.put(COL_TX, NEXT_TX_KEY.as_bytes(), &(tx.seq + 1).to_be_bytes());
         let old_tx_seq_list = self.get_tx_seq_list_by_data_root(&tx.data_merkle_root)?;
         // The list is sorted, and we always call `put_tx` in order.
         assert!(old_tx_seq_list
@@ -55,38 +69,59 @@ impl TransactionStore {
             tx.data_merkle_root.as_bytes(),
             &new_tx_seq_list.as_ssz_bytes(),
         );
-
+        self.next_tx_seq.store(tx.seq + 1, Ordering::SeqCst);
         self.kvdb.write(db_tx)?;
         Ok(old_tx_seq_list)
     }
 
     pub fn get_tx_by_seq_number(&self, seq: u64) -> Result<Option<Transaction>> {
+        if seq >= self.next_tx_seq() {
+            return Ok(None);
+        }
         let value = try_option!(self.kvdb.get(COL_TX, &seq.to_be_bytes())?);
         let tx = Transaction::from_ssz_bytes(&value).map_err(Error::from)?;
         Ok(Some(tx))
     }
 
-    pub fn remove_tx_by_seq_number(&self, seq: u64) -> Result<Option<Transaction>> {
-        let tx = try_option!(self.get_tx_by_seq_number(seq)?);
+    pub fn remove_tx_after(&self, min_seq: u64) -> Result<Vec<Transaction>> {
+        let mut removed_txs = Vec::new();
+        let max_seq = self.next_tx_seq();
         let mut db_tx = self.kvdb.transaction();
-        db_tx.delete(COL_TX, &seq.to_be_bytes());
-        db_tx.delete(COL_TX_COMPLETED, &seq.to_be_bytes());
-        // We only remove tx when the blockchain reorgs.
-        // If a tx is reverted, all data after it will also be reverted, so we call remove
-        // all indices after it.
-        let mut tx_seq_list = self.get_tx_seq_list_by_data_root(&tx.data_merkle_root)?;
-        tx_seq_list.retain(|e| *e < seq);
-        if tx_seq_list.is_empty() {
-            db_tx.delete(COL_TX_DATA_ROOT_INDEX, tx.data_merkle_root.as_bytes());
-        } else {
-            db_tx.put(
-                COL_TX_DATA_ROOT_INDEX,
-                tx.data_merkle_root.as_bytes(),
-                &tx_seq_list.as_ssz_bytes(),
-            );
+        let mut modified_merkle_root_map = HashMap::new();
+        for seq in min_seq..max_seq {
+            let Some(tx) = self.get_tx_by_seq_number(seq)? else {
+                error!(?seq, ?max_seq, "Transaction missing before the end");
+                break;
+            };
+            db_tx.delete(COL_TX, &seq.to_be_bytes());
+            db_tx.delete(COL_TX_COMPLETED, &seq.to_be_bytes());
+            // We only remove tx when the blockchain reorgs.
+            // If a tx is reverted, all data after it will also be reverted, so we call remove
+            // all indices after it.
+            let tx_seq_list = match modified_merkle_root_map.entry(tx.data_merkle_root) {
+                Entry::Occupied(e) => e.into_mut(),
+                Entry::Vacant(e) => {
+                    e.insert(self.get_tx_seq_list_by_data_root(&tx.data_merkle_root)?)
+                }
+            };
+            tx_seq_list.retain(|e| *e < seq);
+            removed_txs.push(tx);
         }
+        for (merkle_root, tx_seq_list) in modified_merkle_root_map {
+            if tx_seq_list.is_empty() {
+                db_tx.delete(COL_TX_DATA_ROOT_INDEX, merkle_root.as_bytes());
+            } else {
+                db_tx.put(
+                    COL_TX_DATA_ROOT_INDEX,
+                    merkle_root.as_bytes(),
+                    &tx_seq_list.as_ssz_bytes(),
+                );
+            }
+        }
+        db_tx.put(COL_TX, NEXT_TX_KEY.as_bytes(), &min_seq.to_be_bytes());
+        self.next_tx_seq.store(min_seq, Ordering::SeqCst);
         self.kvdb.write(db_tx)?;
-        Ok(Some(tx))
+        Ok(removed_txs)
     }
 
     pub fn get_tx_seq_list_by_data_root(&self, data_root: &DataRoot) -> Result<Vec<u64>> {
@@ -119,14 +154,8 @@ impl TransactionStore {
         Ok(self.kvdb.has_key(COL_TX_COMPLETED, &tx_seq.to_be_bytes())?)
     }
 
-    pub fn next_tx_seq(&self) -> Result<u64> {
-        // TODO: `kvdb` and `kvdb-rocksdb` does not support `seek_to_last` yet.
-        // We'll need to fork it or use another wrapper for a better performance in this.
-        self.kvdb
-            .iter(COL_TX)
-            .last()
-            .map(|(k, _)| decode_tx_seq(k.as_ref()).map(|seq| seq + 1))
-            .unwrap_or(Ok(0))
+    pub fn next_tx_seq(&self) -> u64 {
+        self.next_tx_seq.load(Ordering::SeqCst)
     }
 
     #[instrument(skip(self))]

@@ -48,7 +48,7 @@ pub trait LogStoreRead: LogStoreChunkRead {
 
     fn check_tx_completed(&self, tx_seq: u64) -> Result<bool>;
 
-    fn next_tx_seq(&self) -> Result<u64>;
+    fn next_tx_seq(&self) -> u64;
 
     fn get_sync_progress(&self) -> Result<Option<(u64, H256)>>;
 

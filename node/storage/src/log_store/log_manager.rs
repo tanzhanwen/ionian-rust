@@ -147,14 +147,14 @@ impl LogStoreWrite for LogManager {
     ///
     fn put_tx(&mut self, tx: Transaction) -> Result<()> {
         debug!("put_tx: tx={:?}", tx);
-        let expected_seq = self.next_tx_seq()?;
+        let expected_seq = self.next_tx_seq();
         if tx.seq != expected_seq {
             if tx.seq + 1 == expected_seq && !self.check_tx_completed(tx.seq)? {
                 // special case for rerun the last tx during recovery.
                 debug!("recovery with tx_seq={}", tx.seq);
             } else {
                 // This is not supposed to happen since we have checked the tx seq in log entry sync.
-                error!("tx unmatch, expected={} get={:?}", self.next_tx_seq()?, tx);
+                error!("tx unmatch, expected={} get={:?}", expected_seq, tx);
                 bail!("unexpected tx!");
             }
         }
@@ -253,19 +253,8 @@ impl LogStoreWrite for LogManager {
         let start_index = self.last_chunk_start_index() * PORA_CHUNK_SIZE as u64
             + self.last_chunk_merkle.leaves() as u64;
         self.flow_store.truncate(start_index)?;
-        let mut transactions = Vec::new();
         let start = if tx_seq != u64::MAX { tx_seq + 1 } else { 0 };
-        for seq in start..self.next_tx_seq()? {
-            match self.tx_store.remove_tx_by_seq_number(seq)? {
-                None => {
-                    // All transactions are supposed to exist before we revert them.
-                    error!("reverted transactions missing after tx_seq={}", seq);
-                    break;
-                }
-                Some(tx) => transactions.push(tx),
-            }
-        }
-        Ok(transactions)
+        self.tx_store.remove_tx_after(start)
     }
 }
 
@@ -399,7 +388,7 @@ impl LogStoreRead for LogManager {
         self.tx_store.get_progress()
     }
 
-    fn next_tx_seq(&self) -> Result<u64> {
+    fn next_tx_seq(&self) -> u64 {
         self.tx_store.next_tx_seq()
     }
 
@@ -439,7 +428,7 @@ impl LogManager {
     }
 
     fn new(db: Arc<dyn IonianKeyValueDB>, config: LogConfig) -> Result<Self> {
-        let tx_store = TransactionStore::new(db.clone());
+        let tx_store = TransactionStore::new(db.clone())?;
         let flow_store = FlowStore::new(db.clone(), config.flow);
         let mut initial_data = flow_store.get_chunk_root_list()?;
         // If the last tx `put_tx` does not complete, we will revert it in `initial_data.subtree_list`
@@ -447,7 +436,7 @@ impl LogManager {
         // and inserted later.
         let mut extra_leaves = Vec::new();
 
-        let next_tx_seq = tx_store.next_tx_seq()?;
+        let next_tx_seq = tx_store.next_tx_seq();
         let mut start_tx_seq = if next_tx_seq > 0 {
             Some(next_tx_seq - 1)
         } else {
@@ -995,10 +984,19 @@ pub fn data_to_merkle_leaves(leaf_data: &[u8]) -> Result<Vec<H256>> {
     if leaf_data.len() % ENTRY_SIZE != 0 {
         bail!("merkle_tree: unmatch data size");
     }
-    Ok(leaf_data
-        .par_chunks_exact(ENTRY_SIZE)
-        .map(Sha3Algorithm::leaf)
-        .collect())
+    // If the data size is small, using `rayon` would introduce more overhead.
+    let r = if leaf_data.len() >= ENTRY_SIZE * 8 {
+        leaf_data
+            .par_chunks_exact(ENTRY_SIZE)
+            .map(Sha3Algorithm::leaf)
+            .collect()
+    } else {
+        leaf_data
+            .chunks_exact(ENTRY_SIZE)
+            .map(Sha3Algorithm::leaf)
+            .collect()
+    };
+    Ok(r)
 }
 
 pub fn bytes_to_entries(size_bytes: u64) -> u64 {
