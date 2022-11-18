@@ -1,5 +1,5 @@
 use rand::random;
-use shared_types::{ChunkArray, Transaction, CHUNK_SIZE};
+use shared_types::{compute_padded_chunk_size, ChunkArray, Transaction, CHUNK_SIZE};
 use std::{cmp, sync::Arc};
 use storage::{
     log_store::{
@@ -89,7 +89,8 @@ fn generate_data(
     }
     peer_store.finalize_tx(tx.seq).unwrap();
 
-    (tx, data, start_offset + chunk_count as u64)
+    let (padded_chunk_count, _) = compute_padded_chunk_size(data_size);
+    (tx, data, start_offset + padded_chunk_count as u64)
 }
 
 #[cfg(test)]
