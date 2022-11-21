@@ -9,6 +9,7 @@ use network::{
 };
 use router::RouterService;
 use rpc::RPCConfig;
+use shared_types::DataRoot;
 use std::sync::Arc;
 use storage::log_store::log_manager::LogConfig;
 use storage::log_store::Store;
@@ -47,6 +48,7 @@ struct MinerComponents {
 
 struct LogSyncComponents {
     send: broadcast::Sender<LogSyncEvent>,
+    tx_root_send: broadcast::Sender<DataRoot>,
 }
 
 /// Builds a `Client` instance.
@@ -218,9 +220,10 @@ impl ClientBuilder {
         let async_store = require!("rpc", self, async_store).clone();
         let network_send = require!("rpc", self, network).send.clone();
         let mine_send = self.miner.as_ref().map(|x| x.send.clone());
+        let tx_root_recv = require!("sync", self, log_sync).tx_root_send.subscribe();
 
         let (chunk_pool, chunk_pool_handler) =
-            chunk_pool::unbounded(chunk_pool_config, async_store.clone(), network_send.clone());
+            chunk_pool::unbounded(chunk_pool_config, async_store.clone(), network_send.clone(), tx_root_recv);
 
         let ctx = rpc::Context {
             config: rpc_config,
@@ -239,6 +242,7 @@ impl ClientBuilder {
 
         executor.spawn(rpc_handle, "rpc");
         executor.spawn(chunk_pool_handler.run(), "chunk_pool_handler");
+        executor.spawn(chunk_pool.monitor_log_entry(), "chunk_pool_log_monitor");
 
         Ok(self)
     }
@@ -246,10 +250,11 @@ impl ClientBuilder {
     pub async fn with_log_sync(mut self, config: LogSyncConfig) -> Result<Self, String> {
         let executor = require!("log_sync", self, runtime_context).clone().executor;
         let store = require!("log_sync", self, store).clone();
-        let send = LogSyncManager::spawn(config, executor, store)
+        let (send, tx_root_send) = LogSyncManager::spawn(config, executor, store)
             .await
             .map_err(|e| e.to_string())?;
-        self.log_sync = Some(LogSyncComponents { send });
+        
+        self.log_sync = Some(LogSyncComponents { send, tx_root_send });
         Ok(self)
     }
 

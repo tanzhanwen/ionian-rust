@@ -9,6 +9,7 @@ use shared_types::{
 };
 use storage_async::Store;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::broadcast;
 
 struct Inner {
     config: Config,
@@ -93,14 +94,16 @@ pub struct MemoryChunkPool {
     inner: Mutex<Inner>,
     log_store: Store,
     sender: UnboundedSender<FileID>,
+    log_entry_receiver: broadcast::Receiver<DataRoot>,
 }
 
 impl MemoryChunkPool {
-    pub(crate) fn new(config: Config, log_store: Store, sender: UnboundedSender<FileID>) -> Self {
+    pub(crate) fn new(config: Config, log_store: Store, sender: UnboundedSender<FileID>, log_entry_receiver: broadcast::Receiver<DataRoot>) -> Self {
         MemoryChunkPool {
             inner: Mutex::new(Inner::new(config)),
             log_store,
             sender,
+            log_entry_receiver,
         }
     }
 
@@ -244,6 +247,25 @@ impl MemoryChunkPool {
         }
 
         Ok(true)
+    }
+
+    async fn monitor_log_entry_task_loop(&mut self) -> Result<bool> {
+        let root = self.log_entry_receiver.recv().await?;
+        
+        let tx = match self.log_store.get_tx_by_data_root(&root).await? {
+            Some(tx) => tx,
+            None => bail!("Transaction reverted, please upload again"),
+        };
+
+        self.update_file_info(&tx).await
+    }
+
+    pub async fn monitor_log_entry(&mut self) {
+        loop {
+            if let Err(e) = self.monitor_log_entry_task_loop().await {
+                warn!("Failed to handle log entry from log manager, {:?}", e);
+            }
+        }
     }
 
     pub(crate) async fn remove_cached_file(&self, root: &DataRoot) -> Option<MemoryCachedFile> {

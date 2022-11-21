@@ -5,7 +5,7 @@ use anyhow::{bail, Result};
 use ethers::prelude::Middleware;
 use futures::FutureExt;
 use jsonrpsee::tracing::{debug, error, trace, warn};
-use shared_types::{ChunkArray, Transaction};
+use shared_types::{ChunkArray, Transaction, DataRoot};
 use std::fmt::Debug;
 use std::future::Future;
 use std::sync::Arc;
@@ -37,6 +37,7 @@ pub struct LogSyncManager {
 
     /// To broadcast events to handle in advance.
     event_send: broadcast::Sender<LogSyncEvent>,
+    tx_root_send: broadcast::Sender<DataRoot>,
 }
 
 impl LogSyncManager {
@@ -44,7 +45,7 @@ impl LogSyncManager {
         config: LogSyncConfig,
         executor: TaskExecutor,
         store: Arc<RwLock<dyn Store>>,
-    ) -> Result<broadcast::Sender<LogSyncEvent>> {
+    ) -> Result<broadcast::Sender<LogSyncEvent>, broadcast::Sender<DataRoot>> {
         let next_tx_seq = store.read().await.next_tx_seq();
 
         let executor_clone = executor.clone();
@@ -52,6 +53,9 @@ impl LogSyncManager {
 
         let (event_send, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let event_send_cloned = event_send.clone();
+
+        let (tx_root_send, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+        let tx_root_send_cloned = tx_root_send.clone();
 
         // Spawn the task to sync log entries from the blockchain.
         executor.spawn(
@@ -80,6 +84,7 @@ impl LogSyncManager {
                         store,
                         data_cache,
                         event_send,
+                        tx_root_send,
                     };
 
                     // Load previous progress from db and check if chain reorg happens after restart.
@@ -144,7 +149,7 @@ impl LogSyncManager {
             .map(|_| ()),
             "log_sync",
         );
-        Ok(event_send_cloned)
+        Ok((event_send_cloned, tx_root_send_cloned))
     }
 
     async fn put_tx(&mut self, tx: Transaction) -> bool {
@@ -231,9 +236,14 @@ impl LogSyncManager {
                     }
                 }
                 LogFetchProgress::Transaction(tx) => {
+                    let data_root = tx.data_merkle_root;
                     if !self.put_tx(tx).await {
                         // Unexpected error.
                         error!("log sync write error");
+                        break;
+                    }
+                    if let Err(e) = self.tx_root_send.send(data_root) {
+                        error!("log sync broadcast file error");
                         break;
                     }
                 }

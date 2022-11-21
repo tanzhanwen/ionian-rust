@@ -6,6 +6,7 @@ mod mem_pool;
 
 pub use handler::ChunkPoolHandler;
 pub use mem_pool::{FileID, MemoryChunkPool, SegmentInfo};
+use shared_types::DataRoot;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,10 +29,11 @@ pub fn unbounded(
     config: Config,
     log_store: storage_async::Store,
     network_send: tokio::sync::mpsc::UnboundedSender<network::NetworkMessage>,
+    tx_root_recv: tokio::sync::broadcast::Receiver<DataRoot>,
 ) -> (Arc<MemoryChunkPool>, ChunkPoolHandler) {
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
 
-    let mem_pool = Arc::new(MemoryChunkPool::new(config, log_store.clone(), sender));
+    let mem_pool = Arc::new(MemoryChunkPool::new(config, log_store.clone(), sender, tx_root_recv));
     let handler = ChunkPoolHandler::new(receiver, mem_pool.clone(), log_store, network_send);
 
     (mem_pool, handler)
