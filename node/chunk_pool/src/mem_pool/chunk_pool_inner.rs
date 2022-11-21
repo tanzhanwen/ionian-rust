@@ -4,10 +4,13 @@ use super::FileID;
 use crate::Config;
 use anyhow::{bail, Result};
 use async_lock::Mutex;
+use log_entry_sync::LogSyncEvent;
 use shared_types::{
     bytes_to_chunks, compute_segment_size, ChunkArray, DataRoot, Transaction, CHUNK_SIZE,
 };
+use std::sync::Arc;
 use storage_async::Store;
+use tokio::sync::broadcast::{error::RecvError, Receiver};
 use tokio::sync::mpsc::UnboundedSender;
 
 struct Inner {
@@ -244,6 +247,33 @@ impl MemoryChunkPool {
         }
 
         Ok(true)
+    }
+
+    pub async fn monitor_log_entry(chunk_pool: Arc<Self>, mut receiver: Receiver<LogSyncEvent>) {
+        info!("Start to monitor log entry");
+
+        loop {
+            match receiver.recv().await {
+                Ok(LogSyncEvent::ReorgDetected { .. }) => {}
+                Ok(LogSyncEvent::Reverted { .. }) => {}
+                Ok(LogSyncEvent::TxSynced { tx }) => {
+                    if let Err(_e) = chunk_pool.update_file_info(&tx).await {
+                        error!(
+                            "Failed to update file info. tx seq={}, tx_root={}",
+                            tx.seq, tx.data_merkle_root
+                        );
+                    }
+                }
+                Err(RecvError::Closed) => {
+                    // program terminated
+                    info!("Completed to monitor log entry");
+                    return;
+                }
+                Err(RecvError::Lagged(lagged)) => {
+                    error!(%lagged, "Lagged messages: (Lagged)");
+                }
+            }
+        }
     }
 
     pub(crate) async fn remove_cached_file(&self, root: &DataRoot) -> Option<MemoryCachedFile> {

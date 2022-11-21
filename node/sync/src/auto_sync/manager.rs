@@ -225,6 +225,7 @@ impl Manager {
                     // requires to re-sync files since transaction and files removed in storage
                     self.set_reverted(tx_seq);
                 }
+                Ok(LogSyncEvent::TxSynced { .. }) => {} //No need to handle synced tx in reorg
                 Err(RecvError::Closed) => {
                     // program terminated
                     info!("Completed to monitor reorg");

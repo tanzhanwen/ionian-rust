@@ -25,6 +25,8 @@ pub enum LogSyncEvent {
     ReorgDetected { tx_seq: u64 },
     /// Transaction reverted in storage.
     Reverted { tx_seq: u64 },
+    /// Synced a transaction from blockchain
+    TxSynced { tx: Transaction },
 }
 
 pub struct LogSyncManager {
@@ -231,9 +233,13 @@ impl LogSyncManager {
                     }
                 }
                 LogFetchProgress::Transaction(tx) => {
-                    if !self.put_tx(tx).await {
+                    if !self.put_tx(tx.clone()).await {
                         // Unexpected error.
                         error!("log sync write error");
+                        break;
+                    }
+                    if let Err(e) = self.event_send.send(LogSyncEvent::TxSynced { tx }) {
+                        error!("log sync broadcast error, error={:?}", e);
                         break;
                     }
                 }
